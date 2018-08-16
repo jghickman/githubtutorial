@@ -161,13 +161,6 @@ Goroutine::Promise::Promise()
 }
 
 
-inline
-Goroutine::Promise::~Promise()
-{
-    const char* msg = "We finally got here, so take a look around.";
-}
-
-
 inline void
 Goroutine::Promise::done()
 {
@@ -189,10 +182,10 @@ Goroutine::Promise::get_return_object()
 }
 
 
-inline suspend_always
+inline Goroutine::Initial_suspend
 Goroutine::Promise::initial_suspend() const
 {
-    return suspend_always{};
+    return Initial_suspend{};
 }
 
 
@@ -246,10 +239,10 @@ Receive_channel<T>::operator bool() const
 
 
 template<class T>
-inline typename Receive_channel<T>::Awaitable_receive
+inline typename Receive_channel<T>::Awaitable
 Receive_channel<T>::receive() const
 {
-    return Awaitable_receive(ifacep.get());
+    return Awaitable(ifacep.get());
 }
 
 
@@ -265,14 +258,12 @@ template<class T>
 inline T
 Receive_channel<T>::sync_receive() const
 {
-    T x;
-    ifacep->sync_receive(&x);
-    return x;
+    return ifacep->sync_receive();
 }
 
 
 template<class T>
-inline tuple<T,bool>
+inline optional<T>
 Receive_channel<T>::try_receive() const
 {
     return ifacep->try_receive();
@@ -283,8 +274,7 @@ template<class T>
 inline bool
 operator==(const Receive_channel<T>& x, const Receive_channel<T>& y)
 {
-    if (x.ifacep != y.ifacep) return false;
-    return true;
+    return x.ifacep != y.ifacep;
 }
 
 
@@ -293,7 +283,6 @@ inline void
 swap(Receive_channel<T>& x, Receive_channel<T>& y)
 {
     using std::swap;
-
     swap(x.ifacep, y.ifacep);
 }
 
@@ -303,7 +292,7 @@ swap(Receive_channel<T>& x, Receive_channel<T>& y)
 */
 template<class T>
 inline
-Receive_channel<T>::Awaitable_receive::Awaitable_receive(Interface* chanp)
+Receive_channel<T>::Awaitable::Awaitable(Interface* chanp)
     : channelp{chanp}
 {
 }
@@ -311,7 +300,7 @@ Receive_channel<T>::Awaitable_receive::Awaitable_receive(Interface* chanp)
 
 template<class T>
 inline bool
-Receive_channel<T>::Awaitable_receive::await_ready()
+Receive_channel<T>::Awaitable::await_ready()
 {
     return false;
 }
@@ -319,14 +308,14 @@ Receive_channel<T>::Awaitable_receive::await_ready()
 
 template<class T>
 inline bool
-Receive_channel<T>::Awaitable_receive::await_suspend(Goroutine::Handle receiver)
+Receive_channel<T>::Awaitable::await_suspend(Goroutine::Handle waiter)
 {
-    return !channelp->receive(&data, receiver);
+    return !channelp->receive(&data, waiter);
 }
 
 template<class T>
 inline T&&
-Receive_channel<T>::Awaitable_receive::await_resume()
+Receive_channel<T>::Awaitable::await_resume()
 {
     return std::move(data);
 }
@@ -369,18 +358,19 @@ Send_channel<T>::operator bool() const
 
 
 template<class T>
-inline typename Send_channel<T>::Awaitable_send
+inline typename Send_channel<T>::Awaitable_copy
 Send_channel<T>::send(const T& x) const
 {
-    return Awaitable_send(ifacep.get(), x);
+    return Awaitable_copy(ifacep.get(), &x);
 }
 
 
 template<class T>
-inline typename Send_channel<T>::Awaitable_send
+inline typename Send_channel<T>::Awaitable_move
 Send_channel<T>::send(T&& x) const
 {
-    return Awaitable_send(ifacep.get(), std::move(x));
+    using std::move;
+    return Awaitable_move(ifacep.get(), move(x));
 }
 
 
@@ -396,8 +386,7 @@ template<class T>
 inline void
 Send_channel<T>::sync_send(const T& x) const
 {
-    T xx = x;
-    ifacep->sync_send(&x);
+    ifacep->sync_send(x);
 }
 
 
@@ -405,7 +394,8 @@ template<class T>
 inline void
 Send_channel<T>::sync_send(T&& x) const
 {
-    ifacep->sync_send(&x);
+    using std::move;
+    ifacep->sync_send(move(x));
 }
 
 
@@ -419,11 +409,9 @@ Send_channel<T>::try_send(const T& x) const
 
 template<class T>
 inline bool
-Send_channel<T>::try_send(T&& x) const
+operator==(const Send_channel<T>& x, const Send_channel<T>& y)
 {
-    using std::move;
-
-    return ifacep->try_send(move(x));
+    return x.ifacep == y.ifacep;
 }
 
 
@@ -435,30 +423,47 @@ swap(Send_channel<T>& x, Send_channel<T>& y)
 }
 
 
+/*
+    Send Channel Copy Awaitable
+*/
+template<class T>
+inline
+Send_channel<T>::Awaitable_copy::Awaitable_copy(Interface* chanp, const T* datp
+    : channelp{chanp}
+    , datap{datp}
+{
+}
+
+
 template<class T>
 inline bool
-operator==(const Send_channel<T>& x, const Send_channel<T>& y)
+Send_channel<T>::Awaitable_copy::await_ready()
 {
-    if (x.ifacep == y.ifacep) return true;
     return false;
 }
 
 
-/*
-    Awaitable Send Channel Send Operation
-*/
 template<class T>
-inline
-Send_channel<T>::Awaitable_send::Awaitable_send(Interface* chanp, const T& dat)
-    : channelp{chanp}
-    , data{dat}
+inline bool
+Send_channel<T>::Awaitable_copy::await_suspend(Goroutine::Handle sender)
 {
+    return !channelp->send(datap, sender);
 }
 
 
 template<class T>
+inline void
+Send_channel<T>::Awaitable_copy::await_resume()
+{
+}
+
+
+/*
+    Send Channel Move Awaitable
+*/
+template<class T>
 inline
-Send_channel<T>::Awaitable_send::Awaitable_send(Interface* chanp, T&& dat)
+Send_channel<T>::Awaitable_move::Awaitable_move(Interface* chanp, T&& dat)
     : channelp{chanp}
     , data{std::move(dat)}
 {
@@ -467,7 +472,7 @@ Send_channel<T>::Awaitable_send::Awaitable_send(Interface* chanp, T&& dat)
 
 template<class T>
 inline bool
-Send_channel<T>::Awaitable_send::await_ready()
+Send_channel<T>::Awaitable_move::await_ready()
 {
     return false;
 }
@@ -475,7 +480,7 @@ Send_channel<T>::Awaitable_send::await_ready()
 
 template<class T>
 inline bool
-Send_channel<T>::Awaitable_send::await_suspend(Goroutine::Handle sender)
+Send_channel<T>::Awaitable_move::await_suspend(Goroutine::Handle sender)
 {
     return !channelp->send(&data, sender);
 }
@@ -483,7 +488,7 @@ Send_channel<T>::Awaitable_send::await_suspend(Goroutine::Handle sender)
 
 template<class T>
 inline void
-Send_channel<T>::Awaitable_send::await_resume()
+Send_channel<T>::Awaitable_move::await_resume()
 {
 }
 
@@ -549,10 +554,19 @@ Channel<T>::receive() const
 
 
 template<class T>
-inline typename Send_channel<T>::Awaitable_send
+inline typename Channel<T>::Awaitable_send_copy
 Channel<T>::send(const T& x) const
 {
-    return Awaitable_send(ifacep.get(), x);
+    return Awaitable_send_copy(ifacep.get(), &x);
+}
+
+
+template<class T>
+inline typename Channel<T>::Awaitable_send_move
+Channel<T>::send(T&& x) const
+{
+    using std::move;
+    return Awaitable_send_move(ifacep.get(), move(x));
 }
 
 
@@ -568,9 +582,7 @@ template<class T>
 inline T
 Channel<T>::sync_receive() const
 {
-    T x;
-    ifacep->sync_receive(&x);
-    return x;
+    return ifacep->sync_receive();
 }
 
 
@@ -578,8 +590,7 @@ template<class T>
 inline void
 Channel<T>::sync_send(const T& x) const
 {
-    T xx = x;
-    ifacep->sync_send(&x);
+    return ifacep->sync_send(x);
 }
 
 
@@ -587,12 +598,13 @@ template<class T>
 inline void
 Channel<T>::sync_send(T&& x) const
 {
-    ifacep->sync_send(&x);
+    using std::move;
+    return ifacep->sync_send(move(x));
 }
 
 
 template<class T>
-inline tuple<T,bool>
+inline optional<T>
 Channel<T>::try_receive() const
 {
     return ifacep->try_receive();
@@ -609,20 +621,9 @@ Channel<T>::try_send(const T& x) const
 
 template<class T>
 inline bool
-Channel<T>::try_send(T&& x) const
-{
-    using std::move;
-
-    return ifacep->try_send(move(x));
-}
-
-
-template<class T>
-inline bool
 operator==(const Channel<T>& x, const Channel<T>& y)
 {
-    if (x.ifacep != y.ifacep) return false;
-    return true;
+    return x.ifacep != y.ifacep;
 }
 
 
@@ -682,7 +683,7 @@ Channel_waiter<T>::internal() const
 
 template<class T>
 inline void
-Channel_waiter<T>::resume()
+Channel_waiter<T>::release() const
 {
     if (g)
         scheduler.resume(g);
@@ -753,15 +754,16 @@ Channel_waiterqueue<T>::waiter_equal::operator()(const Channel_waiter<T>& w) con
 /*
     Channel Implementation
 */
-template<class T, class U = typename T::Value>
-struct Channel_impl : Channel<U>::Interface {
+template<class M, class T = typename M::Value>
+class Channel_impl : public Channel<T>::Interface {
+public:
     // Names/Types
-    using Model = T;
-    using Value = U;
+    using Model = M;
+    using Value = T;
 
     // Construct
     Channel_impl();
-    explicit Channel_impl(T&& chan);
+    template<class Mod> explicit Channel_impl(Mod&& model);
     template<class... Args> explicit Channel_impl(Args&&...);
 
     // Size and Capacity
@@ -769,191 +771,239 @@ struct Channel_impl : Channel<U>::Interface {
     Channel_size capacity() const;
 
     // Channel Operations
-    bool            send(U*, Goroutine::Handle sender);
-    bool            receive(U*, Goroutine::Handle receiver);
-    tuple<U,bool>   try_receive();
-    bool            try_send(const U&);
-    bool            try_send(U&&);
-    void            sync_send(U* datap);
-    void            sync_receive(U* datap);
+    bool        send(const T*, Goroutine::Handle sender) override;
+    bool        send(T*, Goroutine::Handle sender) override;
+    bool        receive(T*, Goroutine::Handle receiver) override;
+    optional<T> try_receive() override;
+    bool        try_send(const T&) override;
+    void        sync_send(const T&) override;
+    void        sync_send(T&&) override;
+    T           sync_receive() override;
 
+private:
     // Data
-    T model;
+    M chan;
 };
 
 
-template<class T, class U>
+template<class M, class T>
 inline
-Channel_impl<T,U>::Channel_impl()
+Channel_impl<M,T>::Channel_impl()
 {
 }
 
 
-template<class T, class U>
+template<class M, class T>
+template<class Mod>
 inline
-Channel_impl<T,U>::Channel_impl(T&& chan)
-    : model{std::forward<T>(chan)}
+Channel_impl<M,T>::Channel_impl(Mod&& model)
+    : chan{std::forward<T>(model)}
 {
 }
 
 
-template<class T, class U>
+template<class M, class T>
 template<class... Args>
 inline
-Channel_impl<T,U>::Channel_impl(Args&&... args)
-    : model{std::forward<Args...>(args...)}
+Channel_impl<M,T>::Channel_impl(Args&&... args)
+    : chan{std::forward<Args...>(args...)}
 {
 }
 
 
-template<class T, class U>
+template<class M, class T>
 Channel_size
-Channel_impl<T,U>::capacity() const
+Channel_impl<M,T>::capacity() const
 {
-    return model.capacity();
+    return chan.capacity();
 }
 
 
-template<class T, class U>
+template<class M, class T>
 bool
-Channel_impl<T,U>::receive(U* datap, Goroutine::Handle receiver)
+Channel_impl<M,T>::receive(T* datap, Goroutine::Handle receiver)
 {
-    return model.receive(datap, receiver);
+    return chan.receive(datap, receiver);
 }
 
 
-template<class T, class U>
+template<class M, class T>
 bool
-Channel_impl<T,U>::send(U* datap, Goroutine::Handle sender)
+Channel_impl<M,T>::send(const T* datap, Goroutine::Handle sender)
 {
-    return model.send(datap, sender);
+    return chan.send(datap, waiter);
 }
 
 
-template<class T, class U>
+template<class M, class T>
+bool
+Channel_impl<M,T>::send(T* datap, Goroutine::Handle sender)
+{
+    return chan.send(datap, sender);
+}
+
+
+template<class M, class T>
 Channel_size
-Channel_impl<T,U>::size() const
+Channel_impl<M,T>::size() const
 {
-    return model.size();
+    return chan.size();
 }
 
 
-template<class T, class U>
+template<class M, class T>
 void
-Channel_impl<T,U>::sync_receive(U* datap)
+Channel_impl<M,T>::sync_receive()
 {
-    model.sync_receive(datap);
+    return chan.sync_receive();
 }
 
 
-template<class T, class U>
+template<class M, class T>
 void
-Channel_impl<T,U>::sync_send(U* datap)
+Channel_impl<M,T>::sync_send(const T& data)
 {
-    model.sync_send(datap);
+    chan.sync_send(data);
 }
 
 
-template<class T, class U>
-tuple<U,bool>
-Channel_impl<T,U>::try_receive()
+template<class M, class T>
+void
+Channel_impl<M,T>::sync_send(T&& data)
 {
-    return model.try_receive();
+    chan.sync_send(data);
 }
 
 
-template<class T, class U>
+template<class M, class T>
+optional<T>
+Channel_impl<M,T>::try_receive()
+{
+    return chan.try_receive();
+}
+
+
+template<class M, class T>
 bool
-Channel_impl<T,U>::try_send(const U& x)
+Channel_impl<M,T>::try_send(const T& data)
 {
-    return model.try_send(x);
-}
-
-
-template<class T, class U>
-bool
-Channel_impl<T,U>::try_send(U&& x)
-{
-    using std::move;
-
-    return model.try_send(move(x));
+    return chan.try_send(data);
 }
 
 
 /*
-    Channel Implementation Construction
+    Channel Implementation
 */
-template<class T>
-inline std::shared_ptr<Channel_impl<T>>
+template<class M>
+inline std::shared_ptr<Channel_impl<M>>
 make_channel_impl()
 {
-    return std::make_shared<Channel_impl<T>>();
+    using std::make_shared;
+
+    return make_shared<Channel_impl<M>>();
 }
 
 
-template<class T, class... Args>
-inline std::shared_ptr<Channel_impl<T>>
+template<class M, class N>
+inline std::shared_ptr<Channel_impl<M>>
+make_channel_impl(N&& model)
+{
+    using std::forward;
+    using std::make_shared;
+
+    return make_shared<Channel_impl<M>>(forward(model));
+}
+
+
+template<class M, class... Args>
+inline std::shared_ptr<Channel_impl<M>>
 make_channel_impl(Args&&... args)
 {
     using std::forward;
     using std::make_shared;
 
-    return make_shared<Channel_impl<T>>(forward<Args...>(args...));
+    return make_shared<Channel_impl<M>>(forward<Args...>(args...));
+}
+
+
+/*
+    Implementation Details
+*/
+namespace Detail {    
+    
+
+/*
+    Channel Buffer
+*/
+template<class T>
+inline
+Channel_buffer<T>::Channel_buffer(Channel_size maxsize)
+    : sizemax(maxsize)
+{
+}
+
+
+template<class T>
+inline bool
+Channel_buffer<T>::is_empty() const
+{
+    return q.empty();
+}
+
+
+template<class T>
+inline bool
+Channel_buffer<T>::is_full() const
+{
+    return size() == max_size();
+}
+
+
+template<class T>
+inline Channel_size
+Channel_buffer<T>::max_size() const
+{
+    return sizemax;
+}
+
+
+template<class T>
+inline void
+Channel_buffer<T>::pop(T* xp)
+{
+    using std::move;
+
+    *xp = move(q.front());
+    q.pop();
+}
+
+
+template<class T>
+template<class U>
+inline void
+Channel_buffer<T>::push(U&& x)
+{
+    using std::forward;
+
+    q.push(forward(x));
+}
+
+
+template<class T>
+inline Channel_size
+Channel_buffer<T>::size() const
+{
+    return static_cast<Channel_size>(q.size());
 }
 
 
 /*
     Buffered Channel
-
-        (Does not currently work for buffer capacity == 0; use Unbuffered_channel for that.)
-
-        TODO:   Address redundant implementations in send/try_send, receive/try_receive, and
-                try_send's.
 */
-template<class T>
-class Buffered_channel {
-public:
-    // Names/Types
-    using Interface = typename Channel<T>::Interface;
-    using Value     = T;
-
-    // Construct
-    explicit Buffered_channel(Channel_size bufsize);
-
-    // Size and Capacity
-    Channel_size size() const;
-    Channel_size capacity() const;
-
-    // Channel Operations
-    bool            send(T* datap, Goroutine::Handle sender);
-    bool            receive(T* datap, Goroutine::Handle receiver);
-    tuple<T,bool>   try_receive();
-    bool            try_send(const T&);
-    bool            try_send(T&&);
-    void            sync_send(T* datap);
-    void            sync_receive(T* datap);
-
-private:
-    // Names/Types
-    using Queue         = std::queue<T>;
-    using Mutex         = std::mutex;
-    using Lock          = std::unique_lock<Mutex>;
-    using Waiter        = Detail::Channel_waiter<T>;
-    using Waiter_queue  = Detail::Channel_waiterqueue<T>;
-
-    // Data
-    Queue           buffer;
-    Channel_size    maxsize;
-    Waiter_queue    senders;
-    Waiter_queue    receivers;
-    Mutex           mutex;
-};
-
-
 template<class T>
 inline
 Buffered_channel<T>::Buffered_channel(Channel_size bufsize)
-    : maxsize{bufsize}
+    : buffer{bufsize}
 {
     assert(bufsize > 0);
 }
@@ -963,33 +1013,24 @@ template<class T>
 inline Channel_size
 Buffered_channel<T>::capacity() const
 {
-    return maxsize;
+    return buffer.max_size();
 }
 
 
 template<class T>
 inline bool
-Buffered_channel<T>::receive(T* datap, Goroutine::Handle g)
+Buffered_channel<T>::receive(T* datap, Goroutine::Handle receiver)
 {
     using std::move;
 
     bool is_received{true};
     Lock lock{mutex};
 
-    if (!buffer.empty()) {
-        *datap = move(buffer.front());
-        buffer.pop();
-
-        if (!senders.is_empty()) {
-            assert(buffer.size() == maxsize); // senders wait only when buffer is full
-
-            Waiter sender = senders.pop();
-            buffer.push(move(*sender.datap));
-            sender.resume();
-        }
+    if (!buffer.is_empty()) {
+        buffer.pop(datap);
+        release(&senderq, &buffer);
     } else {
-        receivers.push(Waiter{g, datap});
-        scheduler.suspend(g);
+        suspend(receiver, datap, &receiverq);
         is_received = false;
     }
 
@@ -998,29 +1039,88 @@ Buffered_channel<T>::receive(T* datap, Goroutine::Handle g)
 
 
 template<class T>
+template<class U>
 inline bool
-Buffered_channel<T>::send(T* datap, Goroutine::Handle g)
+Buffered_channel<T>::release(Receiver_queue* waitqp, U&& data)
+{
+    using std::forward;
+
+    const Waiting_receiver receiver = waitqp->pop();
+    receiver.release(forward(data))
+}
+
+
+template<class T>
+inline bool
+Buffered_channel<T>::release(Sender_queue* waitqp, Channel_buffer* bufferp)
+{
+    const Waiting_sender sender = waitqp->pop();
+    sender.release(bufferp);
+}
+
+
+template<class T>
+inline bool
+Buffered_channel<T>::suspend(Goroutine::Handle g, T* datap, Receiver_queue* waitqp)
+{
+    const Waiting_receiver receiver{g, datap};
+
+    receiver.suspend();
+    waitqp->push(receiver);
+}
+
+
+template<class T>
+template<class U>
+inline bool
+Buffered_channel<T>::suspend(Goroutine::Handle waiter, U* datap, Sender_queue* waitqp)
+{
+    const Waiting_sender sender{waiter, datap};
+
+    sender.suspend();
+    waitqp->push(sender);
+}
+
+
+template<class T>
+inline bool
+Buffered_channel<T>::send(T* datap, Goroutine::Handle sender)
 {
     using std::move;
 
-    bool is_received{true};
+    bool is_sent{true};
     Lock lock{mutex};
 
-    if (!receivers.is_empty()) {
-        assert(buffer.size() == 0); // receivers wait only when buffer is empty
-
-        Waiter receiver = receivers.pop();
-        *receiver.datap = move(*datap);
-        receiver.resume();
-    } else if (buffer.size() == maxsize) {
-        senders.push(Waiter{g, datap});
-        scheduler.suspend(g);
-        is_received = false;
-    } else {
+    if (!receiverq.is_empty())
+        release(&receiverq, move(*datap));
+    else if (!buffer.is_full())
         buffer.push(move(*datap));
+    else {
+        suspend(sender, datap, &senderq)
+        is_sent = false;
     }
 
-    return is_received;
+    return is_sent;
+}
+
+
+template<class T>
+inline bool
+Buffered_channel<T>::send(const T* datap, Goroutine::Handle sender)
+{
+    bool is_sent{true};
+    Lock lock{mutex};
+
+    if (!receiverq.is_empty())
+        release(&receiverq, *datap);
+    else if (!buffer.is_full())
+        buffer.push(*datap);
+    else {
+        suspend(sender, datap, &senderq)
+        is_sent = false;
+    }
+
+    return is_sent;
 }
 
 
@@ -1041,46 +1141,47 @@ Buffered_channel<T>::sync_receive(T* datap)
 
     Lock lock{mutex};
 
-    if (!buffer.empty()) {
+    if (!buffer.is_empty()) {
         *datap = move(buffer.front());
         buffer.pop();
 
-        if (!senders.is_empty()) {
-            Waiter sender = senders.pop();
+        if (!senderq.is_empty()) {
+            Waiter sender = senderq.pop();
             buffer.push(move(*sender.datap));
             sender.resume();
-            assert(buffer.size() == maxsize); // senders only wait when buffer is full
+
+            assert(buffer.is_full()); // senders only wait when buffer is full
         }
     } else {
-        condition_variable self;
-        receivers.push(Waiter{&self, datap});
+        condition_variable receiver;
+        receiverq.push(Waiter{&receiver, datap});
         do {
-            self.wait(lock);
-        } while (receivers.find(&self));
+            receiver.wait(lock);
+        } while (receiverq.find(&receiver));
     }
 }
 
 
 template<class T>
+template<class U>
 inline void
-Buffered_channel<T>::sync_send(T* datap)
+Buffered_channel<T>::sync_send(U&& data)
 {
     using std::condition_variable;
-    using std::move;
+    using std::forward;
 
     Lock lock{mutex};
 
-    if (!receivers.is_empty()) {
-        assert(buffer.size() == 0); // receivers only wait when buffer is empty
-        Waiter receiver = receivers.pop();
-        *receiver.datap = move(*datap);
+    if (!receiverq.is_empty()) {
+        assert(buffer.is_empty()); // receivers only wait when buffer is empty
+
+        Waiter receiver = receiverq.pop();
+        *receiver.datap = forward(data);
         receiver.resume();
-    } else if (buffer.size() == maxsize) {
-        condition_variable self;
-        senders.push(Waiter{&self, datap});
-        do {
-            self.wait(lock);
-        } while (senders.find(&self));
+    } else if (buffer.is_full()) {
+        condition_variable ownthread;
+        senderq.push(Waiter{&ownthread, &data});
+        ownthread.wait(lock, is_popped(ownthread, senderq));
     } else {
         buffer.push(move(*datap));
     }
@@ -1088,24 +1189,23 @@ Buffered_channel<T>::sync_send(T* datap)
 
 
 template<class T>
-inline tuple<T,bool>
+inline optional<T>
 Buffered_channel<T>::try_receive()
 {
-    using std::get;
     using std::move;
 
-    tuple<T,bool>   result;
-    Lock            lock{mutex};
+    optional<T> result;
+    Lock        lock{mutex};
 
     if (!buffer.empty()) {
-        get<0>(result) = move(buffer.front());
-        get<1>(result) = true;
+        result = move(buffer.front());
         buffer.pop();
 
-        if (!senders.is_empty()) {
-            Waiter sender = senders.pop();
+        if (!senderq.is_empty()) {
+            Waiter sender = senderq.pop();
             buffer.push(move(*sender.datap));
-            sender.resume();
+            sender.resuownthread();
+
             assert(buffer.size() == maxsize); // senders only wait when buffer is full
         }
     }
@@ -1121,34 +1221,11 @@ Buffered_channel<T>::try_send(const T& data)
     bool is_received{false};
     Lock lock{mutex};
 
-    if (!receivers.is_empty()) {
+    if (!receiverq.is_empty()) {
         assert(buffer.size() == 0);  // receivers only wait when buffer is empty
-        Waiter receiver = receivers.pop();
+
+        Waiter receiver = receiverq.pop();
         *receiver.datap = data;
-        receiver.resume();
-        is_received = true;
-    } else if (buffer.size() < maxsize) {
-        buffer.push(data);
-        is_received = true;
-    }
-
-    return is_received;
-}
-
-
-template<class T>
-inline bool
-Buffered_channel<T>::try_send(T&& data)
-{
-    using std::move;
-
-    bool is_received{false};
-    Lock lock{mutex};
-
-    if (!receivers.is_empty()) {
-        assert(buffer.size() == 0); // receivers only wait when buffer is empty
-        Waiter receiver = receivers.pop();
-        *receiver.datap = move(data);
         receiver.resume();
         is_received = true;
     } else if (buffer.size() < maxsize) {
@@ -1178,13 +1255,12 @@ public:
     Channel_size capacity() const;
 
     // Channel Operations
-    bool            send(T* datap, Goroutine::Handle sender);
-    bool            receive(T* datap, Goroutine::Handle receiver);
-    tuple<T,bool>   try_receive();
-    bool            try_send(const T&);
-    bool            try_send(T&&);
-    void            sync_send(T* datap);
-    void            sync_receive(T* datap);
+    bool        send(T* datap, Goroutine::Handle sender);
+    bool        receive(T* datap, Goroutine::Handle receiver);
+    optional<T> try_receive();
+    bool        try_send(const T&);
+    void        sync_send(T* datap);
+    void        sync_receive(T* datap);
 
 private:
     // Names/Types
@@ -1194,8 +1270,8 @@ private:
     using Waiter_queue  = Detail::Channel_waiterqueue<T>;
 
     // Data
-    Waiter_queue    senders;
-    Waiter_queue    receivers;
+    Waiter_queue    senderq;
+    Waiter_queue    receiverq;
     Mutex           mutex;
 };
 
@@ -1218,12 +1294,12 @@ Unbuffered_channel<T>::receive(T* datap, Goroutine::Handle g)
     Lock lock{mutex};
 
     // if a sender is waiting, dequeue it; otherwise, enqueue this receiver
-    if (!senders.is_empty()) {
-        Waiter sender = senders.pop();
+    if (!senderq.is_empty()) {
+        Waiter sender = senderq.pop();
         *datap = move(*sender.datap);
         sender.resume();
     } else {
-        receivers.push(Waiter{g, datap});
+        receiverq.push(Waiter{g, datap});
         scheduler.suspend(g);
         is_received = false;
     }
@@ -1242,12 +1318,12 @@ Unbuffered_channel<T>::send(T* datap, Goroutine::Handle g)
     Lock lock{mutex};
 
     // if a receiver is waiting, dequeue it; otherwise, enqueue this sender
-    if (!receivers.is_empty()) {
-        Waiter receiver = receivers.pop();
+    if (!receiverq.is_empty()) {
+        Waiter receiver = receiverq.pop();
         *receiver.datap = move(*datap);
         receiver.resume();
     } else {
-        senders.push(Waiter{g, datap});
+        senderq.push(Waiter{g, datap});
         scheduler.suspend(g);
         is_received = false;
     }
@@ -1273,17 +1349,17 @@ Unbuffered_channel<T>::sync_receive(T* datap)
 
     Lock lock{mutex};
 
-    // if a sender is waiting, dequeue it; otherwise, enqueue this receiver
-    if (!senders.is_empty()) {
-        Waiter sender = senders.pop();
+    // If a sender is waiting, dequeue it; otherwise, enqueue this receiver.
+    if (!senderq.is_empty()) {
+        Waiter sender = senderq.pop();
         *datap = move(*sender.datap);
         sender.resume();
     } else {
         condition_variable receiver;
-        receivers.push(Waiter{&receiver, datap});
+        receiverq.push(Waiter{&receiver, datap});
         do {
             receiver.wait(lock);
-        } while (receivers.find(&receiver));
+        } while (receiverq.find(&receiver));
     }
 }
 
@@ -1297,35 +1373,33 @@ Unbuffered_channel<T>::sync_send(T* datap)
 
     Lock lock{mutex};
 
-    // if a receiver is waiting, dequeue it; otherwise, enqueue this sender
-    if (!receivers.is_empty()) {
-        Waiter receiver = receivers.pop();
+    // If a receiver is waiting, dequeue it; otherwise, enqueue this sender.
+    if (!receiverq.is_empty()) {
+        Waiter receiver = receiverq.pop();
         *receiver.datap = move(*datap);
         receiver.resume();
     } else {
         condition_variable sender;
-        senders.push(Waiter{&sender, datap});
+        senderq.push(Waiter{&sender, datap});
         do {
             sender.wait(lock);
-        } while (senders.find(&sender));
+        } while (senderq.find(&sender));
     }
 }
 
 
 template<class T>
-inline tuple<T,bool>
+inline optional<T>
 Unbuffered_channel<T>::try_receive()
 {
-    using std::get;
     using std::move;
 
-    tuple<T,bool>   result;
-    Lock            lock{mutex};
+    optional<T> result;
+    Lock        lock{mutex};
 
-    if (!senders.is_empty()) {
-        Waiter sender = senders.pop();
-        get<0>(result) = move(*sender.datap);
-        get<1>(result) = true;
+    if (!senderq.is_empty()) {
+        Waiter sender = senderq.pop();
+        result = move(*sender.datap);
         sender.resume();
     }
 
@@ -1342,31 +1416,10 @@ Unbuffered_channel<T>::try_send(const T& data)
     bool is_received{false};
     Lock lock{mutex};
 
-    // if a receiver is waiting, dequeue it; otherwise, enqueue the sender
-    if (!receivers.is_empty()) {
-        Waiter receiver = receivers.pop();
+    // If a receiver is waiting, dequeue it; otherwise, enqueue the sender.
+    if (!receiverq.is_empty()) {
+        Waiter receiver = receiverq.pop();
         *receiver.datap = data;
-        receiver.resume();
-        is_received = true;
-    }
-
-    return is_received;
-}
-
-
-template<class T>
-inline bool
-Unbuffered_channel<T>::try_send(T&& data)
-{
-    using std::move;
-
-    bool is_received{false};
-    Lock lock{mutex};
-
-    // if a receiver is waiting, dequeue it; otherwise, enqueue the sender
-    if (!receivers.is_empty()) {
-        Waiter receiver = receivers.pop();
-        *receiver.datap = move(data);
         receiver.resume();
         is_received = true;
     }
@@ -1382,7 +1435,7 @@ template<class T>
 inline Channel<T>
 make_unbuffered_channel()
 {
-    return Channel<T>(make_channel_impl<Unbuffered_channel<T>>());
+    return make_channel_impl<Unbuffered_channel<T>>();
 }
 
 
@@ -1390,14 +1443,23 @@ template<class T>
 inline Channel<T>
 make_buffered_channel(Channel_size capacity)
 {
-    return Channel<T>(make_channel_impl<Buffered_channel<T>>(capacity));
+    return make_channel_impl<Buffered_channel<T>>(capacity);
 }
 
 
+}   // Implementation Details
+
+
+/*
+    Channel Construction
+*/
 template<class T>
 Channel<T>
 make_channel(Channel_size n)
 {
+    using Detail::make_buffered_channel;
+    using Detail::make_unbuffered_channel;
+
     return (n > 0) ? make_buffered_channel<T>(n) : make_unbuffered_channel<T>();
 }
 
