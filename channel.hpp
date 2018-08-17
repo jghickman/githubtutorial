@@ -199,7 +199,7 @@ template<class T>
 class Send_channel<T>::Awaitable_copy {
 public:
     // Construct
-    Awaitable_copy(Interface*, const T*);;
+    Awaitable_copy(Interface*, const T* argp);
 
     // Awaitable Operations
     bool await_ready();
@@ -209,7 +209,7 @@ public:
 private:
     // Data
     Interface*  channelp;
-    const T*    datap;
+    const T*    valuep;
 };
 
 
@@ -220,7 +220,7 @@ template<class T>
 class Send_channel<T>::Awaitable_move {
 public:
     // Construct
-    Awaitable_move(Interface*, T&&);
+    Awaitable_move(Interface*, T&& arg);
 
     // Awaitable Operations
     bool await_ready();
@@ -230,7 +230,7 @@ public:
 private:
     // Data
     Interface*  channelp;
-    T&          data;
+    T&          value;
 };
 
 
@@ -309,7 +309,7 @@ public:
 private:
     // Data
     Interface*  channelp;
-    T           data;
+    T           value;
 };
 
 
@@ -338,7 +338,7 @@ public:
 
     // Channel Operations
     Awaitable_send_copy send(const T&) const;
-    AWaitable_send_move send(T&&) const;
+    Awaitable_send_move send(T&& x) const;
     Awaitable_receive   receive() const;
     bool                try_send(const T&) const;
     optional<T>         try_receive() const;
@@ -361,7 +361,7 @@ private:
 
 
 // Channel Factory
-template<class T> Channel<T> make_channel(Channel_size capacity = 0);
+template<class T> Channel<T> make_channel(Channel_size capacity=0);
 
 
 /*
@@ -417,7 +417,7 @@ template<class M, class... Args> std::shared_ptr<Channel_impl<M>>   make_channel
 
 
 /*
-    Implementation
+    Implementation Details
 */
 namespace Detail {
 
@@ -430,114 +430,35 @@ using std::tuple;
 
 
 /*
-    Channel Buffer
-*/
-template<class T>
-class Channel_buffer {
-public:
-    // Construct
-    explicit Channel_buffer(Channel_size maxsize);
-
-    // Size and Capacity
-    Channel_size    size() const;
-    Channel_size    max_size() const;
-    bool            is_empty() const;
-    bool            is_full() const;
-
-    // Queue Operations
-    template<class T> void  push(U&&);
-    void                    pop(T*);
-
-private:
-    // Data
-    std::queue<T>   q;
-    Channel_size    sizemax;
-};
-
-
-/*
-    Channel Waiter
-
-        - A waiting goroutine and the data being sent/received.
-*/
-template<class T>
-class Channel_waiter {
-public:
-    // Construct
-    Channel_waiter(Goroutine::Handle, T* datp);
-    Channel_waiter(condition_variable* foreignerp, T* datp);
-
-    // Observers
-    Goroutine::Handle   internal() const;
-    condition_variable* foreign() const;
-
-    // Waiter Functions
-    void release() const;
-
-    // Data
-    T* datap;
-
-private:
-    // Data
-    Goroutine::Handle   g;
-    condition_variable* foreignp{nullptr};
-};
-
-
-/*
     Waiting Sender
 
         A Goroutine or thread waiting on data to be accepted by a Send Channel.
 */
 template<class T>
-class Waiting_sender {
+class Waiting_sender : boost::equality_comparable<Waiting_sender<T>> {
 public:
     // Construct
-    Waiting_sender(Goroutine::Handle, const T* datap);
-    Waiting_sender(Goroutine::Handle, T* datap);
-    Waiting_sender(condition_variable* threadp, T* datp);
-    Waiting_sender(condition_variable* threadp, const T* datp);
+    Waiting_sender(Goroutine::Handle, const T* valuep);
+    Waiting_sender(Goroutine::Handle, T* valuep);
+    Waiting_sender(condition_variable*, T* valuep);
+    Waiting_sender(condition_variable*, const T* valuep);
 
     // Observers
     Goroutine::Handle   goroutine() const;
-    condition_variable* thread() const;
+    condition_variable* signal() const;
 
     // Waiting
-    void release() const;
+    void release(T* valuep) const;
+
+    // Comparisons
+    friend bool operator==(const Waiting_sender<T>&, const Waiting_sender<T>&);
 
 private:
     // Data
     Goroutine::Handle   g;
-    condition_variable* threadsigp{nullptr};
+    condition_variable* signalp{nullptr};
     const T*            readonlyp; // readonly or movable, but not both
     T*                  movablep;
-};
-
-
-/*
-    Waiter Sender Queue
-*/
-template<class T>
-class Waiting_sender_queue {
-public:
-    // Size and Capacity
-    bool is_empty() const;
-
-    // Queue Operations
-    void                push(const Waiting_sender<T>&);
-    Waiting_sender<T>   pop();
-    bool                find(const condition_variable*) const;
-
-private:
-    // Names/Types
-    struct waiter_equal {
-        waiter_equal(const condition_variable*);
-        bool operator()(const Waiting_sender<T>&) const;
-        const condition_variable* foreignerp;
-    };
-
-    // Data
-    std::deque<Waiting_sender<T>> senders;
 };
 
 
@@ -558,7 +479,7 @@ public:
     condition_variable* thread() const;
 
     // Waiting
-    void release() const;
+    template<class U> void release(U&& value) const;
 
 private:
     // Data
@@ -569,48 +490,48 @@ private:
 
 
 /*
-    Waiter Receiver Queue
+    Wait Queue
+
+        A queue of waiting Goroutines or threads.
 */
 template<class T>
-class Waiting_receiver_queue {
+class Wait_queue {
 public:
+    // Names/Types
+    typedef T Waiter;
+
     // Size and Capacity
     bool is_empty() const;
 
     // Queue Operations
-    void                push(const Waiting_receiver<T>&);
-    Waiting_receiver<T> pop();
+    void    push(const Waiter&);
+    Waiter  pop();
+    bool    find(const Waiter&) const;
 
 private:
     // Data
-    std::queue<Waiting_receiver<T>> receivers;
+    std::deque<T> ws;
 };
 
 
 /*
-    Buffered Channel
-
-        (Does not currently work for buffer capacity == 0; use Unbuffered_channel for that.)
-
-        TODO:   Address redundant implementations in send/try_send, receive/try_receive, and
-                try_send's.
+    Basic Channel
 */
 template<class T>
-class Buffered_channel {
+class Basic_channel {
 public:
     // Names/Types
     using Value = T;
 
     // Construct
-    explicit Buffered_channel(Channel_size maxsize);
+    explicit Basic_channel(Channel_size maxsize);
 
     // Size and Capacity
     Channel_size size() const;
     Channel_size capacity() const;
 
     // Channel Operations
-    bool                    send(const T*, Goroutine::Handle sender);
-    bool                    send(T*, Goroutine::Handle sender);
+    template<class U> bool  send(U* valuep, Goroutine::Handle sender);
     bool                    receive(T*, Goroutine::Handle receiver);
     optional<T>             try_receive();
     bool                    try_send(const T&);
@@ -621,26 +542,53 @@ private:
     // Names/Types
     using Sender            = Waiting_sender<T>;
     using Receiver          = Waiting_receiver<T>;
-    using Sender_queue      = Waiting_sender_queue<T>;
-    using Receiver_queue    = Waiting_receive_queue<T>;
-    using Lock              = std::unique_lock<Mutex>;
+    using Sender_queue      = Wait_queue<Sender>;
+    using Receiver_queue    = Wait_queue<Receiver>;
     using Mutex             = std::mutex;
+    using Lock              = std::unique_lock<Mutex>;
 
-    struct is_popped {
-        is_popped(Waiter&, const Waiter_queue&);
+    class Buffer {
+    public:
+        // Construct
+        explicit Buffer(Channel_size maxsize);
+    
+        // Size and Capacity
+        Channel_size    size() const;
+        Channel_size    max_size() const;
+        bool            is_empty() const;
+        bool            is_full() const;
+    
+        // Queue Operations
+        template<class U> void  push(U&&);
+        void                    pop(T*);
+    
+    private:
+        // Data
+        std::queue<T>   q;
+        Channel_size    sizemax;
+    };
+    
+    template<class W, class Q> struct is_waiter_removed {
+        // Names/Types
+        is_waiter_removed(const W&, const Q&);
         bool operator()() const;
-        Waiter&             waiter;
-        const Waiter_queue& q;
+        const W& w;
+        const Q& q;
     };
 
-    // Goroutine Suspend/Release
-    static bool                     suspend(Goroutine::Handle, T* recvbuf, Receiver_queue*);
-    template<class U> static bool   suspend(Goroutine::Handle, U* sendbufp, Sender_queue*);
-    template<class U> static bool   release(Receiver_queue*, U&& sendbuf);
-    static bool                     release(Sender_queue*, Channel_buffer*);
+    // Syncronization
+    template<class W, class Q> static is_waiter_removed<W,Q>    is_removed(const W&, const Q&);
+    static T                                                    pop(Buffer*);
+    template<class U> static void                               release(Receiver_queue*, U&& value);
+    static void                                                 release(Sender_queue*, T* valuep);
+    static T                                                    release(Sender_queue* waitqp);
+    static void                                                 suspend(Goroutine::Handle, T* valuep, Receiver_queue*);
+    template<class U> static void                               suspend(Goroutine::Handle, U* valuep, Sender_queue*);
+    template<class U> static void                               sender_wait(Lock&, Sender_queue*, U* valuep);
+    static void                                                 receiver_wait(Lock&, Receiver_queue*, T* valuep);
 
     // Data
-    Channel_buffer  buffer;
+    Buffer          buffer;
     Sender_queue    senderq;
     Receiver_queue  receiverq;
     Mutex           mutex;
@@ -742,7 +690,7 @@ private:
 };
 
 
-}   // Implementation
+}   // Implementation Details
 
 
 /*
