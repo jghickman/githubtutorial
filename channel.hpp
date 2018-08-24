@@ -32,7 +32,6 @@
 #include <mutex>
 #include <queue>
 #include <thread>
-#include <tuple>
 #include <vector>
 #include <utility>
 
@@ -119,7 +118,7 @@ public:
     friend bool operator==(const Goroutine&, const Goroutine&);
 
 private:
-    // Helpers
+    // Move/Destroy
     void        steal(Goroutine*);
     static void destroy(Goroutine*);
 
@@ -127,6 +126,133 @@ private:
     Handle  coro{nullptr};
     bool    isowner;
 };
+
+
+template<class T>
+class Channel_operation_set_view {
+public:
+};
+
+
+/*
+    Channel Send Operation
+*/
+template<class T>
+class Channel_send {
+public:
+    // Construct
+    Channel_send(Goroutine::Handle, T*);
+    Channel_send(Goroutine::Handle, const T*);
+    Channel_send(condition_variable*, T*);
+    Channel_send(condition_variable*, const T*);
+
+    // Caller
+    Goroutine::Handle   goroutine() const;
+    condition_variable* thread() const;
+
+    // Value
+    const T*    readable_value() const;
+    T*          movable_value() const;
+
+    // Selection
+    Channel_operation_set_view<T> set() const;
+
+private:
+    // Data
+    Goroutine::Handle               g;
+    condition_variable*             threadp;
+    const T*                        readablep;
+    T*                              movablep;
+    Channel_operation_set_view<T>   selected;
+};
+
+
+/*
+    Channel Receive Operation
+*/
+template<class T>
+class Channel_receive {
+public:
+    // Construct
+    Channel_receive(Goroutine::Handle, T*);
+    Channel_receive(Goroutine::Handle, const T*);
+    Channel_receive(condition_variable*, T*);
+    Channel_receive(condition_variable*, const T*);
+
+    // Caller
+    Goroutine::Handle   goroutine() const;
+    condition_variable* thread() const;
+
+    // Value
+    T* readable_value() const;
+
+private:
+    // Data
+    Goroutine::Handle   g;
+    condition_variable* threadp;
+    const T*            readablep;
+    T*                  writablep;
+};
+
+
+/*
+    Channel Operation
+*/
+template<class T>
+class Channel_operation {
+public:
+    // Construct
+    Channel_operation(const Channel_send<T>&);
+    Channel_operation(const Channel_receive<T>&);
+
+    // Type
+    bool is_send() const;
+    bool is_receive() const;
+
+    // Caller
+    Goroutine::Handle   goroutine() const;
+    condition_variable* thread() const;
+
+    // Value
+    const T*    readable_value() const;
+    T*          movable_value() const;
+
+private:
+    // Data
+    bool                issend;
+    Goroutine::Handle   g;
+    condition_variable* threadp;
+    const T*            readablep;
+    T*                  movablep;
+};
+
+
+template<class T, Channel_size N>
+class Channel_operation_array {
+public:
+    void push_back(const Channel_operation<T>&);
+
+private
+    // Data
+    Channel_operation<T> buffer[N]
+};
+
+
+class Awaitable_select {
+public:
+    // Awaitable Operations
+    bool            await_ready();
+    bool            await_suspend(Goroutine::Handle sender);
+    Channel_size    await_resume();
+
+private:
+    // Data
+    Channel_size pos;
+};
+
+
+template<class T, Channel_size N> Awaitable_select  select(const Channel_operation<T> (&ops)[N]);
+template<class T, Channel_size N> Channel_size      try_select(const Channel_operation<T> (&ops)[N]);
 
 
 /*
@@ -230,7 +356,7 @@ public:
 private:
     // Data
     Interface*  channelp;
-    T&          value;
+    T           value;
 };
 
 
@@ -286,7 +412,7 @@ public:
     virtual Channel_size capacity() const = 0;
 
     // Channel Operations
-    virtual bool        receive(T* datap, Goroutine::Handle receiver) = 0;
+    virtual bool        receive(T* valuep, Goroutine::Handle receiver) = 0;
     virtual optional<T> try_receive() = 0;
     virtual T           sync_receive() = 0;
 };
@@ -386,7 +512,7 @@ public:
     using Value = T;
 
     // Construct
-    Channel_impl();
+    Channel_impl(Channel_size n=0);
     template<class Mod> explicit Channel_impl(Mod&& model);
     template<class... Args> explicit Channel_impl(Args&&...);
 
@@ -412,7 +538,7 @@ private:
 
 // Channel Implementation Factories
 template<class M> std::shared_ptr<Channel_impl<M>>                  make_channel_impl();
-template<class M, class N> std::shared_ptr<Channel_impl<M>>         make_channel_impl(N&& model);
+template<class M> std::shared_ptr<Channel_impl<M>>                  make_channel_impl(M&& model);
 template<class M, class... Args> std::shared_ptr<Channel_impl<M>>   make_channel_impl(Args&&...);
 
 
@@ -426,7 +552,6 @@ namespace Detail {
     Names/Types
 */
 using std::condition_variable;
-using std::tuple;
 
 
 /*
@@ -438,27 +563,28 @@ template<class T>
 class Waiting_sender : boost::equality_comparable<Waiting_sender<T>> {
 public:
     // Construct
-    Waiting_sender(Goroutine::Handle, const T* valuep);
-    Waiting_sender(Goroutine::Handle, T* valuep);
-    Waiting_sender(condition_variable*, T* valuep);
-    Waiting_sender(condition_variable*, const T* valuep);
+    Waiting_sender(Goroutine::Handle sender, const T* valuep);
+    Waiting_sender(Goroutine::Handle sender, T* valuep);
+    Waiting_sender(condition_variable* signalp, T* valuep);
+    Waiting_sender(condition_variable* signalp, const T* valuep);
 
     // Observers
     Goroutine::Handle   goroutine() const;
     condition_variable* signal() const;
 
-    // Waiting
+    // Synchronization
     void release(T* valuep) const;
+    T    release() const;
 
     // Comparisons
-    friend bool operator==(const Waiting_sender<T>&, const Waiting_sender<T>&);
+    template<class U> friend bool operator==(const Waiting_sender<U>&, const Waiting_sender<U>&);
 
 private:
     // Data
     Goroutine::Handle   g;
-    condition_variable* signalp{nullptr};
-    const T*            readonlyp; // readonly or movable, but not both
-    T*                  movablep;
+    condition_variable* threadsigp{nullptr};
+    const T*            readablep; // un-movable value
+    T*                  writablep; // possibly movable value
 };
 
 
@@ -468,24 +594,27 @@ private:
         A Goroutine or thread waiting on data from a Receive Channel.
 */
 template<class T>
-class Waiting_receiver {
+class Waiting_receiver : boost::equality_comparable<Waiting_receiver<T>> {
 public:
     // Construct
-    Waiting_receiver(Goroutine::Handle, T* datap);
-    Waiting_receiver(condition_variable* threadp, T* datp);
+    Waiting_receiver(Goroutine::Handle receiver, T* valuep);
+    Waiting_receiver(condition_variable* signalp, T* valuep);
 
     // Observers
     Goroutine::Handle   goroutine() const;
-    condition_variable* thread() const;
+    condition_variable* signal() const;
 
-    // Waiting
-    template<class U> void release(U&& value) const;
+    // Synchronization
+    template<class U> void release(U&& sent) const;
+
+    // Comparisons
+    template<class U> friend bool operator==(const Waiting_receiver<U>&, const Waiting_receiver<U>&);
 
 private:
     // Data
     Goroutine::Handle   g;
     condition_variable* threadsigp{nullptr};
-    T*                  recvbufp;
+    T*                  bufferp;
 };
 
 
@@ -524,7 +653,7 @@ public:
     using Value = T;
 
     // Construct
-    explicit Basic_channel(Channel_size maxsize);
+    explicit Basic_channel(Channel_size maxsize=0);
 
     // Size and Capacity
     Channel_size size() const;
@@ -560,6 +689,7 @@ private:
     
         // Queue Operations
         template<class U> void  push(U&&);
+        T                       pop();
         void                    pop(T*);
     
     private:
@@ -568,24 +698,15 @@ private:
         Channel_size    sizemax;
     };
     
-    template<class W, class Q> struct is_waiter_removed {
-        // Names/Types
-        is_waiter_removed(const W&, const Q&);
-        bool operator()() const;
-        const W& w;
-        const Q& q;
-    };
-
     // Syncronization
-    template<class W, class Q> static is_waiter_removed<W,Q>    is_removed(const W&, const Q&);
-    static T                                                    pop(Buffer*);
-    template<class U> static void                               release(Receiver_queue*, U&& value);
-    static void                                                 release(Sender_queue*, T* valuep);
-    static T                                                    release(Sender_queue* waitqp);
-    static void                                                 suspend(Goroutine::Handle, T* valuep, Receiver_queue*);
-    template<class U> static void                               suspend(Goroutine::Handle, U* valuep, Sender_queue*);
-    template<class U> static void                               sender_wait(Lock&, Sender_queue*, U* valuep);
-    static void                                                 receiver_wait(Lock&, Receiver_queue*, T* valuep);
+    template<class U> static void   release(Receiver_queue*, U&& value);
+    static void                     release(Sender_queue*, T* valuep);
+    static void                     release(Sender_queue* waitqp, Buffer*);
+    static T                        release(Sender_queue*);
+    static void                     suspend(Receiver_queue*, Goroutine::Handle receiver, T* valuep);
+    template<class U> static void   suspend(Sender_queue*, Goroutine::Handle sender, U* valuep);
+    template<class U> static void   wait_for_receiver(Lock&, Sender_queue*, U* valuep);
+    static void                     wait_for_sender(Lock&, Receiver_queue*, T* valuep);
 
     // Data
     Buffer          buffer;
@@ -601,14 +722,17 @@ private:
 class Workqueue {
 public:
     // Queue Operations
-    void                    push(Goroutine&&);
-    tuple<Goroutine,bool>   pop();
-    bool                    try_push(Goroutine&&);
-    tuple<Goroutine,bool>   try_pop();
-    void                    interrupt();
+    void                push(Goroutine&&);
+    optional<Goroutine> pop();
+    bool                try_push(Goroutine&&);
+    optional<Goroutine> try_pop();
+    void                interrupt();
 
 private:
     // Names/Types
+    using Mutex = std::mutex;
+    using Lock  = std::unique_lock<Mutex>;
+
     class Goroutine_queue {
     public:
         void        push(Goroutine&&);
@@ -620,13 +744,14 @@ private:
         std::deque<Goroutine> elems;
     };
 
-    using Lock = std::unique_lock<std::mutex>;
+    // Queue Operations
+    static void push(Mutex&, Goroutine&&, Goroutine_queue*);
 
     // Data
-    Goroutine_queue         q;
-    bool                    is_interrupt{false};
-    std::mutex              mutex;
-    std::condition_variable ready;
+    Goroutine_queue     q;
+    bool                is_interrupt{false};
+    Mutex               mutex;
+    condition_variable  ready;
 };
 
 
@@ -649,10 +774,9 @@ public:
     Size size() const;
 
     // Queue Operations
-    void                    push(Goroutine&&);
-    void                    push(Size threadq, Goroutine&&);
-    tuple<Goroutine,bool>   pop(Size threadq);
-    void                    interrupt();
+    void                push(Goroutine&&);
+    optional<Goroutine> pop(Size preferred);
+    void                interrupt();
 
 private:
     // Data

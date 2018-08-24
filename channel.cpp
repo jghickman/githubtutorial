@@ -36,10 +36,8 @@ Scheduler scheduler;
 /*
     Names/Types
 */
-using std::get;
 using std::find_if;
 using std::move;
-using std::tie;
 using std::try_to_lock;
 
 
@@ -63,47 +61,49 @@ Workqueue::interrupt()
 }
 
 
-tuple<Goroutine,bool>
+optional<Goroutine>
 Workqueue::pop()
 {
-    tuple<Goroutine,bool>   result;
-    Lock                    lock{mutex};
+    optional<Goroutine> gp;
+    Lock                lock{mutex};
 
     while (q.is_empty() && !is_interrupt)
         ready.wait(lock);
 
-    if (!q.is_empty()) {
-        get<0>(result) = q.pop();
-        get<1>(result) = true;
-    }
+    if (!q.is_empty())
+        gp = q.pop();
 
-    return result;
+    return gp;
 }
 
 
 void
 Workqueue::push(Goroutine&& g)
 {
-    Lock lock{mutex};
-
-    q.push(move(g));
-    lock.unlock();
+    push(mutex, move(g), &q);
     ready.notify_one();
 }
 
 
-tuple<Goroutine,bool>
+inline void
+Workqueue::push(Mutex& sync, Goroutine&& g, Goroutine_queue* qp)
+{
+    Lock lock{sync};
+
+    qp->push(move(g));
+}
+
+
+optional<Goroutine>
 Workqueue::try_pop()
 {
-    tuple<Goroutine,bool>   result;
-    Lock                    lock{mutex, try_to_lock};
+    optional<Goroutine> gp;
+    Lock                lock{mutex, try_to_lock};
 
-    if (lock && !q.is_empty()) {
-        get<0>(result) = q.pop();
-        get<1>(result) = true;
-    }
+    if (lock && !q.is_empty())
+        gp = q.pop();
 
-    return result;
+    return gp;
 }
 
 
@@ -168,50 +168,43 @@ Workqueue_array::interrupt()
 }
 
 
-tuple<Goroutine,bool>
-Workqueue_array::pop(Size threadq)
+optional<Goroutine>
+Workqueue_array::pop(Size preferred)
 {
-    const auto              nqueues = queues.size();
-    tuple<Goroutine,bool>   result;
+    const auto          nqueues = queues.size();
+    optional<Goroutine> gp;
 
-    // try to obtain work without blocking (preferably from this thread's queue)
-    for (Size i = 0; !get<1>(result) && i != nqueues; ++i) {
-        auto index = (threadq + i) % nqueues;
-        result = queues[index].try_pop();
+    // Beginning with the preferred queue, try to dequeue work without waiting.
+    for (Size i = 0; !gp && i < nqueues; ++i) {
+        auto pos = (preferred + i) % nqueues;
+        gp = queues[pos].try_pop();
     }
 
-    // if we failed, wait on this thread's queue
-    if (!get<1>(result))
-        result = queues[threadq].pop();
+    // If we failed, wait on the preferred queue.
+    if (!gp)
+        gp = queues[preferred].pop();
 
-    return result;
+    return gp;
 }
 
 
 void
 Workqueue_array::push(Goroutine&& g)
 {
-    auto q = nextqueue++ % size();
-    push(q, move(g));
-}
-
-
-void
-Workqueue_array::push(Size threadq, Goroutine&& g)
-{
     const auto  nqueues     = queues.size();
+    const auto  preferred   = nextqueue++ % nqueues;
     bool        is_enqueued = false;
 
-    // try to enqueue the work without blocking (preferably on this thread's queue)
-    for (Size i = 0; !is_enqueued && i != nqueues; ++i) {
-        auto index = (threadq + i) % nqueues;
-        if (queues[index].try_push(move(g)))
+    // Beginning with the preferred queue, try to enqueue work without waiting.
+    for (Size i = 0; !is_enqueued && i < nqueues; ++i) {
+        auto pos = (preferred + i) % nqueues;
+        if (queues[pos].try_push(move(g)))
             is_enqueued = true;
-     }
+    }
 
-    // if we failed, wait on this thread's queue 
+    // If we failed, wait on the preferred queue.
     if (!is_enqueued)
-        queues[threadq].push(move(g));
+        queues[preferred].push(move(g));
 }
 
 
@@ -297,17 +290,11 @@ Scheduler::resume(Goroutine::Handle h)
 
 
 void
-Scheduler::run_work(unsigned threadq)
+Scheduler::run_work(unsigned threadpos)
 {
-    Goroutine   g;
-    bool        is_work;
-
-    while (true) {
-        tie(g, is_work) = workqueues.pop(threadq);
-        if (!is_work) break;
-
+    while (optional<Goroutine> gp = workqueues.pop(threadpos)) {
         try {
-            g.run();
+            gp->run();
         } catch (...) {
             workqueues.interrupt();
         }
