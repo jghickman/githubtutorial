@@ -1,23 +1,19 @@
 
 #include "stdafx.h"
 #include "isptech/concurrency/channel.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 
 
 using namespace Isptech::Concurrency;
-using std::atoi;
-using std::cerr;
-using std::cout;
-using std::endl;
-using std::exit;
-using std::max;
+using namespace std;
 
 
 Goroutine
 chain(Send_channel<int> left, Receive_channel<int> right)
 {
-    int n = co_await right.receive();
+    const int n = co_await right.receive();
     co_await left.send(n + 1);
 }
 
@@ -25,20 +21,21 @@ chain(Send_channel<int> left, Receive_channel<int> right)
 void
 main(int argc, char* argv[])
 {
-    int n, result = 0;
-
     if (argc != 2) {
         cerr << "usage: " << argv[0] << " count\n";
         exit(1);
     }
 
-    n = max(0, atoi(argv[1]));
+    int         result  = 0;
+    const int   n       = max(atoi(argv[1]), 0);
+
     if (n > 0) {
-        const auto  leftmost    = make_channel<int>();
-        auto        right       = leftmost;
+        const Channel<int>  leftmost    = make_channel<int>(4);
+        Channel<int>        right       = leftmost;
 
         for (int i = 0; i != n; ++i) {
-            auto left = right;
+            const Channel<int> left = right;
+
             right = make_channel<int>();
             go(chain, left, right);
         }
@@ -48,4 +45,6 @@ main(int argc, char* argv[])
     }
 
     cout << "total = " << result << endl;
+    char c;
+    cin >> c;
 }
