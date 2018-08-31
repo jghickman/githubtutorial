@@ -261,6 +261,94 @@ Goroutine_list::release(Goroutine::Handle h)
 
 
 /*
+    Channel Operation
+*/
+Channel_operation::Channel_operation()
+    : kind(none)
+    , chanp{nullptr}
+    , rvalp{nullptr}
+    , lvalp{nullptr}
+    , pos{0}
+{
+}
+
+
+Channel_operation::Channel_operation(Interface* channelp, const void* rvaluep)
+    : kind(send)
+    , chanp{channelp}
+    , rvalp{rvaluep}
+    , lvalp{nullptr}
+    , pos{0}
+{
+}
+
+
+Channel_operation::Channel_operation(Interface* channelp, Type optype, void* lvaluep)
+    : kind(optype)
+    , chanp{channelp}
+    , rvalp{nullptr}
+    , lvalp{lvaluep}
+    , pos{0}
+{
+}
+
+
+void
+Channel_operation::enqueue(Goroutine::Handle g)
+{
+    if (chanp && g) {
+        switch(kind) {
+        case send:
+            if (rvalp)
+                chanp->enqueue_send(g, rvalp);
+            else if (lvalp)
+                chanp->enqueue_send(g, lvalp);
+            break;
+
+        case receive:
+            if (lvalp)
+                chanp->enqueue_receive(g, lvalp);
+            break;
+        }
+    }
+}
+
+
+void
+Channel_operation::execute()
+{
+    if (chanp) {
+        switch(kind) {
+        case send:
+            if (rvalp)
+                chanp->ready_send(rvalp);
+            else if (lvalp)
+                chanp->ready_send(lvalp);
+            break;
+
+        case receive:
+            if (lvalp)
+                chanp->ready_receive(lvalp);
+            break;
+        }
+    }
+}
+
+
+bool
+Channel_operation::is_ready() const
+{
+    if (!chanp) return false;
+
+    switch(kind) {
+    case send:      return chanp->is_sendable(); break;
+    case receive:   return chanp->is_receivable(); break;
+    default:        return false;
+    }
+}
+
+
+/*
     Goroutine Scheduler
 */
 Scheduler::Scheduler()
