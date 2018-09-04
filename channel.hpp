@@ -62,7 +62,7 @@ using boost::optional;
 /*
     Goroutine Launcher
 */
-template<class GoFun, class... ArgTypes> void go(GoFun&&, ArgTypes&&...);
+template<class GoFun, class... Args> void go(GoFun&&, Args&&...);
 
 
 /*
@@ -155,6 +155,8 @@ using std::condition_variable;
 
 /*
     Channel Alternatives
+
+    TODO:  Revisit naming.
 */
 class Channel_alternatives {
 public:
@@ -170,9 +172,9 @@ public:
     ~Channel_alternatives();
 
     // Selection
-    template<Channel_size N> Channel_size   select(Channel_operation (&ops)[N]);
-    Channel_size                            selected() const;
-    void                                    enqueue(Goroutine::Handle);
+    template<Channel_size N> optional<Channel_size> select(Channel_operation (&ops)[N]);
+    optional<Channel_size>                          selected() const;
+    void                                            enqueue(Goroutine::Handle);
 
 private:
     // Names/Types
@@ -180,20 +182,22 @@ private:
         bool operator()(const Channel_operation&) const;
     };
 
+    struct position_less {
+        bool operator()(const Channel_operation&, const Channel_operation&) const;
+    };
+
     // Selection
-    static void         save_order(Channel_operation*, Channel_operation*);
-    static void         restore_order(Channel_operation*, Channel_operation*);
-    static void         lock_channels(Channel_operation*, Channel_operation*);
-    static void         unlock_channels(Channel_operation*, Channel_operation*);
-    static Channel_size random();
-    static Channel_size select(Channel_operation*, Channel_operation*);
-    static void         sort_channels(Channel_operation*, Channel_operation*);
-    static void         sort_positions(Channel_operation*, Channel_operation*);
+    static void                 save_positions(Channel_operation*, Channel_operation*);
+    static void                 restore_positions(Channel_operation*, Channel_operation*);
+    static void                 lock(Channel_operation*, Channel_operation*);
+    static void                 unlock(Channel_operation*, Channel_operation*);
+    static Channel_size         random_ready(Channel_size max);
+    static Channel_operation*   select(Channel_operation*, Channel_operation*);
 
     // Data
-    Channel_operation*  first;
-    Channel_operation*  last;
-    Channel_size        selectpos;
+    Channel_operation*      first;
+    Channel_operation*      last;
+    optional<Channel_size>  selectpos;
 };
 
 
@@ -242,9 +246,9 @@ public:
     Goroutine::Handle   goroutine() const;
     condition_variable* system_signal() const;
 
-    // Synchronization
-    void release(T* receivedp) const;
-    void release(Channel_buffer<T>*) const;
+    // Execution
+    void resume(T* receivedp) const;
+    void resume(Channel_buffer<T>*) const;
 
     // Comparisons
     template<class U> friend bool operator==(const Waiting_sender<U>&, const Waiting_sender<U>&);
@@ -274,8 +278,8 @@ public:
     Goroutine::Handle   goroutine() const;
     condition_variable* system_signal() const;
 
-    // Synchronization
-    template<class U> void release(U* valuep) const;
+    // Execution
+    template<class U> void resume(U* valuep) const;
 
     // Comparisons
     template<class U> friend bool operator==(const Waiting_receiver<U>&, const Waiting_receiver<U>&);
@@ -417,8 +421,16 @@ private:
 /*
     Channel Operation
 
-    A Channel Operation can be selected for execution (perhaps from a set of
-    alternatives) or enqueued on the channel.
+    Users can call select() or try_select() to choose a channel operation
+    for execution from a set of alternatives.  Selecting from a set of
+    channels with disparate element types requires an operation interface that
+    is independent of those element types.  Perhaps the ideal design would
+    involve channels which construct type-safe operation implementations using
+    inheritance to hide the element type altogether.  But since that would
+    imply dynamic memory allocation, we temporarily avoid that approach in
+    favor of type-unsafe operation interfaces (which aren't allowed to escape
+    to users).  In the future, the small object optimization could be
+    employed to realize a better design.
 */
 class Channel_operation : boost::totally_ordered<Channel_operation> {
 public:
@@ -566,7 +578,7 @@ private:
         void ready_receive(void* valuep) override;
         void enqueue_receive(Goroutine::Handle, void* valuep) override;
 
-        // Operation Synchronization
+        // Synchronization
         void lock() override;
         void unlock() override;
 
@@ -587,10 +599,10 @@ private:
         void                    enqueue_receive(Goroutine::Handle g, T* valuep);
 
         // Coordination
+        template<class U> static void   dequeue_receiver(Receiver_queue*, U* valuep);
+        static void                     dequeue_sender(Sender_queue*, T* valuep);
+        static void                     dequeue_sender(Sender_queue*, optional<T>* valuepp);
         static void                     pop_value(Buffer*, T* valuep, Sender_queue*);
-        template<class U> static void   release_receiver(Receiver_queue*, U* valuep);
-        static void                     release_sender(Sender_queue*, T* valuep);
-        static void                     release_sender(Sender_queue*, optional<T>* valuepp);
         template<class U> static void   wait_for_receiver(Lock&, Sender_queue*, U* valuep);
         static void                     wait_for_sender(Lock&, Receiver_queue*, T* valuep);
 
@@ -761,9 +773,9 @@ private:
 class Channel_select_awaitable {
 public:
     // Awaitable Operations
-    bool            await_ready();
-    bool            await_suspend(Goroutine::Handle);
-    Channel_size    await_resume();
+    bool                    await_ready();
+    bool                    await_suspend(Goroutine::Handle);
+    optional<Channel_size>  await_resume();
 
 private:
     // Friends

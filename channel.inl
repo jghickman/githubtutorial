@@ -425,6 +425,36 @@ Channel<T>::Impl::capacity() const
 
 
 template<class T>
+template<class U>
+void
+Channel<T>::Impl::dequeue_receiver(Receiver_queue* waitqp, U* valuep)
+{
+    Waiting_receiver r = waitqp->pop();
+    r.resume(valuep);
+}
+
+
+template<class T>
+inline void
+Channel<T>::Impl::dequeue_sender(Sender_queue* waitqp, optional<T>* valuep)
+{
+    T value;
+
+    dequeue_sender(waitqp, &value);
+    *valuep = value;
+}
+
+
+template<class T>
+inline void
+Channel<T>::Impl::dequeue_sender(Sender_queue* waitqp, T* valuep)
+{
+    Waiting_sender s = waitqp->pop();
+    s.resume(valuep);
+}
+
+
+template<class T>
 void
 Channel<T>::Impl::enqueue_receive(Goroutine::Handle g, void* valuep)
 {
@@ -523,7 +553,7 @@ Channel<T>::Impl::pop_value(Buffer* bufp, T* valuep, Sender_queue* waitqp)
 
     if (!waitqp->is_empty()) {
         Waiting_sender s = waitqp->pop();
-        s.release(bufp);
+        s.resume(bufp);
     }
 }
 
@@ -543,7 +573,7 @@ Channel<T>::Impl::ready_receive(T* valuep)
     if (!buffer.is_empty())
         pop_value(&buffer, valuep, &senderq);
     else
-        release_sender(&senderq, valuep);
+        dequeue_sender(&senderq, valuep);
 }
 
 
@@ -569,39 +599,9 @@ void
 Channel<T>::Impl::ready_send(U* valuep)
 {
     if (!receiverq.is_empty())
-        release_receiver(&receiverq, valuep);
+        dequeue_receiver(&receiverq, valuep);
     else
         buffer.push(move(*valuep));
-}
-
-
-template<class T>
-template<class U>
-void
-Channel<T>::Impl::release_receiver(Receiver_queue* waitqp, U* valuep)
-{
-    Waiting_receiver r = waitqp->pop();
-    r.release(valuep);
-}
-
-
-template<class T>
-inline void
-Channel<T>::Impl::release_sender(Sender_queue* waitqp, T* valuep)
-{
-    Waiting_sender s = waitqp->pop();
-    s.release(valuep);
-}
-
-
-template<class T>
-inline void
-Channel<T>::Impl::release_sender(Sender_queue* waitqp, optional<T>* valuep)
-{
-    T value;
-
-    release_sender(waitqp, &value);
-    *valuep = value;
 }
 
 
@@ -633,7 +633,7 @@ Channel<T>::Impl::sync_receive()
     else if (!buffer.is_empty())
         pop_value(&buffer, &value, &senderq);
     else if (!senderq.is_empty())
-        release_sender(&senderq, &value);
+        dequeue_sender(&senderq, &value);
     else
         wait_for_sender(lock, &receiverq, &value);
 
@@ -651,7 +651,7 @@ Channel<T>::Impl::sync_send(U* valuep)
     if (!senderq.is_empty())
         wait_for_receiver(lock, &senderq, valuep);
     else if (!receiverq.is_empty())
-        release_receiver(&receiverq, valuep);
+        dequeue_receiver(&receiverq, valuep);
     else if (!buffer.is_full())
         buffer.push(move(*valuep));
     else
@@ -669,7 +669,7 @@ Channel<T>::Impl::try_receive()
     if (!buffer.is_empty())
         buffer.pop(&value);
     else if (!senderq.is_empty())
-        release_sender(&senderq, &value);
+        dequeue_sender(&senderq, &value);
 
     return value;
 }
@@ -683,7 +683,7 @@ Channel<T>::Impl::try_send(const T& value)
     Lock lock{mutex};
 
     if (!receiverq.is_empty())
-        release_receiver(&receiverq, &value);
+        dequeue_receiver(&receiverq, &value);
     else if (!buffer.is_full())
         buffer.push(value);
     else
@@ -754,7 +754,7 @@ Channel<T>::Receive_awaitable::await_suspend(Goroutine::Handle g)
     Channel_alternatives    alternatives;
     bool                    is_suspended = false;
 
-    if (alternatives.select(ops) < 0) {
+    if (alternatives.select(ops)) {
         alternatives.enqueue(g);
         scheduler.suspend(g);
         is_suspended = true;
@@ -808,7 +808,7 @@ Channel<T>::Send_awaitable::await_suspend(Goroutine::Handle g)
     Channel_alternatives    alternatives;
     bool                    is_suspended = false;
 
-    if (alternatives.select(ops) < 0) {
+    if (alternatives.select(ops)) {
         alternatives.enqueue(g);
         scheduler.suspend(g);
         is_suspended = true;
@@ -1093,35 +1093,54 @@ using std::move;
     Channel Alternatives
 */
 void
-Channel_alternatives::lock_channels(Channel_operation* first, Channel_operation* last)
+Channel_alternatives::enqueue(Goroutine::Handle g)
 {
-    Channel_operation::Interface* prevchanp = 0;
+    for (Channel_operation* op = first; op != last; ++op)
+        op->enqueue(g);
+}
 
-    for (Channel_operation* opp = first; opp != last; ++opp) {
-        // lock a channel just once
-        if (opp->chanp && opp->chanp != prevchanp) {
-            opp->chanp->lock();
-            prevchanp = opp->chanp;
+
+void
+Channel_alternatives::lock(Channel_operation* first, Channel_operation* last)
+{
+    Channel_operation::Interface* prevchanp = nullptr;
+
+    for (Channel_operation* op = first; op != last; ++op) {
+        // lock each channel just once
+        if (op->chanp && op->chanp != prevchanp) {
+            op->chanp->lock();
+            prevchanp = op->chanp;
         }
     }
 }
     
    
 Channel_size
-Channel_alternatives::random()
+Channel_alternatives::random_ready(Channel_size max)
 {
-#if 0
-    using std::random_device;
-    using std::uniform_int_distribution;
-    using std::mt19937;
-#endif
+    using Device        = std::random_device;
+    using Engine        = std::default_random_engine;
+    using Distribution  = std::uniform_int_distribution<Channel_size>;
 
-    return 0;
+    Device          rand;
+    Engine          engine(rand());
+    Distribution    dist(0, max);
+
+    return dist(engine);
 }
     
    
 void
-Channel_alternatives::save_order(Channel_operation* first, Channel_operation* last)
+Channel_alternatives::restore_positions(Channel_operation* first, Channel_operation* last)
+{
+    using std::sort;
+
+    sort(first, last, position_less());
+}
+
+
+void
+Channel_alternatives::save_positions(Channel_operation* first, Channel_operation* last)
 {
     int i = 0;
 
@@ -1131,30 +1150,69 @@ Channel_alternatives::save_order(Channel_operation* first, Channel_operation* la
 
 
 template<Channel_size N>
-Channel_size
+optional<Channel_size>
 Channel_alternatives::select(Channel_operation (&ops)[N])
 {
-    first = begin(ops);
-    last = end(ops);
+    using std::sort;
 
-    save_order(first, last);
-    sort_channels(first, last);
-    lock_channels(first, last);
-    selectpos = select(first, last);
-    unlock_channels(first, last);
-    restore_order(first, last);
+    Channel_operation* first    = begin(ops);
+    Channel_operation* last     = end(ops);
+
+    save_positions(first, last);
+    sort(first, last);
+    lock(first, last);
+
+    Channel_operation* p = select(first, last);
+    if (p != last)
+        selectpos = p->pos;
+
+    unlock(first, last);
+    restore_positions(first, last);
 
     return selectpos;
 }
 
 
-void
-Channel_alternatives::sort_channels(Channel_operation* first, Channel_operation* last)
+Channel_operation*
+Channel_alternatives::select(Channel_operation* first, Channel_operation* last)
 {
-    std::sort(first, last);
+    Channel_operation*  selectp = last;
+    Channel_size        nready  = 0;
+
+    for (Channel_operation* op = first; op != last; ++op) {
+        if (op->is_ready())
+            ++nready;
+    }
+
+    Channel_size n = random_ready(nready);
+
+    for (Channel_operation* op = first; op != last; ++op) {
+        if (op->is_ready() && n-- == 0) {
+            op->execute();
+            selectp = op;
+            break;
+        }
+    }
+
+    return selectp;
 }
 
 
+void
+Channel_alternatives::unlock(Channel_operation* first, Channel_operation* last)
+{
+    Channel_operation::Interface* prevchanp = nullptr;
+
+    for (Channel_operation* op = first; op != last; ++op) {
+        // unlock each channel just once
+        if (op->chanp && op->chanp != prevchanp) {
+            op->chanp->unlock();
+            prevchanp = op->chanp;
+        }
+    }
+}
+    
+   
 /*
     Channel Buffer
 */
@@ -1310,7 +1368,7 @@ Waiting_receiver<T>::goroutine() const
 template<class T>
 template<class U>
 inline void
-Waiting_receiver<T>::release(U* valuep) const
+Waiting_receiver<T>::resume(U* valuep) const
 {
     *valp = move(*valuep);
 
@@ -1403,7 +1461,7 @@ Waiting_sender<T>::goroutine() const
 
 template<class T>
 inline void
-Waiting_sender<T>::release(T* valuep) const
+Waiting_sender<T>::resume(T* valuep) const
 {
     *valuep = lvalp ? move(*lvalp) : *rvalp;
 
@@ -1416,7 +1474,7 @@ Waiting_sender<T>::release(T* valuep) const
 
 template<class T>
 inline void
-Waiting_sender<T>::release(Channel_buffer<T>* bufp) const
+Waiting_sender<T>::resume(Channel_buffer<T>* bufp) const
 {
     if (lvalp)
         bufp->push(move(*lvalp));
@@ -1470,7 +1528,7 @@ Channel_select_awaitable::await_ready()
 }
 
 
-inline Channel_size
+inline optional<Channel_size>
 Channel_select_awaitable::await_resume()
 {
     return alternatives.selected();
@@ -1482,7 +1540,7 @@ Channel_select_awaitable::await_suspend(Goroutine::Handle g)
 {
     bool is_suspended = false;
 
-    if (alternatives.selected() < 0) {
+    if (alternatives.selected()) {
         alternatives.enqueue(g);
         scheduler.suspend(g);
         is_suspended = true;
@@ -1508,14 +1566,14 @@ make_channel(Channel_size n)
 /*
     Goroutine Launcher
 */
-template<class GoFun, class... ArgTypes>
+template<class GoFun, class... Args>
 inline void
-go(GoFun&& fun, ArgTypes&&... args)
+go(GoFun&& fun, Args&&... args)
 {
     using std::forward;
     using std::move;
 
-    Goroutine g = fun(forward<ArgTypes>(args)...);
+    Goroutine g = fun(forward<Args>(args)...);
     scheduler.submit(move(g));
 }
 
