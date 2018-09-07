@@ -156,28 +156,26 @@ using std::condition_variable;
 /*
     Channel Alternatives
 
-    TODO:  Revisit naming.
+    TODO:  Revisit class name...should it be singular or something else
+    entirely?
 */
 class Channel_alternatives {
 public:
-    // Names/Types
-    static const Channel_size none = -1;
-
-    // Construct/Copy/Move/Destroy
-    Channel_alternatives();
-    Channel_alternatives(const Channel_alternatives&) = delete;
-    Channel_alternatives& operator=(const Channel_alternatives&) = delete;
-    Channel_alternatives(Channel_alternatives&&);
-    Channel_alternatives& operator=(Channel_alternatives&&);
-    ~Channel_alternatives();
+    // Construct
+    template<Channel_size N> Channel_alternatives(Channel_operation (&ops)[N]);
 
     // Selection
-    template<Channel_size N> optional<Channel_size> select(Channel_operation (&ops)[N]);
-    optional<Channel_size>                          selected() const;
-    void                                            enqueue(Goroutine::Handle);
+    optional<Channel_size>  select();
+    void                    enqueue(Goroutine::Handle);
+    void                    complete(Channel_size pos, Goroutine::Handle);
+    optional<Channel_size>  selected() const;
 
 private:
     // Names/Types
+    struct channel_less {
+        bool operator()(const Channel_operation&, const Channel_operation&) const;
+    };
+
     struct is_ready {
         bool operator()(const Channel_operation&) const;
     };
@@ -187,18 +185,26 @@ private:
     };
 
     // Selection
-    static void                 save_positions(Channel_operation*, Channel_operation*);
-    static void                 restore_positions(Channel_operation*, Channel_operation*);
-    static void                 lock(Channel_operation*, Channel_operation*);
-    static void                 unlock(Channel_operation*, Channel_operation*);
-    static Channel_size         random_ready(Channel_size max);
-    static Channel_operation*   select(Channel_operation*, Channel_operation*);
+    static void                     save_positions(Channel_operation*, Channel_operation*);
+    static void                     sort_channels(Channel_operation*, Channel_operation*);
+    static void                     reposition(Channel_operation*, Channel_operation*);
+    static void                     lock(Channel_operation*, Channel_operation*);
+    static void                     lock_channels(Channel_operation*, Channel_operation*);
+    static void                     unlock(Channel_operation*, Channel_operation*);
+    static optional<Channel_size>   select_ready(Channel_operation*, Channel_operation*);
+    static Channel_size             count_ready(Channel_operation*, Channel_operation*);
+    static Channel_operation*       pick_ready(Channel_operation* first, Channel_operation* last, Channel_size nready);
+    static Channel_size             random(Channel_size min, Channel_size max);
+    static void                     enqueue(Channel_operation*, Channel_operation*, Goroutine::Handle, Channel_alternatives* selfp);
 
     // Data
     Channel_operation*      first;
     Channel_operation*      last;
-    optional<Channel_size>  selectpos;
+    optional<Channel_size>  chosen;
 };
+
+
+bool select(Channel_alternatives*, Goroutine::Handle);
 
 
 /*
@@ -237,8 +243,8 @@ template<class T>
 class Waiting_sender : boost::equality_comparable<Waiting_sender<T>> {
 public:
     // Construct
-    Waiting_sender(Goroutine::Handle, const T* rvaluep);
-    Waiting_sender(Goroutine::Handle, T* lvaluep);
+    Waiting_sender(Channel_alternatives* ap, Channel_size apos, Goroutine::Handle, const T* rvaluep);
+    Waiting_sender(Channel_alternatives* ap, Channel_size apos, Goroutine::Handle, T* lvaluep);
     Waiting_sender(condition_variable* sysreadyp, const T* rvaluep);
     Waiting_sender(condition_variable* sysreadyp, T* lvaluep);
 
@@ -247,18 +253,20 @@ public:
     condition_variable* system_signal() const;
 
     // Execution
-    void resume(T* receivedp) const;
-    void resume(Channel_buffer<T>*) const;
+    template<class U> void  resume(U* outp) const;
+    void                    resume(Channel_buffer<T>* outp) const;
 
     // Comparisons
     template<class U> friend bool operator==(const Waiting_sender<U>&, const Waiting_sender<U>&);
 
 private:
     // Data
-    Goroutine::Handle   g;
-    condition_variable* readyp;
-    const T*            rvalp;
-    T*                  lvalp;
+    Goroutine::Handle       g;
+    condition_variable*     readyp;
+    const T*                rvalp;
+    T*                      lvalp;
+    Channel_alternatives*   altsp;
+    Channel_size            altpos;
 };
 
 
@@ -271,12 +279,12 @@ template<class T>
 class Waiting_receiver : boost::equality_comparable<Waiting_receiver<T>> {
 public:
     // Construct
-    Waiting_receiver(Goroutine::Handle, T* valuep);
+    Waiting_receiver(Channel_alternatives* ap, Channel_size apos, Goroutine::Handle, T* valuep);
     Waiting_receiver(condition_variable* sysreadyp, T* valuep);
 
     // Observers
-    Goroutine::Handle   goroutine() const;
-    condition_variable* system_signal() const;
+    Goroutine::Handle       goroutine() const;
+    condition_variable*     system_signal() const;
 
     // Execution
     template<class U> void resume(U* valuep) const;
@@ -286,9 +294,11 @@ public:
 
 private:
     // Data
-    Goroutine::Handle   g;
-    condition_variable* readyp;
-    T*                  valp;
+    Goroutine::Handle       g;
+    condition_variable*     readyp;
+    T*                      valp;
+    Channel_alternatives*   altsp;
+    Channel_size            altpos;
 };
 
 
@@ -309,9 +319,17 @@ public:
     // Queue Operations
     void    push(const Waiter&);
     Waiter  pop();
+    void    erase(Goroutine::Handle);
     bool    find(const Waiter&) const;
 
 private:
+    // Names/Types
+    struct goroutine_eq {
+        explicit goroutine_eq(Goroutine::Handle h) : g{h} {}
+        bool operator()(const T& w) const { return w.goroutine() == g; }
+        Goroutine::Handle g;
+    };
+
     // Data
     std::deque<T> ws;
 };
@@ -432,7 +450,7 @@ private:
     to users).  In the future, the small object optimization could be
     employed to realize a better design.
 */
-class Channel_operation : boost::totally_ordered<Channel_operation> {
+class Channel_operation {
 public:
     // Names/Types
     class Interface;
@@ -443,22 +461,19 @@ public:
     Channel_operation(Interface* channelp, const void* rvaluep); // send
     Channel_operation(Interface* channelp, Type, void* lvaluep); // send/receive
 
-    // Comparisons
-    friend bool operator==(const Channel_operation&, const Channel_operation&);
-    friend bool operator< (const Channel_operation&, const Channel_operation&);
-    
 private:
     // Selection
     bool is_ready() const;
     void execute();
-    void enqueue(Goroutine::Handle);
+    void enqueue(Goroutine::Handle, Detail::Channel_alternatives*);
+    void dequeue(Goroutine::Handle);
 
     // Friends
     friend class Detail::Channel_alternatives;
 
     // Data
-    Type            kind;
     Interface*      chanp;
+    Type            kind;
     const void*     rvalp;
     void*           lvalp;
     Channel_size    pos;
@@ -469,7 +484,7 @@ private:
     Channel Operation Selection
 */
 template<Channel_size N> Channel_select_awaitable   select(Channel_operation (&ops)[N]);
-template<Channel_size N> Channel_size               try_select(const Channel_operation (&ops)[N]);
+template<Channel_size N> Channel_size               try_select(Channel_operation (&ops)[N]);
 
 
 /*
@@ -484,18 +499,20 @@ public:
     virtual ~Interface() = default;
 
     // Send
-    virtual bool is_sendable() const = 0;
+    virtual bool is_send_ready() const = 0;
     virtual void ready_send(void* valuep) = 0;
     virtual void ready_send(const void* valuep) = 0;
-    virtual void enqueue_send(Goroutine::Handle, void* valuep) = 0;
-    virtual void enqueue_send(Goroutine::Handle, const void* valuep) = 0;
+    virtual void enqueue_send(Detail::Channel_alternatives* ap, Channel_size apos, Goroutine::Handle, void* valuep) = 0;
+    virtual void enqueue_send(Detail::Channel_alternatives* ap, Channel_size apos, Goroutine::Handle, const void* valuep) = 0;
+    virtual void dequeue_send(Goroutine::Handle) = 0;
 
     // Receive
-    virtual bool is_receivable() const = 0;
+    virtual bool is_receive_ready() const = 0;
     virtual void ready_receive(void* valuep) = 0;
-    virtual void enqueue_receive(Goroutine::Handle, void* valuep) = 0;
+    virtual void enqueue_receive(Detail::Channel_alternatives* ap, Channel_size apos, Goroutine::Handle, void* valuep) = 0;
+    virtual void dequeue_receive(Goroutine::Handle) = 0;
 
-    // Synchronization
+    // Synchronize
     virtual void lock() = 0;
     virtual void unlock() = 0;
 };
@@ -532,7 +549,7 @@ public:
     void                sync_send(T&&) const;
     T                   sync_receive() const;
 
-    // Operation Selection
+    // Operation Selection (TODO: better names?)
     Channel_operation make_sendable(const T&) const;
     Channel_operation make_sendable(T&&) const;
     Channel_operation make_receivable(T*) const;
@@ -569,16 +586,18 @@ private:
         Channel_operation make_receivable(T* valuep);
 
         // Operation Implementation
-        bool is_sendable() const override;
+        bool is_send_ready() const override;
         void ready_send(const void* rvaluep) override;
         void ready_send(void* lvaluep) override;
-        void enqueue_send(Goroutine::Handle, const void* rvaluep) override;
-        void enqueue_send(Goroutine::Handle, void* lvaluep) override;
-        bool is_receivable() const override;
+        void enqueue_send(Detail::Channel_alternatives* ap, Channel_size apos, Goroutine::Handle, const void* rvaluep) override;
+        void enqueue_send(Detail::Channel_alternatives* ap, Channel_size apos, Goroutine::Handle, void* lvaluep) override;
+        void dequeue_send(Goroutine::Handle) override;
+        bool is_receive_ready() const override;
         void ready_receive(void* valuep) override;
-        void enqueue_receive(Goroutine::Handle, void* valuep) override;
+        void enqueue_receive(Detail::Channel_alternatives*, Channel_size apos, Goroutine::Handle, void* valuep) override;
+        void dequeue_receive(Goroutine::Handle) override;
 
-        // Synchronization
+        // Synchronize
         void lock() override;
         void unlock() override;
 
@@ -594,17 +613,16 @@ private:
 
         // Operation Implementation
         template<class U> void  ready_send(U* valuep);
-        template<class U> void  enqueue_send(Goroutine::Handle, U* valuep);
+        template<class U> void  enqueue_send(Detail::Channel_alternatives*, Channel_size apos, Goroutine::Handle, U* valuep);
         void                    ready_receive(T* valuep);
-        void                    enqueue_receive(Goroutine::Handle g, T* valuep);
+        void                    enqueue_receive(Detail::Channel_alternatives*, Channel_size apos, Goroutine::Handle g, T* valuep);
 
         // Coordination
-        template<class U> static void   dequeue_receiver(Receiver_queue*, U* valuep);
-        static void                     dequeue_sender(Sender_queue*, T* valuep);
-        static void                     dequeue_sender(Sender_queue*, optional<T>* valuepp);
-        static void                     pop_value(Buffer*, T* valuep, Sender_queue*);
-        template<class U> static void   wait_for_receiver(Lock&, Sender_queue*, U* valuep);
-        static void                     wait_for_sender(Lock&, Receiver_queue*, T* valuep);
+        template<class U> static void   dequeue_receiver(Receiver_queue*, U* sendbufp);
+        template<class U> static void   dequeue_sender(Sender_queue*, U* recvbufp);
+        static void                     pop(Buffer*, T* recvbufp, Sender_queue*);
+        template<class U> static void   wait_for_receiver(Lock&, Sender_queue*, U* sendbufp);
+        static void                     wait_for_sender(Lock&, Receiver_queue*, T* recvbufp);
 
         // Data
         Buffer          buffer;
@@ -652,7 +670,8 @@ private:
     template<class U> Send_awaitable(Impl*, U* valuep);
 
     // Data
-    Channel_operation ops[1];
+    Channel_operation               ops[1];
+    Detail::Channel_alternatives    alts;
 };
 
 
@@ -675,8 +694,9 @@ private:
     explicit Receive_awaitable(Impl*);
 
     // Data
-    T                   value;
-    Channel_operation   ops[1];
+    T                               value;
+    Channel_operation               ops[1];
+    Detail::Channel_alternatives    alts;
 };
 
 
@@ -785,7 +805,7 @@ private:
     template<Channel_size N> Channel_select_awaitable(Channel_operation (&ops)[N]);
 
     // Data
-    Detail::Channel_alternatives alternatives;
+    Detail::Channel_alternatives alts;
 };
 
 
@@ -795,7 +815,7 @@ private:
 class Scheduler {
 public:
     // Construct/Destroy
-    Scheduler();
+    Scheduler(int nthreads=0);
     Scheduler(const Scheduler&) = delete;
     Scheduler& operator=(const Scheduler&) = delete;
     ~Scheduler();

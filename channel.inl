@@ -203,27 +203,6 @@ Goroutine::Promise::return_void()
 
 
 /*
-    Channel Operation
-*/
-inline bool
-operator==(const Channel_operation& x, const Channel_operation& y)
-{
-    if (x.chanp != y.chanp) return false;
-    if (x.kind != y.kind) return false;
-    if (x.lvalp != y.lvalp) return false;
-    if (x.rvalp != y.rvalp) return false;
-    return true;
-}
-
-
-inline bool
-operator< (const Channel_operation& x, const Channel_operation& y)
-{
-    return x.chanp < y.chanp;
-}
-
-
-/*
     Channel
 */
 template<class T>
@@ -425,91 +404,97 @@ Channel<T>::Impl::capacity() const
 
 
 template<class T>
+void
+Channel<T>::Impl::dequeue_receive(Goroutine::Handle g)
+{
+    receiverq.erase(g);
+}
+
+
+template<class T>
 template<class U>
 void
-Channel<T>::Impl::dequeue_receiver(Receiver_queue* waitqp, U* valuep)
+Channel<T>::Impl::dequeue_receiver(Receiver_queue* waitqp, U* sendbufp)
 {
     Waiting_receiver r = waitqp->pop();
-    r.resume(valuep);
-}
-
-
-template<class T>
-inline void
-Channel<T>::Impl::dequeue_sender(Sender_queue* waitqp, optional<T>* valuep)
-{
-    T value;
-
-    dequeue_sender(waitqp, &value);
-    *valuep = value;
-}
-
-
-template<class T>
-inline void
-Channel<T>::Impl::dequeue_sender(Sender_queue* waitqp, T* valuep)
-{
-    Waiting_sender s = waitqp->pop();
-    s.resume(valuep);
+    r.resume(sendbufp);
 }
 
 
 template<class T>
 void
-Channel<T>::Impl::enqueue_receive(Goroutine::Handle g, void* valuep)
+Channel<T>::Impl::dequeue_send(Goroutine::Handle g)
 {
-    enqueue_receive(g, static_cast<T*>(valuep));
+    senderq.erase(g);
+}
+
+
+template<class T>
+template<class U>
+inline void
+Channel<T>::Impl::dequeue_sender(Sender_queue* waitqp, U* recvbufp)
+{
+    Waiting_sender s = waitqp->pop();
+    s.resume(recvbufp);
+}
+
+
+template<class T>
+void
+Channel<T>::Impl::enqueue_receive(Detail::Channel_alternatives* altsp, Channel_size altpos, Goroutine::Handle g, void* valuep)
+{
+    enqueue_receive(altsp, altpos, g, static_cast<T*>(valuep));
 }
 
 
 template<class T>
 inline void
-Channel<T>::Impl::enqueue_receive(Goroutine::Handle g, T* valuep)
+Channel<T>::Impl::enqueue_receive(Detail::Channel_alternatives* altsp, Channel_size altpos, Goroutine::Handle g, T* valuep)
 {
-    const Waiting_receiver r{g, valuep};
+    const Waiting_receiver r{altsp, altpos, g, valuep};
     receiverq.push(r);
 }
 
 
 template<class T>
 void
-Channel<T>::Impl::enqueue_send(Goroutine::Handle g, const void* rvaluep)
+Channel<T>::Impl::enqueue_send(Detail::Channel_alternatives* altsp, Channel_size altpos, Goroutine::Handle g, const void* rvaluep)
 {
-    enqueue_send(g, static_cast<const T*>(rvaluep));
+    enqueue_send(altsp, altpos, g, static_cast<const T*>(rvaluep));
 }
 
 
 template<class T>
 void
-Channel<T>::Impl::enqueue_send(Goroutine::Handle g, void* lvaluep)
+Channel<T>::Impl::enqueue_send(Detail::Channel_alternatives* altsp, Channel_size altpos, Goroutine::Handle g, void* lvaluep)
 {
-    enqueue_send(g, static_cast<T*>(lvaluep));
+    enqueue_send(altsp, altpos, g, static_cast<T*>(lvaluep));
 }
 
 
 template<class T>
 template<class U>
 inline void
-Channel<T>::Impl::enqueue_send(Goroutine::Handle g, U* valuep)
+Channel<T>::Impl::enqueue_send(Detail::Channel_alternatives* altsp, Channel_size altpos, Goroutine::Handle g, U* valuep)
 {
-    const Waiting_sender s{g, valuep};
+    const Waiting_sender s{altsp, altpos, g, valuep};
     senderq.push(s);
 }
 
 
 template<class T>
 bool
-Channel<T>::Impl::is_receivable() const
+Channel<T>::Impl::is_receive_ready() const
 {
-    return !(buffer.is_empty() || senderq.is_empty());
+    return !(buffer.is_empty() && senderq.is_empty());
 }
 
 
 template<class T>
 bool
-Channel<T>::Impl::is_sendable() const
+Channel<T>::Impl::is_send_ready() const
 {
-    return !(buffer.is_full() || receiverq.is_empty());
+    return !(buffer.is_full() && receiverq.is_empty());
 }
 
 
@@ -547,9 +532,9 @@ Channel<T>::Impl::make_receivable(T* valuep)
 
 template<class T>
 void
-Channel<T>::Impl::pop_value(Buffer* bufp, T* valuep, Sender_queue* waitqp)
+Channel<T>::Impl::pop(Buffer* bufp, T* recvbufp, Sender_queue* waitqp)
 {
-    bufp->pop(valuep);
+    bufp->pop(recvbufp);
 
     if (!waitqp->is_empty()) {
         Waiting_sender s = waitqp->pop();
@@ -571,7 +556,7 @@ void
 Channel<T>::Impl::ready_receive(T* valuep)
 {
     if (!buffer.is_empty())
-        pop_value(&buffer, valuep, &senderq);
+        pop(&buffer, valuep, &senderq);
     else
         dequeue_sender(&senderq, valuep);
 }
@@ -628,10 +613,8 @@ Channel<T>::Impl::sync_receive()
     T       value;
     Lock    lock{mutex};
 
-    if (!receiverq.is_empty())
-        wait_for_sender(lock, &receiverq, &value);
-    else if (!buffer.is_empty())
-        pop_value(&buffer, &value, &senderq);
+    if (!buffer.is_empty())
+        pop(&buffer, &value, &senderq);
     else if (!senderq.is_empty())
         dequeue_sender(&senderq, &value);
     else
@@ -648,12 +631,10 @@ Channel<T>::Impl::sync_send(U* valuep)
 {
     Lock lock{mutex};
 
-    if (!senderq.is_empty())
-        wait_for_receiver(lock, &senderq, valuep);
+    if (!buffer.is_full())
+        buffer.push(move(*valuep));
     else if (!receiverq.is_empty())
         dequeue_receiver(&receiverq, valuep);
-    else if (!buffer.is_full())
-        buffer.push(move(*valuep));
     else
         wait_for_receiver(lock, &senderq, valuep);
 }
@@ -667,7 +648,7 @@ Channel<T>::Impl::try_receive()
     Lock        lock{mutex};
 
     if (!buffer.is_empty())
-        buffer.pop(&value);
+        pop(&buffer, &value, &senderq);
     else if (!senderq.is_empty())
         dequeue_sender(&senderq, &value);
 
@@ -682,10 +663,10 @@ Channel<T>::Impl::try_send(const T& value)
     bool is_sent{true};
     Lock lock{mutex};
 
-    if (!receiverq.is_empty())
-        dequeue_receiver(&receiverq, &value);
-    else if (!buffer.is_full())
+    if (!buffer.is_full())
         buffer.push(value);
+    else if (!receiverq.is_empty())
+        dequeue_receiver(&receiverq, &value);
     else
         is_sent = false;
 
@@ -704,25 +685,25 @@ Channel<T>::Impl::unlock()
 template<class T>
 template<class U>
 void
-Channel<T>::Impl::wait_for_receiver(Lock& lock, Sender_queue* waitqp, U* valuep)
+Channel<T>::Impl::wait_for_receiver(Lock& lock, Sender_queue* waitqp, U* sendbufp)
 {
     condition_variable      ready;
-    const Waiting_sender    sender{&ready, valuep};
+    const Waiting_sender    ownthread{&ready, sendbufp};
 
-    waitqp->push(sender);
-    ready.wait(lock, [&]{ return !waitqp->find(sender); });
+    waitqp->push(ownthread);
+    ready.wait(lock, [&]{ return !waitqp->find(ownthread); });
 }
 
 
 template<class T>
 void
-Channel<T>::Impl::wait_for_sender(Lock& lock, Receiver_queue* waitqp, T* valuep)
+Channel<T>::Impl::wait_for_sender(Lock& lock, Receiver_queue* waitqp, T* recvbufp)
 {
     condition_variable      ready;
-    const Waiting_receiver  receiver{&ready, valuep};
+    const Waiting_receiver  ownthread{&ready, recvbufp};
 
-    waitqp->push(receiver);
-    ready.wait(lock, [&]{ return !waitqp->find(receiver); });
+    waitqp->push(ownthread);
+    ready.wait(lock, [&]{ return !waitqp->find(ownthread); });
 }
 
 
@@ -732,8 +713,9 @@ Channel<T>::Impl::wait_for_sender(Lock& lock, Receiver_queue* waitqp, T* valuep)
 template<class T>
 inline
 Channel<T>::Receive_awaitable::Receive_awaitable(Impl* channelp)
+    : ops{channelp->make_receivable(&value)}
+    , alts{ops}
 {
-    ops[0] = channelp->make_receivable(&value);
 }
 
 
@@ -749,18 +731,7 @@ template<class T>
 inline bool
 Channel<T>::Receive_awaitable::await_suspend(Goroutine::Handle g)
 {
-    using Detail::Channel_alternatives;
-
-    Channel_alternatives    alternatives;
-    bool                    is_suspended = false;
-
-    if (alternatives.select(ops)) {
-        alternatives.enqueue(g);
-        scheduler.suspend(g);
-        is_suspended = true;
-    }
-
-    return is_suspended;
+    return !Detail::select(&alts, g);
 }
 
 
@@ -779,8 +750,9 @@ template<class T>
 template<class U>
 inline
 Channel<T>::Send_awaitable::Send_awaitable(Impl* channelp, U* valuep)
+    : ops{channelp->make_sendable(valuep)}
+    , alts{ops}
 {
-    ops[0] = channelp->make_sendable(valuep);
 }
 
 
@@ -803,18 +775,7 @@ template<class T>
 bool
 Channel<T>::Send_awaitable::await_suspend(Goroutine::Handle g)
 {
-    using Detail::Channel_alternatives;
-
-    Channel_alternatives    alternatives;
-    bool                    is_suspended = false;
-
-    if (alternatives.select(ops)) {
-        alternatives.enqueue(g);
-        scheduler.suspend(g);
-        is_suspended = true;
-    }
-
-    return is_suspended;
+    return !Detail::select(&alts, g);
 }
 
 
@@ -1090,136 +1051,12 @@ using std::move;
     
     
 /*
-    Channel Alternatives
-*/
-void
-Channel_alternatives::enqueue(Goroutine::Handle g)
-{
-    for (Channel_operation* op = first; op != last; ++op)
-        op->enqueue(g);
-}
-
-
-void
-Channel_alternatives::lock(Channel_operation* first, Channel_operation* last)
-{
-    Channel_operation::Interface* prevchanp = nullptr;
-
-    for (Channel_operation* op = first; op != last; ++op) {
-        // lock each channel just once
-        if (op->chanp && op->chanp != prevchanp) {
-            op->chanp->lock();
-            prevchanp = op->chanp;
-        }
-    }
-}
-    
-   
-Channel_size
-Channel_alternatives::random_ready(Channel_size max)
-{
-    using Device        = std::random_device;
-    using Engine        = std::default_random_engine;
-    using Distribution  = std::uniform_int_distribution<Channel_size>;
-
-    Device          rand;
-    Engine          engine(rand());
-    Distribution    dist(0, max);
-
-    return dist(engine);
-}
-    
-   
-void
-Channel_alternatives::restore_positions(Channel_operation* first, Channel_operation* last)
-{
-    using std::sort;
-
-    sort(first, last, position_less());
-}
-
-
-void
-Channel_alternatives::save_positions(Channel_operation* first, Channel_operation* last)
-{
-    int i = 0;
-
-    for (Channel_operation* p = first; p != last; ++p)
-        p->pos = ++i;
-}
-
-
-template<Channel_size N>
-optional<Channel_size>
-Channel_alternatives::select(Channel_operation (&ops)[N])
-{
-    using std::sort;
-
-    Channel_operation* first    = begin(ops);
-    Channel_operation* last     = end(ops);
-
-    save_positions(first, last);
-    sort(first, last);
-    lock(first, last);
-
-    Channel_operation* p = select(first, last);
-    if (p != last)
-        selectpos = p->pos;
-
-    unlock(first, last);
-    restore_positions(first, last);
-
-    return selectpos;
-}
-
-
-Channel_operation*
-Channel_alternatives::select(Channel_operation* first, Channel_operation* last)
-{
-    Channel_operation*  selectp = last;
-    Channel_size        nready  = 0;
-
-    for (Channel_operation* op = first; op != last; ++op) {
-        if (op->is_ready())
-            ++nready;
-    }
-
-    Channel_size n = random_ready(nready);
-
-    for (Channel_operation* op = first; op != last; ++op) {
-        if (op->is_ready() && n-- == 0) {
-            op->execute();
-            selectp = op;
-            break;
-        }
-    }
-
-    return selectp;
-}
-
-
-void
-Channel_alternatives::unlock(Channel_operation* first, Channel_operation* last)
-{
-    Channel_operation::Interface* prevchanp = nullptr;
-
-    for (Channel_operation* op = first; op != last; ++op) {
-        // unlock each channel just once
-        if (op->chanp && op->chanp != prevchanp) {
-            op->chanp->unlock();
-            prevchanp = op->chanp;
-        }
-    }
-}
-    
-   
-/*
     Channel Buffer
 */
 template<class T>
 inline
 Channel_buffer<T>::Channel_buffer(Channel_size maxsize)
-    : sizemax(maxsize >=0 ? maxsize : 0)
+    : sizemax{maxsize >= 0 ? maxsize : 0}
 {
     assert(maxsize >= 0);
 }
@@ -1294,6 +1131,18 @@ Channel_buffer<T>::size() const
     Wait Queue
 */
 template<class T>
+inline void
+Wait_queue<T>::erase(Goroutine::Handle g)
+{
+    using std::find_if;
+
+    const auto wp = find_if(ws.begin(), ws.end(), goroutine_eq(g));
+    if (wp != ws.end())
+        ws.erase(wp);
+}
+
+
+template<class T>
 inline bool
 Wait_queue<T>::is_empty() const
 {
@@ -1336,10 +1185,12 @@ Wait_queue<T>::push(const Waiter& w)
 */
 template<class T>
 inline
-Waiting_receiver<T>::Waiting_receiver(Goroutine::Handle receiver, T* valuep)
+Waiting_receiver<T>::Waiting_receiver(Detail::Channel_alternatives* ap, Channel_size apos, Goroutine::Handle receiver, T* valuep)
     : g{receiver}
     , readyp{nullptr}
     , valp{valuep}
+    , altsp{ap}
+    , altpos{apos}
 {
     assert(receiver);
     assert(valuep != nullptr);
@@ -1349,7 +1200,8 @@ Waiting_receiver<T>::Waiting_receiver(Goroutine::Handle receiver, T* valuep)
 template<class T>
 inline
 Waiting_receiver<T>::Waiting_receiver(condition_variable* sysreadyp, T* valuep)
-    : readyp{sysreadyp}
+    : g{nullptr}
+    , readyp{sysreadyp}
     , valp{valuep}
 {
     assert(sysreadyp != nullptr);
@@ -1372,10 +1224,12 @@ Waiting_receiver<T>::resume(U* valuep) const
 {
     *valp = move(*valuep);
 
-    if (g)
+    if (g) {
+        altsp->complete(altpos, g);
         scheduler.resume(g);
-    else
+    } else {
         readyp->notify_one();
+    }
 }
 
 
@@ -1394,6 +1248,8 @@ operator==(const Waiting_receiver<T>& x, const Waiting_receiver<T>& y)
     if (x.g != y.g) return false;
     if (x.readyp != y.readyp) return false;
     if (x.valp != y.valp) return false;
+    if (x.altsp != y.altsp) return false;
+    if (x.altpos != y.altpos) return false;
     return true;
 }
 
@@ -1403,11 +1259,13 @@ operator==(const Waiting_receiver<T>& x, const Waiting_receiver<T>& y)
 */
 template<class T>
 inline
-Waiting_sender<T>::Waiting_sender(Goroutine::Handle sender, const T* rvaluep)
+Waiting_sender<T>::Waiting_sender(Channel_alternatives* ap, Channel_size apos, Goroutine::Handle sender, const T* rvaluep)
     : g{sender}
     , readyp{nullptr}
     , rvalp{rvaluep}
     , lvalp{nullptr}
+    , altsp{ap}
+    , altpos{apos}
 {
     assert(sender);
     assert(rvaluep != nullptr);
@@ -1416,11 +1274,13 @@ Waiting_sender<T>::Waiting_sender(Goroutine::Handle sender, const T* rvaluep)
 
 template<class T>
 inline
-Waiting_sender<T>::Waiting_sender(Goroutine::Handle sender, T* lvaluep)
+Waiting_sender<T>::Waiting_sender(Channel_alternatives* ap, Channel_size apos, Goroutine::Handle sender, T* lvaluep)
     : g{sender}
     , readyp{nullptr}
     , rvalp{nullptr}
     , lvalp{lvaluep}
+    , altsp{ap}
+    , altpos{apos}
 {
     assert(sender);
     assert(lvaluep != nullptr);
@@ -1430,9 +1290,12 @@ Waiting_sender<T>::Waiting_sender(Goroutine::Handle sender, T* lvaluep)
 template<class T>
 inline
 Waiting_sender<T>::Waiting_sender(condition_variable* sysreadyp, const T* rvaluep)
-    : readyp{sysreadyp}
+    : g{nullptr}
+    , readyp{sysreadyp}
     , rvalp{rvaluep}
     , lvalp{nullptr}
+    , altsp{nullptr}
+    , altpos{0}
 {
     assert(sysreadyp != nullptr);
     assert(rvaluep != nullptr);
@@ -1442,9 +1305,12 @@ Waiting_sender<T>::Waiting_sender(condition_variable* sysreadyp, const T* rvalue
 template<class T>
 inline
 Waiting_sender<T>::Waiting_sender(condition_variable* sysreadyp, T* lvaluep)
-    : readyp{sysreadyp}
+    : g{nullptr}
+    , readyp{sysreadyp}
     , rvalp{nullptr}
     , lvalp{lvaluep}
+    , altsp{nullptr}
+    , altpos{0}
 {
     assert(sysreadyp != nullptr);
     assert(lvaluep != nullptr);
@@ -1460,31 +1326,36 @@ Waiting_sender<T>::goroutine() const
 
 
 template<class T>
+template<class U>
 inline void
-Waiting_sender<T>::resume(T* valuep) const
+Waiting_sender<T>::resume(U* outp) const
 {
-    *valuep = lvalp ? move(*lvalp) : *rvalp;
+    *outp = lvalp ? move(*lvalp) : *rvalp;
 
-    if (g)
+    if (g) {
+        altsp->complete(altpos, g);
         scheduler.resume(g);
-    else
+    } else {
         readyp->notify_one();
+    }
 }
 
 
 template<class T>
 inline void
-Waiting_sender<T>::resume(Channel_buffer<T>* bufp) const
+Waiting_sender<T>::resume(Channel_buffer<T>* outp) const
 {
     if (lvalp)
-        bufp->push(move(*lvalp));
+        outp->push(move(*lvalp));
     else
-        bufp->push(*rvalp);
+        outp->push(*rvalp);
 
-    if (g)
+    if (g) {
+        altsp->complete(altpos, g);
         scheduler.resume(g);
-    else
+    } else {
         readyp->notify_one();
+    }
 }
 
 
@@ -1503,7 +1374,9 @@ operator==(const Waiting_sender<T>& x, const Waiting_sender<T>& y)
     if (x.g != y.g) return false;
     if (x.readyp != y.readyp) return false;
     if (x.rvalp != y.rvalp) return false;
-    if (x.lvalp != y.rvalp) return false;
+    if (x.lvalp != y.lvalp) return false;
+    if (x.altsp != y.altsp) return false;
+    if (x.altpos != y.altpos) return false;
     return true;
 }
 
@@ -1516,8 +1389,8 @@ operator==(const Waiting_sender<T>& x, const Waiting_sender<T>& y)
 */
 template<Channel_size N>
 Channel_select_awaitable::Channel_select_awaitable(Channel_operation (&ops)[N])
+    : alts{ops}
 {
-    alternatives.select(ops);
 }
 
 
@@ -1531,22 +1404,31 @@ Channel_select_awaitable::await_ready()
 inline optional<Channel_size>
 Channel_select_awaitable::await_resume()
 {
-    return alternatives.selected();
+    return alts.selected();
 }
 
 
 inline bool
 Channel_select_awaitable::await_suspend(Goroutine::Handle g)
 {
-    bool is_suspended = false;
+    return !Detail::select(&alts, g);
+}
 
-    if (alternatives.selected()) {
-        alternatives.enqueue(g);
-        scheduler.suspend(g);
-        is_suspended = true;
-    }
 
-    return is_suspended;
+template<Channel_size N>
+inline Channel_select_awaitable
+select(Channel_operation (&ops)[N])
+{
+    return Channel_select_awaitable(ops);
+}
+
+
+template<Channel_size N>
+inline optional<Channel_size>
+try_select(Channel_operation (&ops)[N])
+{
+    Detail::Channel_alternatives alts(ops);
+    return alts.select();
 }
 
 

@@ -48,6 +48,223 @@ namespace Detail {
     
     
 /*
+    Channel Alternatives
+*/
+template<Channel_size N>
+Channel_alternatives::Channel_alternatives(Channel_operation (&ops)[N])
+    : first{begin(ops)}
+    , last{end(ops)}
+{
+    save_positions(first, last);
+}
+
+
+void
+Channel_alternatives::complete(Channel_size pos, Goroutine::Handle g)
+{
+    for (Channel_operation* op = first; op != last; ++op) {
+        if (op - first != pos)
+            op->dequeue(g);
+    }
+
+    chosen = pos;
+}
+
+
+inline Channel_size
+Channel_alternatives::count_ready(Channel_operation* first, Channel_operation* last)
+{
+    return std::count_if(first, last, is_ready());
+}
+
+
+void
+Channel_alternatives::enqueue(Goroutine::Handle g)
+{
+    enqueue(first, last, g, this);
+    unlock(first, last);
+}
+
+
+void
+Channel_alternatives::enqueue(Channel_operation* first, Channel_operation* last, Goroutine::Handle g, Channel_alternatives* selfp)
+{
+    for (Channel_operation* op = first; op != last; ++op)
+        op->enqueue(g, selfp);
+}
+
+
+inline void
+Channel_alternatives::lock(Channel_operation* first, Channel_operation* last)
+{
+    sort_channels(first, last);
+    lock_channels(first, last);
+}
+    
+   
+void
+Channel_alternatives::lock_channels(Channel_operation* first, Channel_operation* last)
+{
+    Channel_operation::Interface* prevchanp = nullptr;
+
+    for (Channel_operation* op = first; op != last; ++op) {
+        // lock each channel just once
+        if (op->chanp && op->chanp != prevchanp) {
+            op->chanp->lock();
+            prevchanp = op->chanp;
+        }
+    }
+}
+    
+   
+Channel_operation*
+Channel_alternatives::pick_ready(Channel_operation* first, Channel_operation* last, Channel_size nready)
+{
+    Channel_operation*  readyp  = last;
+    Channel_size        n       = random(1, nready);
+
+    for (Channel_operation* op = first; op != last; ++op) {
+        if (op->is_ready() && --n == 0) {
+            readyp = op;
+            break;
+        }
+    }
+
+    return readyp;
+}
+
+
+Channel_size
+Channel_alternatives::random(Channel_size min, Channel_size max)
+{
+    using Device        = std::random_device;
+    using Engine        = std::default_random_engine;
+    using Distribution  = std::uniform_int_distribution<Channel_size>;
+
+    Device          rand;
+    Engine          engine{rand()};
+    Distribution    dist{min, max};
+
+    return dist(engine);
+}
+    
+   
+inline void
+Channel_alternatives::reposition(Channel_operation* first, Channel_operation* last)
+{
+    using std::sort;
+
+    sort(first, last, position_less());
+}
+
+
+void
+Channel_alternatives::save_positions(Channel_operation* first, Channel_operation* last)
+{
+    int i = 0;
+
+    for (Channel_operation* op = first; op != last; ++op)
+        op->pos = i++;
+}
+
+
+optional<Channel_size>
+Channel_alternatives::select()
+{
+    lock(first, last);
+    chosen = select_ready(first, last);
+
+    // If an operation was selected, unlock channels; otherwise, they will
+    // be unlocked after all operations have been enqueued.
+    if (chosen)
+        unlock(first, last);
+
+    return chosen;
+}
+
+
+optional<Channel_size>
+Channel_alternatives::select_ready(Channel_operation* first, Channel_operation* last)
+{
+    optional<Channel_size>  pos;
+    const Channel_size      n = count_ready(first, last);
+
+    if (n > 0) {
+        Channel_operation* op = pick_ready(first, last, n);
+        op->execute();
+        pos = op->pos;
+    }
+
+    return pos;
+}
+
+
+void
+Channel_alternatives::sort_channels(Channel_operation* first, Channel_operation* last)
+{
+    using std::sort;
+
+    sort(first, last, channel_less());
+}
+
+
+void
+Channel_alternatives::unlock(Channel_operation* first, Channel_operation* last)
+{
+    Channel_operation::Interface* prevchanp = nullptr;
+
+    for (Channel_operation* op = first; op != last; ++op) {
+        // unlock each channel just once
+        if (op->chanp && op->chanp != prevchanp) {
+            op->chanp->unlock();
+            prevchanp = op->chanp;
+        }
+    }
+
+    reposition(first, last);
+}
+
+
+inline bool
+Channel_alternatives::is_ready::operator()(const Channel_operation& op) const
+{
+    return op.is_ready();
+}
+
+
+inline bool
+Channel_alternatives::channel_less::operator()(const Channel_operation& x, const Channel_operation& y) const
+{
+    return x.chanp < y.chanp;
+}
+
+
+inline bool
+Channel_alternatives::position_less::operator()(const Channel_operation& x, const Channel_operation& y) const
+{
+    return x.pos < y.pos;
+}
+    
+   
+/*
+    Channel Selection
+*/
+bool
+select(Channel_alternatives* altsp, Goroutine::Handle g)
+{
+    bool is_selected = true;
+
+    if (!altsp->select()) {
+        altsp->enqueue(g);
+        scheduler.suspend(g);
+        is_selected = false;
+    }
+
+    return is_selected;
+}
+
+
+/*
     Sheduler Work Queue
 */
 void
@@ -220,7 +437,7 @@ Workqueue_array::size() const
 */
 inline
 Goroutine_list::handle_equal::handle_equal(Goroutine::Handle gh)
-    : h(gh)
+    : h{gh}
 {
 }
 
@@ -264,7 +481,7 @@ Goroutine_list::release(Goroutine::Handle h)
     Channel Operation
 */
 Channel_operation::Channel_operation()
-    : kind(none)
+    : kind{none}
     , chanp{nullptr}
     , rvalp{nullptr}
     , lvalp{nullptr}
@@ -274,7 +491,7 @@ Channel_operation::Channel_operation()
 
 
 Channel_operation::Channel_operation(Interface* channelp, const void* rvaluep)
-    : kind(send)
+    : kind{send}
     , chanp{channelp}
     , rvalp{rvaluep}
     , lvalp{nullptr}
@@ -284,7 +501,7 @@ Channel_operation::Channel_operation(Interface* channelp, const void* rvaluep)
 
 
 Channel_operation::Channel_operation(Interface* channelp, Type optype, void* lvaluep)
-    : kind(optype)
+    : kind{optype}
     , chanp{channelp}
     , rvalp{nullptr}
     , lvalp{lvaluep}
@@ -294,20 +511,45 @@ Channel_operation::Channel_operation(Interface* channelp, Type optype, void* lva
 
 
 void
-Channel_operation::enqueue(Goroutine::Handle g)
+Channel_operation::dequeue(Goroutine::Handle g)
+{
+    if (chanp && g) {
+        chanp->lock();
+
+        switch(kind) {
+        case send:
+            if (rvalp)
+                chanp->dequeue_send(g);
+            else if (lvalp)
+                chanp->dequeue_send(g);
+            break;
+
+        case receive:
+            if (lvalp)
+                chanp->dequeue_receive(g);
+            break;
+        }
+
+        chanp->unlock();
+    }
+}
+
+
+void
+Channel_operation::enqueue(Goroutine::Handle g, Detail::Channel_alternatives* altsp)
 {
     if (chanp && g) {
         switch(kind) {
         case send:
             if (rvalp)
-                chanp->enqueue_send(g, rvalp);
+                chanp->enqueue_send(altsp, pos, g, rvalp);
             else if (lvalp)
-                chanp->enqueue_send(g, lvalp);
+                chanp->enqueue_send(altsp, pos, g, lvalp);
             break;
 
         case receive:
             if (lvalp)
-                chanp->enqueue_receive(g, lvalp);
+                chanp->enqueue_receive(altsp, pos, g, lvalp);
             break;
         }
     }
@@ -341,8 +583,8 @@ Channel_operation::is_ready() const
     if (!chanp) return false;
 
     switch(kind) {
-    case send:      return chanp->is_sendable(); break;
-    case receive:   return chanp->is_receivable(); break;
+    case send:      return chanp->is_send_ready(); break;
+    case receive:   return chanp->is_receive_ready(); break;
     default:        return false;
     }
 }
@@ -351,8 +593,8 @@ Channel_operation::is_ready() const
 /*
     Goroutine Scheduler
 */
-Scheduler::Scheduler()
-    : workqueues{thread::hardware_concurrency()}
+Scheduler::Scheduler(int nthreads)
+    : workqueues{nthreads > 0 ? nthreads : thread::hardware_concurrency()}
 {
     const auto nqueues = workqueues.size();
 
@@ -364,9 +606,14 @@ Scheduler::Scheduler()
 
 Scheduler::~Scheduler()
 {
-    // TODO: This destructor should be unnecessary because...
-    workqueues.interrupt();             // TODO: queues should be shutdown implicitly (in their destructor)
-    for (auto& w : workers) w.join();   // TODO: workers should be joined implicity (in their destructor)
+    /*
+        TODO:  Could this destructor should be rendered unnecessary because
+        by arranging for (a) queues to shutdown implicitly (in their
+        destructors) and (b) workers to be joined implicitly (in their
+        destructors)?
+    */
+    workqueues.interrupt();
+    for (auto& w : workers) w.join();
 }
 
 
