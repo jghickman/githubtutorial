@@ -30,7 +30,7 @@ namespace Concurrency   {
 
 
 // Names/Types
-Scheduler scheduler;
+Scheduler scheduler(1);
 
 
 /*
@@ -48,77 +48,27 @@ namespace Detail {
     
     
 /*
-    Channel Alternatives
+    Channel Alternative Implementation
 */
-template<Channel_size N>
-Channel_alternatives::Channel_alternatives(Channel_operation (&ops)[N])
-    : first{begin(ops)}
-    , last{end(ops)}
-{
-    save_positions(first, last);
-}
-
-
-void
-Channel_alternatives::complete(Channel_size pos, Goroutine::Handle g)
-{
-    for (Channel_operation* op = first; op != last; ++op) {
-        if (op - first != pos)
-            op->dequeue(g);
-    }
-
-    chosen = pos;
-}
-
-
 inline Channel_size
-Channel_alternatives::count_ready(Channel_operation* first, Channel_operation* last)
+Channel_alternative::Impl::count_ready(Channel_operation* first, Channel_operation* last)
 {
-    return std::count_if(first, last, is_ready());
+    return std::count_if(first, last, [](auto& op) {
+        return op.is_ready();
+    });
 }
 
 
 void
-Channel_alternatives::enqueue(Goroutine::Handle g)
-{
-    enqueue(first, last, g, this);
-    unlock(first, last);
-}
-
-
-void
-Channel_alternatives::enqueue(Channel_operation* first, Channel_operation* last, Goroutine::Handle g, Channel_alternatives* selfp)
+Channel_alternative::Impl::enqueue(const Channel_alternative::Impl_ptr& selfp, Channel_operation* first, Channel_operation* last)
 {
     for (Channel_operation* op = first; op != last; ++op)
-        op->enqueue(g, selfp);
+        op->enqueue(selfp);
 }
 
 
-inline void
-Channel_alternatives::lock(Channel_operation* first, Channel_operation* last)
-{
-    sort_channels(first, last);
-    lock_channels(first, last);
-}
-    
-   
-void
-Channel_alternatives::lock_channels(Channel_operation* first, Channel_operation* last)
-{
-    Channel_operation::Interface* prevchanp = nullptr;
-
-    for (Channel_operation* op = first; op != last; ++op) {
-        // lock each channel just once
-        if (op->chanp && op->chanp != prevchanp) {
-            op->chanp->lock();
-            prevchanp = op->chanp;
-        }
-    }
-}
-    
-   
 Channel_operation*
-Channel_alternatives::pick_ready(Channel_operation* first, Channel_operation* last, Channel_size nready)
+Channel_alternative::Impl::pick_ready(Channel_operation* first, Channel_operation* last, Channel_size nready)
 {
     Channel_operation*  readyp  = last;
     Channel_size        n       = random(1, nready);
@@ -135,7 +85,7 @@ Channel_alternatives::pick_ready(Channel_operation* first, Channel_operation* la
 
 
 Channel_size
-Channel_alternatives::random(Channel_size min, Channel_size max)
+Channel_alternative::Impl::random(Channel_size min, Channel_size max)
 {
     using Device        = std::random_device;
     using Engine        = std::default_random_engine;
@@ -149,42 +99,25 @@ Channel_alternatives::random(Channel_size min, Channel_size max)
 }
     
    
-inline void
-Channel_alternatives::reposition(Channel_operation* first, Channel_operation* last)
-{
-    using std::sort;
-
-    sort(first, last, position_less());
-}
-
-
-void
-Channel_alternatives::save_positions(Channel_operation* first, Channel_operation* last)
-{
-    int i = 0;
-
-    for (Channel_operation* op = first; op != last; ++op)
-        op->pos = i++;
-}
-
-
 optional<Channel_size>
-Channel_alternatives::select()
+Channel_alternative::Impl::select(const Impl_ptr& selfp, Goroutine::Handle g)
 {
-    lock(first, last);
-    chosen = select_ready(first, last);
+    Lock            lock(mutex);
+    Channel_locks   lockchans(first, last);
 
-    // If an operation was selected, unlock channels; otherwise, they will
-    // be unlocked after all operations have been enqueued.
-    if (chosen)
-        unlock(first, last);
+    chosen = select_ready(first, last);
+    if (!chosen) {
+        enqueue(selfp, first, last);
+        waiting = g;
+        scheduler.suspend(g);
+    }
 
     return chosen;
 }
 
 
 optional<Channel_size>
-Channel_alternatives::select_ready(Channel_operation* first, Channel_operation* last)
+Channel_alternative::Impl::select_ready(Channel_operation* first, Channel_operation* last)
 {
     optional<Channel_size>  pos;
     const Channel_size      n = count_ready(first, last);
@@ -199,71 +132,27 @@ Channel_alternatives::select_ready(Channel_operation* first, Channel_operation* 
 }
 
 
-void
-Channel_alternatives::sort_channels(Channel_operation* first, Channel_operation* last)
-{
-    using std::sort;
-
-    sort(first, last, channel_less());
-}
-
-
-void
-Channel_alternatives::unlock(Channel_operation* first, Channel_operation* last)
-{
-    Channel_operation::Interface* prevchanp = nullptr;
-
-    for (Channel_operation* op = first; op != last; ++op) {
-        // unlock each channel just once
-        if (op->chanp && op->chanp != prevchanp) {
-            op->chanp->unlock();
-            prevchanp = op->chanp;
-        }
-    }
-
-    reposition(first, last);
-}
-
-
 inline bool
-Channel_alternatives::is_ready::operator()(const Channel_operation& op) const
+Channel_alternative::is_ready::operator()(const Channel_operation& op) const
 {
     return op.is_ready();
 }
 
 
 inline bool
-Channel_alternatives::channel_less::operator()(const Channel_operation& x, const Channel_operation& y) const
+Channel_alternative::channel_less::operator()(const Channel_operation& x, const Channel_operation& y) const
 {
     return x.chanp < y.chanp;
 }
 
 
 inline bool
-Channel_alternatives::position_less::operator()(const Channel_operation& x, const Channel_operation& y) const
+Channel_alternative::position_less::operator()(const Channel_operation& x, const Channel_operation& y) const
 {
     return x.pos < y.pos;
 }
     
    
-/*
-    Channel Selection
-*/
-bool
-select(Channel_alternatives* altsp, Goroutine::Handle g)
-{
-    bool is_selected = true;
-
-    if (!altsp->select()) {
-        altsp->enqueue(g);
-        scheduler.suspend(g);
-        is_selected = false;
-    }
-
-    return is_selected;
-}
-
-
 /*
     Sheduler Work Queue
 */
@@ -474,6 +363,74 @@ Goroutine_list::release(Goroutine::Handle h)
 }
 
 
+/*
+    Channel Locks
+*/
+Channel_locks::Channel_locks(Channel_operation* begin, Channel_operation* end)
+    : first(begin)
+    , last(end)
+{
+    save_positions(first, last);
+    lock(first, last);
+}
+
+
+Channel_locks::~Channel_locks()
+{
+    unlock(first, last);
+    reposition(first, last);
+}
+
+
+inline void
+Channel_locks::lock(Channel_operation* first, Channel_operation* last)
+{
+    Channel_operation::Interface* prevchanp = nullptr;
+
+    for (Channel_operation* op = first; op != last; ++op) {
+        if (op->chanp && op->chanp != prevchanp) {
+            op->chanp->lock();
+            prevchanp = op->chanp;
+        }
+    }
+}
+    
+   
+inline void
+Channel_locks::reposition(Channel_operation* first, Channel_operation* last)
+{
+    using std::sort;
+
+    sort(first, last, [](auto& x, auto& y) {
+        return x.pos < y.pos;
+    });
+}
+
+
+void
+Channel_locks::save_positions(Channel_operation* first, Channel_operation* last)
+{
+    int i = 0;
+
+    for (Channel_operation* op = first; op != last; ++op)
+        op->pos = i++;
+}
+
+
+void
+Channel_locks::unlock(Channel_operation* first, Channel_operation* last)
+{
+    Channel_operation::Interface* prevchanp = nullptr;
+
+    for (Channel_operation* op = first; op != last; ++op) {
+        if (op->chanp && op->chanp != prevchanp) {
+            op->chanp->unlock();
+            prevchanp = op->chanp;
+        }
+    }
+}
+
+
 }   // Implementation Details
 
 
@@ -511,45 +468,20 @@ Channel_operation::Channel_operation(Interface* channelp, Type optype, void* lva
 
 
 void
-Channel_operation::dequeue(Goroutine::Handle g)
+Channel_operation::enqueue(const Detail::Channel_alternative::Impl_ptr& altp)
 {
-    if (chanp && g) {
-        chanp->lock();
-
+    if (chanp && altp) {
         switch(kind) {
         case send:
             if (rvalp)
-                chanp->dequeue_send(g);
+                chanp->enqueue_send(altp, pos, rvalp);
             else if (lvalp)
-                chanp->dequeue_send(g);
+                chanp->enqueue_send(altp, pos, lvalp);
             break;
 
         case receive:
             if (lvalp)
-                chanp->dequeue_receive(g);
-            break;
-        }
-
-        chanp->unlock();
-    }
-}
-
-
-void
-Channel_operation::enqueue(Goroutine::Handle g, Detail::Channel_alternatives* altsp)
-{
-    if (chanp && g) {
-        switch(kind) {
-        case send:
-            if (rvalp)
-                chanp->enqueue_send(altsp, pos, g, rvalp);
-            else if (lvalp)
-                chanp->enqueue_send(altsp, pos, g, lvalp);
-            break;
-
-        case receive:
-            if (lvalp)
-                chanp->enqueue_receive(altsp, pos, g, lvalp);
+                chanp->enqueue_receive(altp, pos, lvalp);
             break;
         }
     }
