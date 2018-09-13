@@ -100,16 +100,17 @@ Channel_alternative::Impl::random(Channel_size min, Channel_size max)
     
    
 optional<Channel_size>
-Channel_alternative::Impl::select(const Impl_ptr& selfp, Goroutine::Handle g)
+Channel_alternative::Impl::select(const Impl_ptr& selfp, Channel_operation* first, Channel_operation* last, Goroutine::Handle g)
 {
-    Lock            lock(mutex);
-    Channel_locks   lockchans(first, last);
+    const Lock          lock{mutex};
+    const Channel_sort  sortchans{first, last};
+    const Channel_locks lockchans{first, last};
 
     chosen = select_ready(first, last);
     if (!chosen) {
         enqueue(selfp, first, last);
-        waiting = g;
         scheduler.suspend(g);
+        waiting = g;
     }
 
     return chosen;
@@ -131,28 +132,18 @@ Channel_alternative::Impl::select_ready(Channel_operation* first, Channel_operat
     return pos;
 }
 
-
-inline bool
-Channel_alternative::is_ready::operator()(const Channel_operation& op) const
-{
-    return op.is_ready();
-}
-
-
-inline bool
-Channel_alternative::channel_less::operator()(const Channel_operation& x, const Channel_operation& y) const
-{
-    return x.chanp < y.chanp;
-}
-
-
-inline bool
-Channel_alternative::position_less::operator()(const Channel_operation& x, const Channel_operation& y) const
-{
-    return x.pos < y.pos;
-}
-    
    
+optional<Channel_size>
+Channel_alternative::Impl::try_select(Channel_operation* first, Channel_operation* last)
+{
+    const Lock          lock{mutex};
+    const Channel_sort  sortchans{first, last};
+    const Channel_locks lockchans{first, last};
+
+    chosen = select_ready(first, last);
+    return chosen;
+}
+
 /*
     Sheduler Work Queue
 */
@@ -170,16 +161,16 @@ Workqueue::interrupt()
 optional<Goroutine>
 Workqueue::pop()
 {
-    optional<Goroutine> gp;
+    optional<Goroutine> g;
     Lock                lock{mutex};
 
     while (q.is_empty() && !is_interrupt)
         ready.wait(lock);
 
     if (!q.is_empty())
-        gp = q.pop();
+        g = q.pop();
 
-    return gp;
+    return g;
 }
 
 
@@ -203,13 +194,13 @@ Workqueue::push(Mutex& sync, Goroutine&& g, Goroutine_queue* qp)
 optional<Goroutine>
 Workqueue::try_pop()
 {
-    optional<Goroutine> gp;
+    optional<Goroutine> g;
     Lock                lock{mutex, try_to_lock};
 
     if (lock && !q.is_empty())
-        gp = q.pop();
+        g = q.pop();
 
-    return gp;
+    return g;
 }
 
 
@@ -236,16 +227,16 @@ Workqueue::try_push(Goroutine&& g)
 inline bool
 Workqueue::Goroutine_queue::is_empty() const
 {
-    return elems.empty();
+    return gs.empty();
 }
 
 
 inline Goroutine
 Workqueue::Goroutine_queue::pop()
 {
-    Goroutine g{move(elems.front())};
+    Goroutine g{move(gs.front())};
 
-    elems.pop_front();
+    gs.pop_front();
     return g;
 }
 
@@ -253,7 +244,7 @@ Workqueue::Goroutine_queue::pop()
 inline void
 Workqueue::Goroutine_queue::push(Goroutine&& g)
 {
-    elems.push_back(move(g));
+    gs.push_back(move(g));
 }
 
 
@@ -275,22 +266,22 @@ Workqueue_array::interrupt()
 
 
 optional<Goroutine>
-Workqueue_array::pop(Size preferred)
+Workqueue_array::pop(Size qpref)
 {
     const auto          nqueues = queues.size();
-    optional<Goroutine> gp;
+    optional<Goroutine> g;
 
     // Beginning with the preferred queue, try to dequeue work without waiting.
-    for (Size i = 0; !gp && i < nqueues; ++i) {
-        auto pos = (preferred + i) % nqueues;
-        gp = queues[pos].try_pop();
+    for (Size i = 0; !g && i < nqueues; ++i) {
+        auto pos = (qpref + i) % nqueues;
+        g = queues[pos].try_pop();
     }
 
     // If we failed, wait on the preferred queue.
-    if (!gp)
-        gp = queues[preferred].pop();
+    if (!g)
+        g = queues[qpref].pop();
 
-    return gp;
+    return g;
 }
 
 
@@ -298,19 +289,19 @@ void
 Workqueue_array::push(Goroutine&& g)
 {
     const auto  nqueues     = queues.size();
-    const auto  preferred   = nextqueue++ % nqueues;
+    const auto  qpref       = nextqueue++ % nqueues;
     bool        is_enqueued = false;
 
     // Beginning with the preferred queue, try to enqueue work without waiting.
     for (Size i = 0; !is_enqueued && i < nqueues; ++i) {
-        auto pos = (preferred + i) % nqueues;
+        auto pos = (qpref + i) % nqueues;
         if (queues[pos].try_push(move(g)))
             is_enqueued = true;
     }
 
     // If we failed, wait on the preferred queue.
     if (!is_enqueued)
-        queues[preferred].push(move(g));
+        queues[qpref].push(move(g));
 }
 
 
@@ -352,11 +343,11 @@ Goroutine_list::release(Goroutine::Handle h)
 {
     Goroutine   g;
     Lock        lock{mutex};
-    auto        p = find_if(gs.begin(), gs.end(), handle_equal(h));
+    auto        gp = find_if(gs.begin(), gs.end(), handle_equal(h));
 
-    if (p != gs.end()) {
-        g = move(*p);
-        gs.erase(p);
+    if (gp != gs.end()) {
+        g = move(*gp);
+        gs.erase(gp);
     }
 
     return g;
@@ -370,21 +361,6 @@ Channel_locks::Channel_locks(Channel_operation* begin, Channel_operation* end)
     : first(begin)
     , last(end)
 {
-    save_positions(first, last);
-    lock(first, last);
-}
-
-
-Channel_locks::~Channel_locks()
-{
-    unlock(first, last);
-    reposition(first, last);
-}
-
-
-inline void
-Channel_locks::lock(Channel_operation* first, Channel_operation* last)
-{
     Channel_operation::Interface* prevchanp = nullptr;
 
     for (Channel_operation* op = first; op != last; ++op) {
@@ -394,10 +370,45 @@ Channel_locks::lock(Channel_operation* first, Channel_operation* last)
         }
     }
 }
-    
-   
+
+
+Channel_locks::~Channel_locks()
+{
+    Channel_operation::Interface* prevchanp = nullptr;
+
+    for (Channel_operation* op = first; op != last; ++op) {
+        if (op->chanp && op->chanp != prevchanp) {
+            op->chanp->unlock();
+            prevchanp = op->chanp;
+        }
+    }
+}
+
+
+/*
+    Channel Sort
+*/
+Channel_sort::Channel_sort(Channel_operation* begin, Channel_operation* end)
+    : first(begin)
+    , last(end)
+{
+    using std::sort;
+
+    save_positions(first, last);
+    sort(first, last, [](auto& x, auto& y) {
+        return x.chanp < y.chanp;
+    });
+}
+
+
+Channel_sort::~Channel_sort()
+{
+    reposition(first, last);
+}
+
+
 inline void
-Channel_locks::reposition(Channel_operation* first, Channel_operation* last)
+Channel_sort::reposition(Channel_operation* first, Channel_operation* last)
 {
     using std::sort;
 
@@ -408,26 +419,12 @@ Channel_locks::reposition(Channel_operation* first, Channel_operation* last)
 
 
 void
-Channel_locks::save_positions(Channel_operation* first, Channel_operation* last)
+Channel_sort::save_positions(Channel_operation* first, Channel_operation* last)
 {
     int i = 0;
 
     for (Channel_operation* op = first; op != last; ++op)
         op->pos = i++;
-}
-
-
-void
-Channel_locks::unlock(Channel_operation* first, Channel_operation* last)
-{
-    Channel_operation::Interface* prevchanp = nullptr;
-
-    for (Channel_operation* op = first; op != last; ++op) {
-        if (op->chanp && op->chanp != prevchanp) {
-            op->chanp->unlock();
-            prevchanp = op->chanp;
-        }
-    }
 }
 
 

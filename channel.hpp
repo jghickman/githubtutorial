@@ -54,7 +54,6 @@ template<class T> class Channel;
 template<class T> class Send_channel;
 template<class T> class Receive_channel;
 class Channel_operation;
-class Channel_select_awaitable;
 using Channel_size = std::ptrdiff_t;
 using boost::optional;
 
@@ -156,9 +155,6 @@ using std::condition_variable;
 
 /*
     Channel Alternative
-
-    TODO:  Revisit class name...should it be singular or something else
-    entirely?
 */
 class Channel_alternative {
 public:
@@ -166,34 +162,26 @@ public:
     class Impl;
     using Impl_ptr  = std::shared_ptr<Impl>;
 
-    // Construct
-    template<Channel_size N> Channel_alternative(Channel_operation (&ops)[N]);
-
     // Selection
-    optional<Channel_size>  select(Goroutine::Handle);
-    Channel_size            selected() const;
+    template<Channel_size N> optional<Channel_size> select(Channel_operation (&ops)[N], Goroutine::Handle);
+    optional<Channel_size>                          select(Channel_operation* first, Channel_operation* last, Goroutine::Handle);
+    Channel_size                                    selected() const;
+
+    // Non-Blocking Selection
+    template<Channel_size N> optional<Channel_size> try_select(Channel_operation (&ops)[N]);
 
 private:
-    // Names/Types
-    struct channel_less {
-        bool operator()(const Channel_operation&, const Channel_operation&) const;
-    };
-
-    struct is_ready {
-        bool operator()(const Channel_operation&) const;
-    };
-
-    struct position_less {
-        bool operator()(const Channel_operation&, const Channel_operation&) const;
-    };
-
     // Names/Types
     using Mutex = std::mutex;
     using Lock  = std::unique_lock<Mutex>;
 
     // Friends
-    template<class T> friend class Waiting_receiver;
-    template<class T> friend class Waiting_sender;
+    template<class T> friend class Waiting_receive;
+    template<class T> friend class Waiting_send;
+
+    // Implementation Access
+    const Impl& read() const;
+    Impl&       write();
 
     // Data
     Impl_ptr pimpl;
@@ -203,8 +191,8 @@ private:
 /*
     Names/Types
 */
-template<class T> class Waiting_sender;
-template<class T> class Waiting_receiver;
+template<class T> class Waiting_send;
+template<class T> class Waiting_receive;
 
 
 /*
@@ -212,12 +200,17 @@ template<class T> class Waiting_receiver;
 */
 class Channel_alternative::Impl {
 public:
-    // Construct
-    template<Channel_size N> Impl(Channel_operation (&ops)[N]);
+    // Construct/Copy/Move
+    Impl();
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
 
     // Selection
-    optional<Channel_size>  select(const Impl_ptr& selfp, Goroutine::Handle);
+    optional<Channel_size>  select(const Impl_ptr& selfp, Channel_operation*, Channel_operation*, Goroutine::Handle);
     Channel_size            selected() const;
+
+    // Non-Blocking Selection
+    optional<Channel_size> try_select(Channel_operation* first, Channel_operation* last);
 
 private:
     // Selection
@@ -228,12 +221,10 @@ private:
     static void                     enqueue(const Impl_ptr& selfp, Channel_operation*, Channel_operation*);
 
     // Friends
-    template<class T> friend class Waiting_receiver;
-    template<class T> friend class Waiting_sender;
+    template<class T> friend class Waiting_receive;
+    template<class T> friend class Waiting_send;
 
     // Data
-    Channel_operation*      first;
-    Channel_operation*      last;
     optional<Channel_size>  chosen;
     Goroutine::Handle       waiting;
     Mutex                   mutex;
@@ -252,12 +243,6 @@ public:
     ~Channel_locks();
 
 private:
-    // Lock/Unlock
-    static void save_positions(Channel_operation*, Channel_operation*);
-    static void reposition(Channel_operation*, Channel_operation*);
-    static void lock(Channel_operation*, Channel_operation*);
-    static void unlock(Channel_operation*, Channel_operation*);
-
     // Data
     Channel_operation* first;
     Channel_operation* last;
@@ -276,6 +261,10 @@ public:
     ~Channel_sort();
 
 private:
+    // Initial Order
+    static void save_positions(Channel_operation*, Channel_operation*);
+    static void reposition(Channel_operation*, Channel_operation*);
+
     // Data
     Channel_operation* first;
     Channel_operation* last;
@@ -310,18 +299,18 @@ private:
 
     
 /*
-    Waiting Sender
+    Waiting Send
 
         A Goroutine or thread waiting on data to be accepted by a Send Channel.
 */
 template<class T>
-class Waiting_sender : boost::equality_comparable<Waiting_sender<T>> {
+class Waiting_send : boost::equality_comparable<Waiting_send<T>> {
 public:
     // Construct
-    Waiting_sender(const Channel_alternative::Impl_ptr& ap, Channel_size apos, const T* rvaluep);
-    Waiting_sender(const Channel_alternative::Impl_ptr& ap, Channel_size apos, T* lvaluep);
-    Waiting_sender(condition_variable* sysreadyp, const T* rvaluep);
-    Waiting_sender(condition_variable* sysreadyp, T* lvaluep);
+    Waiting_send(const Channel_alternative::Impl_ptr& ap, Channel_size apos, const T* rvaluep);
+    Waiting_send(const Channel_alternative::Impl_ptr& ap, Channel_size apos, T* lvaluep);
+    Waiting_send(condition_variable* sysreadyp, const T* rvaluep);
+    Waiting_send(condition_variable* sysreadyp, T* lvaluep);
 
     // Observers
     condition_variable* system_signal() const;
@@ -330,7 +319,7 @@ public:
     template<class U> bool dequeue(U* recvbufp) const;
 
     // Comparisons
-    template<class U> friend bool operator==(const Waiting_sender<U>&, const Waiting_sender<U>&);
+    template<class U> friend bool operator==(const Waiting_send<U>&, const Waiting_send<U>&);
 
 private:
     // Data Transefer
@@ -347,16 +336,16 @@ private:
 
 
 /*
-    Waiting Receiver
+    Waiting Receive
 
         A Goroutine or thread waiting on data from a Receive Channel.
 */
 template<class T>
-class Waiting_receiver : boost::equality_comparable<Waiting_receiver<T>> {
+class Waiting_receive : boost::equality_comparable<Waiting_receive<T>> {
 public:
     // Construct
-    Waiting_receiver(const Channel_alternative::Impl_ptr& ap, Channel_size apos, T* valuep);
-    Waiting_receiver(condition_variable* sysreadyp, T* valuep);
+    Waiting_receive(const Channel_alternative::Impl_ptr& ap, Channel_size apos, T* valuep);
+    Waiting_receive(condition_variable* sysreadyp, T* valuep);
 
     // Observers
     condition_variable* system_signal() const;
@@ -365,7 +354,7 @@ public:
     template<class U> bool dequeue(U* valuep) const;
 
     // Comparisons
-    template<class U> friend bool operator==(const Waiting_receiver<U>&, const Waiting_receiver<U>&);
+    template<class U> friend bool operator==(const Waiting_receive<U>&, const Waiting_receive<U>&);
 
 private:
     // Data
@@ -434,7 +423,7 @@ private:
 
     private:
         // Data
-        std::deque<Goroutine> elems;
+        std::deque<Goroutine> gs;
     };
 
     // Queue Operations
@@ -468,7 +457,7 @@ public:
 
     // Queue Operations
     void                push(Goroutine&&);
-    optional<Goroutine> pop(Size preferred);
+    optional<Goroutine> pop(Size qpref);
     void                interrupt();
 
 private:
@@ -556,10 +545,58 @@ private:
 
 
 /*
-    Channel Operation Selection
+    Channel Selection
 */
-template<Channel_size N> Channel_select_awaitable   select(Channel_operation (&ops)[N]);
-template<Channel_size N> optional<Channel_size>     try_select(Channel_operation (&ops)[N]);
+class Channel_select {
+public:
+    // Names/Types
+    class Awaitable;
+
+    // Apply
+    template<Channel_size N> Awaitable operator()(Channel_operation (&ops)[N]);
+
+private:
+    // Data
+    Detail::Channel_alternative alt;
+};
+
+
+/*
+    Channel Selection Awaitable
+*/
+class Channel_select::Awaitable {
+public:
+    // Awaitable Operations
+    bool            await_ready();
+    bool            await_suspend(Goroutine::Handle);
+    Channel_size    await_resume();
+
+private:
+    // Friends
+    friend class Channel_select;
+
+    // Construct
+    Awaitable(Detail::Channel_alternative* ap, Channel_operation* first, Channel_operation* last);
+
+    // Data
+    Detail::Channel_alternative*    altp;
+    Channel_operation*              firstp;
+    Channel_operation*              lastp;
+};
+
+
+/*
+    Non-blocking Channel Selection
+*/
+class Channel_try_select {
+public:
+    // Apply
+    template<Channel_size N> optional<Channel_size> operator()(Channel_operation (&ops)[N]);
+
+private:
+    // Data
+    Detail::Channel_alternative alt;
+};
 
 
 /*
@@ -675,10 +712,10 @@ private:
     private:
         // Names/Types
         using Buffer            = Detail::Channel_buffer<T>;
-        using Waiting_sender    = Detail::Waiting_sender<T>;
-        using Waiting_receiver  = Detail::Waiting_receiver<T>;
-        using Sender_queue      = Detail::Wait_queue<Waiting_sender>;
-        using Receiver_queue    = Detail::Wait_queue<Waiting_receiver>;
+        using Waiting_send      = Detail::Waiting_send<T>;
+        using Waiting_receive   = Detail::Waiting_receive<T>;
+        using Send_queue        = Detail::Wait_queue<Waiting_send>;
+        using Receive_queue     = Detail::Wait_queue<Waiting_receive>;
         using Mutex             = std::mutex;
         using Lock              = std::unique_lock<Mutex>;
 
@@ -689,16 +726,16 @@ private:
         void                    enqueue_receive(const Detail::Channel_alternative::Impl_ptr& ap, Channel_size apos, T* valuep);
 
         // Coordination
-        template<class U> static bool   dequeue_receiver(Receiver_queue*, U* sendbufp);
-        template<class U> static bool   dequeue_sender(Sender_queue*, U* recvbufp);
-        static void                     pop(Buffer*, T* recvbufp, Sender_queue*);
-        template<class U> static void   wait_for_receiver(Lock&, Sender_queue*, U* sendbufp);
-        static void                     wait_for_sender(Lock&, Receiver_queue*, T* recvbufp);
+        template<class U> static bool   dequeue_receive(Receive_queue*, U* sendbufp);
+        template<class U> static bool   dequeue_send(Send_queue*, U* recvbufp);
+        static void                     pop(Buffer*, T* recvbufp, Send_queue*);
+        template<class U> static void   wait_for_receive(Lock&, Send_queue*, U* sendbufp);
+        static void                     wait_for_send(Lock&, Receive_queue*, T* recvbufp);
 
         // Data
         Buffer          buffer;
-        Sender_queue    senderq;
-        Receiver_queue  receiverq;
+        Send_queue      sendq;
+        Receive_queue   recvq;
         Mutex           mutex;
     };
 
@@ -855,28 +892,6 @@ public:
 private:
     // Data
     typename Channel<T>::Impl_ptr pimpl;
-};
-
-
-/*
-    Channel Selection Awaitable
-*/
-class Channel_select_awaitable {
-public:
-    // Awaitable Operations
-    bool            await_ready();
-    bool            await_suspend(Goroutine::Handle);
-    Channel_size    await_resume();
-
-private:
-    // Friends
-    template<Channel_size N> friend Channel_select_awaitable select(Channel_operation (&ops)[N]);
-
-    // Construct
-    template<Channel_size N> Channel_select_awaitable(Channel_operation (&ops)[N]);
-
-    // Data
-    Detail::Channel_alternative alt;
 };
 
 
