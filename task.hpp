@@ -63,20 +63,13 @@ template<class T> class Future;
 
 
 /*
-    Task Launch
-*/
-template<class TaskFun, class... Args> void                                     start(TaskFun, Args&&...);
-template<class Fun, class... Args> Future<std::result_of_t<Fun&&(Args&&...)>>   async(Fun, Args&&...);
-
-
-/*
     Task
 
     A Task is a lightweight cooperative thread implemented by a stackless
     coroutine.  Tasks are multiplexed onto operating system threads by a
-    Scheduler.  Because a Task can suspend its execution without blocking
-    the stack of the thread on which it was invoked, a Scheduler is free to
-    reassign the thread to another ready Task.
+    Scheduler.  A Task can suspend its execution without blocking the stack
+    of the thread on which it was invoked, thus freeing the Scheduler to re-
+    allocate the thread to another ready Task.
 */
 class Task : boost::equality_comparable<Task> {
 public:
@@ -100,6 +93,10 @@ public:
         bool                                                    select(Channel_size);
         Channel_size                                            selected();
         template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
+
+
+        bool wait_any(Channel_operation*, Channel_operation*);
+        Channel_size 
     
     private:
         // Names/Types
@@ -199,6 +196,13 @@ private:
 
 
 /*
+    Task Launch
+*/
+template<class TaskFun, class... Args> void                                     start(TaskFun, Args&&...);
+template<class Fun, class... Args> Future<std::result_of_t<Fun&&(Args&&...)>>   async(Fun, Args&&...);
+
+
+/*
     Channel Operation
 
     Users can call select() or try_select() to choose an operation for
@@ -216,16 +220,17 @@ private:
 class Channel_operation {
 public:
     // Names/Types
+    class Interface;
     enum Type { none, send, receive };
 
     // Construct/Move/Copy/Destroy
     Channel_operation();
-    Channel_operation(Channel_base* channelp, const void* rvaluep); // send copy
-    Channel_operation(Channel_base* channelp, void* lvaluep, Type); // send movable/receive
+    Channel_operation(Channel_base*, const void* rvaluep); // send copy
+    Channel_operation(Channel_base*, void* lvaluep, Type); // send movable/receive
 
     // Channel
-    Channel_base*          channel();
-    const Channel_base*    channel() const;
+    Channel_base*       channel();
+    const Channel_base* channel() const;
 
     // Selection
     bool is_ready() const;
@@ -269,7 +274,7 @@ private:
 
 
 /*
-    Channel Operation Selection
+    Channel Selection
 */
 template<Channel_size N> Channel_select_awaitable   select(Channel_operation (&ops)[N]);
 Channel_select_awaitable                            select(Channel_operation*, Channel_operation*);
@@ -311,7 +316,7 @@ public:
 /*
     Channel Construction
 */
-template<class T> Channel<T> make_channel(Channel_size capacity);
+template<class T> Channel<T> make_channel(Channel_size capacity=0);
 
 
 /*
@@ -389,23 +394,23 @@ private:
         Channel_size    sizemax;
     };
 
-    class Waiting_send : boost::equality_comparable<Waiting_send> {
+    class Waiting_sender : boost::equality_comparable<Waiting_sender> {
     public:
         // Construct
-        Waiting_send(Task::Handle, Channel_size selpos, const T* rvaluep);
-        Waiting_send(Task::Handle, Channel_size selpos, T* lvaluep);
-        Waiting_send(Condition_variable*, const T* rvaluep);
-        Waiting_send(Condition_variable*, T* lvaluep);
+        Waiting_sender(Task::Handle, Channel_size selpos, const T* rvaluep);
+        Waiting_sender(Task::Handle, Channel_size selpos, T* lvaluep);
+        Waiting_sender(Condition_variable*, const T* rvaluep);
+        Waiting_sender(Condition_variable*, T* lvaluep);
     
         // Completion
-        template<class U> bool dequeue(U* recvbufp);
+        template<class U> bool dequeue(U* recvbufp) const;
 
         // Observers
         Task::Handle task() const;
         Channel_size select_position() const;
     
         // Comparisons
-        inline friend bool operator==(const Waiting_send& x, const Waiting_send& y) {
+        inline friend bool operator==(const Waiting_sender& x, const Waiting_sender& y) {
             if (x.threadp != y.threadp) return false;
             if (x.rvalp != y.rvalp) return false;
             if (x.lvalp != y.lvalp) return false;
@@ -420,28 +425,28 @@ private:
         static void                     move(T* lvalp, const T* rvalp, Buffer* destp);
     
         // Data
-        Task::Handle        taskh;
-        Channel_size        pos;    // select position
-        const T*            rvalp;
-        T*                  lvalp;
-        Condition_variable* threadp;
+        mutable Task::Handle    taskh;  // modify promise in dequeue()
+        Channel_size            pos;    // select position
+        const T*                rvalp;
+        T*                      lvalp;
+        Condition_variable*     threadp;
     };
     
-    class Waiting_receive : boost::equality_comparable<Waiting_receive> {
+    class Waiting_receiver : boost::equality_comparable<Waiting_receiver> {
     public:
         // Construct
-        Waiting_receive(Task::Handle, Channel_size selpos, T* valuep);
-        Waiting_receive(Condition_variable*, T* valuep);
+        Waiting_receiver(Task::Handle, Channel_size selpos, T* valuep);
+        Waiting_receiver(Condition_variable*, T* valuep);
     
         // Completion
-        template<class U> bool dequeue(U* valuep);
+        template<class U> bool dequeue(U* valuep) const;
     
         // Observers
         Task::Handle task() const;
         Channel_size select_position() const;
     
         // Comparisons
-        inline friend bool operator==(const Waiting_receive& x, const Waiting_receive& y) {
+        inline friend bool operator==(const Waiting_receiver& x, const Waiting_receiver& y) {
             if (x.threadp != y.threadp) return false;
             if (x.valp != y.valp) return false;
             if (x.taskh != y.taskh) return false;
@@ -451,14 +456,14 @@ private:
     
     private:
         // Data
-        Task::Handle        taskh;
-        Channel_size        pos;    // select position
-        T*                  valp;
-        Condition_variable* threadp;
+        mutable Task::Handle    taskh;  // modify promise in dequeue()
+        Channel_size            pos;    // select position
+        T*                      valp;
+        Condition_variable*     threadp;
     };
 
     template<class U> 
-    class Wait_queue {
+    class Waitqueue {
     private:
         // Names/Types
         struct operation_eq {
@@ -493,8 +498,8 @@ private:
     };
 
     // Names/Types
-    using Send_queue        = Wait_queue<Waiting_send>;
-    using Receive_queue     = Wait_queue<Waiting_receive>;
+    using Sender_waitqueue      = Waitqueue<Waiting_sender>;
+    using Receiver_waitqueue    = Waitqueue<Waiting_receiver>;
 
     class Impl final : public Channel_base {
     public:
@@ -544,17 +549,17 @@ private:
         void                            receive_ready(T* valuep);
         template<class U> void          enqueue_send(Task::Handle, Channel_size selpos, U* valuep);
         void                            enqueue_receive(Task::Handle, Channel_size selpos, T* valuep);
-        template<class U> static bool   dequeue(Receive_queue*, U* sendbufp);
-        template<class U> static bool   dequeue(Send_queue*, U* recvbufp);
+        template<class U> static bool   dequeue(Receiver_waitqueue*, U* sendbufp);
+        template<class U> static bool   dequeue(Sender_waitqueue*, U* recvbufp);
         template<class U> static void   dequeue(U* waitqp, Task::Handle, Channel_size selpos);
-        template<class U> static void   wait_for_receiver(Lock&, Send_queue*, U* sendbufp);
-        static void                     wait_for_sender(Lock&, Receive_queue*, T* recvbufp);
+        template<class U> static void   wait_for_receiver(Lock&, Sender_waitqueue*, U* sendbufp);
+        static void                     wait_for_sender(Lock&, Receiver_waitqueue*, T* recvbufp);
 
         // Data
-        Buffer          buffer;
-        Send_queue      sendq;
-        Receive_queue   recvq;
-        Mutex           mutex;
+        Buffer              buffer;
+        Sender_waitqueue    senders;
+        Receiver_waitqueue  receivers;
+        Mutex               mutex;
     };
 
     using Impl_ptr = std::shared_ptr<Impl>;
@@ -565,12 +570,6 @@ private:
     // Data
     Impl_ptr pimpl;
 };
-
-
-/*
-    Channel Construction
-*/
-template<class T> Channel<T> make_channel(Channel_size capacity=0);
 
 
 /*
@@ -698,7 +697,7 @@ public:
     explicit operator bool() const;
 
     // Comparisons
-    inline friend bool operator==(const Receive_channel& x, const Receive_channel& y) { return x.pimpl == y.pimpl;  }
+    inline friend bool operator==(const Receive_channel& x, const Receive_channel& y) { return x.pimpl == y.pimpl; }
     inline friend bool operator< (const Receive_channel& x, const Receive_channel& y) { return x.pimpl < y.pimpl; }
 
 private:
@@ -715,14 +714,19 @@ class Future : boost::equality_comparable<Future<T>> {
 public:
     // Names/Types
     class Awaitable;
-    using Value         = T;
-    using Value_channel = Receive_channel<T>;
-    using Error_channel = Receive_channel<exception_ptr>;
+    class Any_awaitable;
+    class All_awaitable;
+    using Value             = T;
+    using Value_receiver    = Receive_channel<T>;
+    using Error_receiver    = Receive_channel<exception_ptr>;
 
     // Construct/Copy/Move
     Future();
-    Future(Receive_channel<T>, Receive_channel<exception_ptr>);
-    Future& operator=(Future);
+    Future(Value_receiver, Error_receiver);
+    Future(const Future&) = default;
+    Future& operator=(const Future&) = default;
+    Future(Future&&);
+    Future& operator=(Future&&);
     inline friend void swap(Future& x, Future& y) {
         using std::swap;
 
@@ -732,7 +736,7 @@ public:
         swap(x.ep, y.ep);
     }
 
-    // Value Access
+    // Result Access
     Awaitable   get();
     bool        is_valid() const;
 
@@ -745,27 +749,35 @@ public:
 
     // Friends
     friend class Awaitable;
+    friend class Any_awaitable;
+    friend class All_awaitable;
 
 private:
     // Names/Types
     enum Operation_position { valuepos, errorpos };
 
     // Value Access
-    bool                            suspend(Task::Handle);
-    T                               resume(Task::Handle);
-    T                               result();
-    template<class U> static bool   is_movable();
+    bool    suspend(Task::Handle);
+    T       resume(Task::Handle);
+    T       result();
 
     // Data
-    Value_channel   vchan;
-    Error_channel   echan;
-    T               v;
-    exception_ptr   ep;
+    Value_receiver      vchan;
+    Error_receiver      echan;
+    T                   v;
+    exception_ptr       ep;
+    Channel_operation   ops[2];
 };
 
 
 /*
-    Future Awaitable
+    Future Waiting
+*/
+template<class T> typename Future<T>::Any_awaitable wait_any(const std::vector<Future<T>>&);
+
+
+/*
+    Future Result Awaitable
 */
 template<class T>
 class Future<T>::Awaitable {
@@ -789,9 +801,31 @@ private:
 
 
 /*
+    Future Any Awaitable
+*/
+template<class T>
+class Future<T>::Any_awaitable {
+public:
+    // Construct
+    Any_awaitable(const Future<T>*, const Future<T>*);
+
+    // Awaitable Operations
+    bool            await_ready();
+    bool            await_suspend(Task::Handle);
+    Channel_size    await_resume();
+
+private:
+    // Data
+    const Future<T>*    first;
+    const Future<T>*    last;
+    Task::Handle        task;
+};
+
+
+/*
     Scheduler
 
-    A Scheduler mutliplexes Tasks onto operating system threads.
+    A Scheduler multiplexes Tasks onto operating system threads.
 
     TODO: This concept should probably be generalized to accommodate
     distinct scheduling policies (consider virtual functions).

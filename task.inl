@@ -233,8 +233,8 @@ Channel<T>::Buffer::size() const
 */
 template<class T>
 template<class U>
-inline typename Channel<T>::Wait_queue<U>::Iterator
-Channel<T>::Wait_queue<U>::end()
+inline typename Channel<T>::Waitqueue<U>::Iterator
+Channel<T>::Waitqueue<U>::end()
 {
     return ws.end();
 }
@@ -243,7 +243,7 @@ Channel<T>::Wait_queue<U>::end()
 template<class T>
 template<class U>
 inline void
-Channel<T>::Wait_queue<U>::erase(Iterator p)
+Channel<T>::Waitqueue<U>::erase(Iterator p)
 {
     ws.erase(p);
 }
@@ -251,8 +251,8 @@ Channel<T>::Wait_queue<U>::erase(Iterator p)
 
 template<class T>
 template<class U>
-inline typename Channel<T>::Wait_queue<U>::Iterator
-Channel<T>::Wait_queue<U>::find(Task::Handle task, Channel_size selpos)
+inline typename Channel<T>::Waitqueue<U>::Iterator
+Channel<T>::Waitqueue<U>::find(Task::Handle task, Channel_size selpos)
 {
     return std::find_if(ws.begin(), ws.end(), operation_eq(task, selpos));
 }
@@ -261,7 +261,7 @@ Channel<T>::Wait_queue<U>::find(Task::Handle task, Channel_size selpos)
 template<class T>
 template<class U>
 inline bool
-Channel<T>::Wait_queue<U>::is_found(const Waiter& w) const
+Channel<T>::Waitqueue<U>::is_found(const Waiter& w) const
 {
     using std::find;
 
@@ -273,7 +273,7 @@ Channel<T>::Wait_queue<U>::is_found(const Waiter& w) const
 template<class T>
 template<class U>
 inline bool
-Channel<T>::Wait_queue<U>::is_empty() const
+Channel<T>::Waitqueue<U>::is_empty() const
 {
     return ws.empty();
 }
@@ -282,7 +282,7 @@ Channel<T>::Wait_queue<U>::is_empty() const
 template<class T>
 template<class U>
 inline U
-Channel<T>::Wait_queue<U>::pop()
+Channel<T>::Waitqueue<U>::pop()
 {
     const U w = ws.front();
 
@@ -294,7 +294,7 @@ Channel<T>::Wait_queue<U>::pop()
 template<class T>
 template<class U>
 inline void
-Channel<T>::Wait_queue<U>::push(const Waiter& w)
+Channel<T>::Waitqueue<U>::push(const Waiter& w)
 {
     ws.push_back(w);
 }
@@ -305,7 +305,7 @@ Channel<T>::Wait_queue<U>::push(const Waiter& w)
 */
 template<class T>
 inline
-Channel<T>::Waiting_receive::Waiting_receive(Task::Handle tsk, Channel_size selpos, T* valuep)
+Channel<T>::Waiting_receiver::Waiting_receiver(Task::Handle tsk, Channel_size selpos, T* valuep)
     : taskh{tsk}
     , pos{selpos}
     , valp{valuep}
@@ -318,7 +318,7 @@ Channel<T>::Waiting_receive::Waiting_receive(Task::Handle tsk, Channel_size selp
 
 template<class T>
 inline
-Channel<T>::Waiting_receive::Waiting_receive(Condition_variable* waiterp, T* valuep)
+Channel<T>::Waiting_receiver::Waiting_receiver(Condition_variable* waiterp, T* valuep)
     : valp{valuep}
     , threadp{waiterp}
 {
@@ -330,30 +330,30 @@ Channel<T>::Waiting_receive::Waiting_receive(Condition_variable* waiterp, T* val
 template<class T>
 template<class U>
 inline bool
-Channel<T>::Waiting_receive::dequeue(U* valuep)
+Channel<T>::Waiting_receiver::dequeue(U* valuep) const
 {
     using std::move;
 
-    bool is_dequeued = false;
+    bool is_received = false;
 
     if (taskh) {
         if (taskh.promise().select(pos)) {
             *valp = move(*valuep);
             scheduler.resume(taskh);
-            is_dequeued = true;
+            is_received = true;
         }
     } else {
         *valp = move(*valuep);
         threadp->notify_one();
-        is_dequeued = true;
+        is_received = true;
     }
 
-    return is_dequeued;
+    return is_received;
 }
 
 template<class T>
 inline Channel_size
-Channel<T>::Waiting_receive::select_position() const
+Channel<T>::Waiting_receiver::select_position() const
 {
     return pos;
 }
@@ -361,7 +361,7 @@ Channel<T>::Waiting_receive::select_position() const
 
 template<class T>
 inline Task::Handle
-Channel<T>::Waiting_receive::task() const
+Channel<T>::Waiting_receiver::task() const
 {
     return taskh;
 }
@@ -372,7 +372,7 @@ Channel<T>::Waiting_receive::task() const
 */
 template<class T>
 inline
-Channel<T>::Waiting_send::Waiting_send(Task::Handle tsk, Channel_size selpos, const T* rvaluep)
+Channel<T>::Waiting_sender::Waiting_sender(Task::Handle tsk, Channel_size selpos, const T* rvaluep)
     : taskh{tsk}
     , pos{selpos}
     , rvalp{rvaluep}
@@ -386,7 +386,7 @@ Channel<T>::Waiting_send::Waiting_send(Task::Handle tsk, Channel_size selpos, co
 
 template<class T>
 inline
-Channel<T>::Waiting_send::Waiting_send(Task::Handle tsk, Channel_size selpos, T* lvaluep)
+Channel<T>::Waiting_sender::Waiting_sender(Task::Handle tsk, Channel_size selpos, T* lvaluep)
     : taskh{tsk}
     , pos{selpos}
     , rvalp{nullptr}
@@ -400,7 +400,7 @@ Channel<T>::Waiting_send::Waiting_send(Task::Handle tsk, Channel_size selpos, T*
 
 template<class T>
 inline
-Channel<T>::Waiting_send::Waiting_send(Condition_variable* waiterp, const T* rvaluep)
+Channel<T>::Waiting_sender::Waiting_sender(Condition_variable* waiterp, const T* rvaluep)
     : rvalp{rvaluep}
     , lvalp{nullptr}
     , threadp{waiterp}
@@ -412,7 +412,7 @@ Channel<T>::Waiting_send::Waiting_send(Condition_variable* waiterp, const T* rva
 
 template<class T>
 inline
-Channel<T>::Waiting_send::Waiting_send(Condition_variable* waiterp, T* lvaluep)
+Channel<T>::Waiting_sender::Waiting_sender(Condition_variable* waiterp, T* lvaluep)
     : rvalp{nullptr}
     , lvalp{lvaluep}
     , threadp{waiterp}
@@ -425,30 +425,30 @@ Channel<T>::Waiting_send::Waiting_send(Condition_variable* waiterp, T* lvaluep)
 template<class T>
 template<class U>
 bool
-Channel<T>::Waiting_send::dequeue(U* recvbufp)
+Channel<T>::Waiting_sender::dequeue(U* recvbufp) const
 {
-    bool is_dequeued = false;
+    bool is_sent = false;
 
     if (taskh) {
         if (taskh.promise().select(pos)) {
             move(lvalp, rvalp, recvbufp);
             scheduler.resume(taskh);
-            is_dequeued = true;
+            is_sent = true;
         }
     } else {
         move(lvalp, rvalp, recvbufp);
         threadp->notify_one();
-        is_dequeued = true;
+        is_sent = true;
     }
 
-    return is_dequeued;
+    return is_sent;
 }
 
 
 template<class T>
 template<class U>
 inline void
-Channel<T>::Waiting_send::move(T* lvalp, const T* rvalp, U* recvbufp)
+Channel<T>::Waiting_sender::move(T* lvalp, const T* rvalp, U* recvbufp)
 {
     *recvbufp = lvalp ? std::move(*lvalp) : *rvalp;
 }
@@ -456,7 +456,7 @@ Channel<T>::Waiting_send::move(T* lvalp, const T* rvalp, U* recvbufp)
 
 template<class T>
 inline void
-Channel<T>::Waiting_send::move(T* lvalp, const T* rvalp, Buffer* bufp)
+Channel<T>::Waiting_sender::move(T* lvalp, const T* rvalp, Buffer* bufp)
 {
     if (lvalp)
         bufp->push(std::move(*lvalp));
@@ -467,7 +467,7 @@ Channel<T>::Waiting_send::move(T* lvalp, const T* rvalp, Buffer* bufp)
 
 template<class T>
 inline Channel_size
-Channel<T>::Waiting_send::select_position() const
+Channel<T>::Waiting_sender::select_position() const
 {
     return pos;
 }
@@ -475,7 +475,7 @@ Channel<T>::Waiting_send::select_position() const
 
 template<class T>
 inline Task::Handle
-Channel<T>::Waiting_send::task() const
+Channel<T>::Waiting_sender::task() const
 {
     return taskh;
 }
@@ -684,32 +684,32 @@ Channel<T>::Impl::capacity() const
 template<class T>
 template<class U>
 bool
-Channel<T>::Impl::dequeue(Receive_queue* waitqp, U* sendbufp)
+Channel<T>::Impl::dequeue(Receiver_waitqueue* qp, U* sendbufp)
 {
-    bool is_dequeued = false;
+    bool is_sent = false;
 
-    while (!(is_dequeued || waitqp->is_empty())) {
-        Waiting_receive receiver = waitqp->pop();
-        is_dequeued = receiver.dequeue(sendbufp);
+    while (!(is_sent || qp->is_empty())) {
+        const Waiting_receiver receiver = qp->pop();
+        is_sent = receiver.dequeue(sendbufp);
     }
 
-    return is_dequeued;
+    return is_sent;
 }
 
 
 template<class T>
 template<class U>
 bool
-Channel<T>::Impl::dequeue(Send_queue* waitqp, U* recvbufp)
+Channel<T>::Impl::dequeue(Sender_waitqueue* qp, U* recvbufp)
 {
-    bool is_dequeued = false;
+    bool is_received = false;
 
-    while (!(is_dequeued || waitqp->is_empty())) {
-        Waiting_send sender = waitqp->pop();
-        is_dequeued = sender.dequeue(recvbufp);
+    while (!(is_received || qp->is_empty())) {
+        const Waiting_sender sender = qp->pop();
+        is_received = sender.dequeue(recvbufp);
     }
 
-    return is_dequeued;
+    return is_received;
 }
 
 
@@ -728,7 +728,7 @@ template<class T>
 void
 Channel<T>::Impl::dequeue_receive(Task::Handle task, Channel_size selpos)
 {
-    dequeue(&recvq, task, selpos);
+    dequeue(&receivers, task, selpos);
 }
 
 
@@ -736,7 +736,7 @@ template<class T>
 void
 Channel<T>::Impl::dequeue_send(Task::Handle task, Channel_size selpos)
 {
-    dequeue(&sendq, task, selpos);
+    dequeue(&senders, task, selpos);
 }
 
 
@@ -752,8 +752,8 @@ template<class T>
 inline void
 Channel<T>::Impl::enqueue_receive(Task::Handle task, Channel_size selpos, T* valuep)
 {
-    const Waiting_receive r{task, selpos, valuep};
-    recvq.push(r);
+    const Waiting_receiver r{task, selpos, valuep};
+    receivers.push(r);
 }
 
 
@@ -778,8 +778,8 @@ template<class U>
 inline void
 Channel<T>::Impl::enqueue_send(Task::Handle task, Channel_size selpos, U* valuep)
 {
-    const Waiting_send s{task, selpos, valuep};
-    sendq.push(s);
+    const Waiting_sender s{task, selpos, valuep};
+    senders.push(s);
 }
 
 
@@ -787,7 +787,7 @@ template<class T>
 bool
 Channel<T>::Impl::is_receive_ready() const
 {
-    return !(buffer.is_empty() && recvq.is_empty());
+    return !(buffer.is_empty() && receivers.is_empty());
 }
 
 
@@ -795,7 +795,7 @@ template<class T>
 bool
 Channel<T>::Impl::is_send_ready() const
 {
-    return !(buffer.is_full() && recvq.is_empty());
+    return !(buffer.is_full() && receivers.is_empty());
 }
 
 
@@ -843,7 +843,7 @@ template<class T>
 inline void
 Channel<T>::Impl::receive_ready(T* valuep)
 {
-    if (!dequeue(&sendq, valuep))
+    if (!dequeue(&senders, valuep))
         buffer.pop(valuep);
 }
 
@@ -869,7 +869,7 @@ template<class U>
 inline void
 Channel<T>::Impl::send_ready(U* valuep)
 {
-    if (!dequeue(&recvq, valuep))
+    if (!dequeue(&receivers, valuep))
         buffer.push(move(*valuep));
 }
 
@@ -889,11 +889,11 @@ Channel<T>::Impl::sync_receive()
     T       value;
     Lock    lock{mutex};
 
-    if (!dequeue(&sendq, &value)) {
+    if (!dequeue(&senders, &value)) {
         if (!buffer.is_empty())
             buffer.pop(&value);
         else
-            wait_for_sender(lock, &recvq, &value);
+            wait_for_sender(lock, &receivers, &value);
     }
 
     return value;
@@ -905,14 +905,13 @@ template<class U>
 inline void
 Channel<T>::Impl::sync_send(U* valuep)
 {
-    bool is_done = false;
     Lock lock{mutex};
 
-    if (!dequeue(&recvq, valuep)) {
+    if (!dequeue(&receivers, valuep)) {
         if (!buffer.is_full())
             buffer.push(move(*valuep));
         else
-            wait_for_receiver(lock, &sendq, valuep);
+            wait_for_receiver(lock, &senders, valuep);
     }
 }
 
@@ -924,7 +923,7 @@ Channel<T>::Impl::try_receive()
     optional<T> value;
     Lock        lock{mutex};
 
-    if (!dequeue(&sendq, &value)) {
+    if (!dequeue(&senders, &value)) {
         if (!buffer.is_empty())
             buffer.pop(&value);
     }
@@ -940,7 +939,7 @@ Channel<T>::Impl::try_send(const T& value)
     bool is_sent{false};
     Lock lock{mutex};
 
-    if (dequeue(&recvq, &value))
+    if (dequeue(&receivers, &value))
         is_sent = true;
     else if (!buffer.is_full()) {
         buffer.push(value);
@@ -962,10 +961,10 @@ Channel<T>::Impl::unlock()
 template<class T>
 template<class U>
 void
-Channel<T>::Impl::wait_for_receiver(Lock& lock, Send_queue* waitqp, U* sendbufp)
+Channel<T>::Impl::wait_for_receiver(Lock& lock, Sender_waitqueue* waitqp, U* sendbufp)
 {
     Condition_variable ready;
-    const Waiting_send ownsend{&ready, sendbufp};
+    const Waiting_sender ownsend{&ready, sendbufp};
 
     // Enqueue our send and wait for a receiver to remove it.
     waitqp->push(ownsend);
@@ -975,10 +974,10 @@ Channel<T>::Impl::wait_for_receiver(Lock& lock, Send_queue* waitqp, U* sendbufp)
 
 template<class T>
 void
-Channel<T>::Impl::wait_for_sender(Lock& lock, Receive_queue* waitqp, T* recvbufp)
+Channel<T>::Impl::wait_for_sender(Lock& lock, Receiver_waitqueue* waitqp, T* recvbufp)
 {
     Condition_variable      ready;
-    const Waiting_receive   ownrecv{&ready, recvbufp};
+    const Waiting_receiver   ownrecv{&ready, recvbufp};
 
     // Enqueue our receive and wait for a sender to remove it.
     waitqp->push(ownrecv);
@@ -1419,6 +1418,50 @@ Future<T>::Awaitable::await_suspend(Task::Handle h)
 
 
 /*
+    Future Any Awaitable
+*/
+template<class T>
+inline
+Future<T>::Any_awaitable::Any_awaitable(const Future<T>* f, const Future<T>* l)
+    : first(f)
+    , last(l)
+{
+}
+
+
+template<class T>
+inline bool
+Future<T>::Any_awaitable::await_ready()
+{
+    return false;
+}
+
+
+template<class T>
+inline Channel_size
+Future<T>::Any_awaitable::await_resume()
+{
+    const Task::Waiting_futures waiting = task.promise().waiting_futures();
+    return waiting.selected(task);
+}
+
+
+template<class T>
+inline bool
+Future<T>::Any_awaitable::await_suspend(Task::Handle h)
+{
+    task = h;
+
+    Task::Waiting_futures waiting = task.promise().waiting_futures();
+
+    for (Future<T>* fp = first; fp != last; ++fp)
+        waiting.add(Waiting_future(fp->ops, fp->ops + 1));
+
+    return !waiting.select_any(task);
+}
+
+
+/*
     Future     
 */
 template<class T>
@@ -1430,10 +1473,40 @@ Future<T>::Future()
 
 template<class T>
 inline
-Future<T>::Future(Receive_channel<T> vc, Receive_channel<exception_ptr> ec)
+Future<T>::Future(Value_receiver vc, Error_receiver ec)
     : vchan{std::move(vc)}
     , echan{std::move(ec)}
+    , ops{vchan.make_receive(&v), echan.make_receive(&ep)}
 {
+}
+
+
+template<class T>
+inline
+Future<T>::Future(Future&& other)
+    : vchan{std::move(other.vchan)}
+    , echan{std::move(other.echan)}
+    , v{std::move(other.v)}
+    , ep{std::move(other.ep)}
+    , ops{std::move(other.ops[0]), std::move(other.ops[1])}
+{
+}
+
+
+template<class T>
+inline Future<T>&
+Future<T>::operator=(Future&& other)
+{
+    using std::move;
+
+    vchan   = move(other.vchan);
+    echan   = move(other.echan);
+    v       = move(other.v);
+    ep      = move(other.ep);
+    ops[0]  = move(other.ops[0]);
+    ops[1]  = move(other.ops[1]);
+
+    return *this;
 }
 
 
@@ -1471,11 +1544,6 @@ template<class T>
 bool
 Future<T>::suspend(Task::Handle task)
 {
-    Channel_operation ops[] = {
-          vchan.make_receive(&v)
-        , echan.make_receive(&ep)
-    };
-
     return !task.promise().select(ops, task);
 }
 
@@ -1511,13 +1579,14 @@ inline void
 start(TaskFun f, Args&&... args)
 {
     using std::forward;
-    using std::move;
 
-    Task task = f(forward<Args>(args)...);
-    scheduler.submit(move(task));
+    scheduler.submit(f(forward<Args>(args)...));
 }
 
 
+/*
+    Asynchronous Function Invocation
+*/
 template<class Fun, class... Args>
 Future<std::result_of_t<Fun&&(Args&&...)>>
 async(Fun f, Args&&... args)
@@ -1526,14 +1595,12 @@ async(Fun f, Args&&... args)
     using std::forward;
     using std::move;
     using Result            = std::result_of_t<Fun&&(Args&&...)>;
-    using Result_channel    = Channel<Result>;
-    using Error_channel     = Channel<exception_ptr>;
     using Result_sender     = Send_channel<Result>;
     using Error_sender      = Send_channel<exception_ptr>;
 
-    Result_channel  r       = make_channel<Result>(1);
-    Error_channel   e       = make_channel<exception_ptr>(1);
-    auto            taskfun = [](Result_sender r, Error_sender e, Fun f, Args&&... args) -> Task {
+    Channel<Result>         r       = make_channel<Result>(1);
+    Channel<exception_ptr>  e       = make_channel<exception_ptr>(1);
+    auto                    taskfun = [](Result_sender r, Error_sender e, Fun f, Args&&... args) -> Task {
         exception_ptr ep;
 
         try {

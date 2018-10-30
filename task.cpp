@@ -309,24 +309,24 @@ Channel_operation::Channel_operation()
 }
 
 
-Channel_operation::Channel_operation(Channel_base* channelp, const void* rvaluep)
+Channel_operation::Channel_operation(Channel_base* cp, const void* rvaluep)
     : kind{send}
-    , chanp{channelp}
+    , chanp{cp}
     , rvalp{rvaluep}
     , lvalp{nullptr}
 {
-    assert(channelp != nullptr);
+    assert(cp != nullptr);
     assert(rvaluep != nullptr);
 }
 
 
-Channel_operation::Channel_operation(Channel_base* channelp, void* lvaluep, Type optype)
+Channel_operation::Channel_operation(Channel_base* cp, void* lvaluep, Type optype)
     : kind{optype}
-    , chanp{channelp}
+    , chanp{cp}
     , rvalp{nullptr}
     , lvalp{lvaluep}
 {
-    assert(channelp != nullptr);
+    assert(cp != nullptr);
     assert(lvaluep != nullptr);
 }
 
