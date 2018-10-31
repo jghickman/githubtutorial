@@ -223,14 +223,13 @@ Task::Promise::select(Channel_operation* first, Channel_operation* last, Task::H
     Channel_locks   chanlocks{first, last};
 
     readyco = select_ready(first, last);
-    if (!readyco) {
-        enqueue(first, last, task);
-        scheduler.suspend(task);
-
+    if (!readyco)
         // keep enqueued operations in lock order until wakeup
+        enqueue(first, last, task);
         firstenqco = first;
         lastenqco = last;
         sortguard.dismiss();
+        scheduler.suspend(task);
     }
 
     return readyco ? true : false;
@@ -677,6 +676,13 @@ void
 Scheduler::suspend(Task::Handle h)
 {
     suspended.insert(Task(h));
+}
+
+
+void
+Scheduler::yield(Task::Handle h)
+{
+    queues.push(Task(h));
 }
 
 

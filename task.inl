@@ -1413,51 +1413,7 @@ inline bool
 Future<T>::Awaitable::await_suspend(Task::Handle h)
 {
     task = h;
-    return selfp->suspend(task);
-}
-
-
-/*
-    Future Any Awaitable
-*/
-template<class T>
-inline
-Future<T>::Any_awaitable::Any_awaitable(const Future<T>* f, const Future<T>* l)
-    : first(f)
-    , last(l)
-{
-}
-
-
-template<class T>
-inline bool
-Future<T>::Any_awaitable::await_ready()
-{
-    return false;
-}
-
-
-template<class T>
-inline Channel_size
-Future<T>::Any_awaitable::await_resume()
-{
-    const Task::Waiting_futures waiting = task.promise().waiting_futures();
-    return waiting.selected(task);
-}
-
-
-template<class T>
-inline bool
-Future<T>::Any_awaitable::await_suspend(Task::Handle h)
-{
-    task = h;
-
-    Task::Waiting_futures waiting = task.promise().waiting_futures();
-
-    for (Future<T>* fp = first; fp != last; ++fp)
-        waiting.add(Waiting_future(fp->ops, fp->ops + 1));
-
-    return !waiting.select_any(task);
+    return selfp->select(task);
 }
 
 
@@ -1542,7 +1498,7 @@ Future<T>::resume(Task::Handle task)
 
 template<class T>
 bool
-Future<T>::suspend(Task::Handle task)
+Future<T>::select(Task::Handle task)
 {
     return !task.promise().select(ops, task);
 }

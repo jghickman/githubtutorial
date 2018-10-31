@@ -37,8 +37,8 @@
 #include <random>
 #include <thread>
 #include <type_traits>
-#include <vector>
 #include <utility>
+#include <vector>
 
 
 /*
@@ -54,12 +54,11 @@ namespace Concurrency   {
 template<class T> class Channel;
 template<class T> class Send_channel;
 template<class T> class Receive_channel;
-class Channel_base;
+template<class T> class Future;
 class Channel_operation;
 using Channel_size = std::ptrdiff_t;
 using boost::optional;
 using std::exception_ptr;
-template<class T> class Future;
 
 
 /*
@@ -94,10 +93,6 @@ public:
         Channel_size                                            selected();
         template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
 
-
-        bool wait_any(Channel_operation*, Channel_operation*);
-        Channel_size 
-    
     private:
         // Names/Types
         using Mutex = std::mutex;
@@ -200,86 +195,6 @@ private:
 */
 template<class TaskFun, class... Args> void                                     start(TaskFun, Args&&...);
 template<class Fun, class... Args> Future<std::result_of_t<Fun&&(Args&&...)>>   async(Fun, Args&&...);
-
-
-/*
-    Channel Operation
-
-    Users can call select() or try_select() to choose an operation for
-    execution from a set of alternatives.  If more than one alternative
-    is ready, a choice is made at random.  Selecting from a set of channels
-    with disparate element types requires an operation interface that is
-    independent element types, so perhaps the ideal design would involve
-    channels which construct type-safe operation implementations using
-    inheritance to hide the element type.  But that would imply dynamic
-    memory allocation, so we temporarily avoid that approach in favor of
-    type-unsafe interfaces with which users needn't directly interact.
-    Perhaps the small object optimization could be employed in the future
-    to realize a better design.
-*/
-class Channel_operation {
-public:
-    // Names/Types
-    class Interface;
-    enum Type { none, send, receive };
-
-    // Construct/Move/Copy/Destroy
-    Channel_operation();
-    Channel_operation(Channel_base*, const void* rvaluep); // send copy
-    Channel_operation(Channel_base*, void* lvaluep, Type); // send movable/receive
-
-    // Channel
-    Channel_base*       channel();
-    const Channel_base* channel() const;
-
-    // Selection
-    bool is_ready() const;
-    void execute();
-    void enqueue(Task::Handle);
-    void dequeue(Task::Handle);
-
-    // Position
-    void            position(Channel_size);
-    Channel_size    position() const;
-
-private:
-    // Data
-    Channel_base*   chanp;
-    Type            kind;
-    const void*     rvalp;
-    void*           lvalp;
-    Channel_size    pos{0};
-};
-
-
-/*
-    Channel Selection Awaitable
-*/
-class Channel_select_awaitable {
-public:
-    // Construct
-    Channel_select_awaitable(Channel_operation*, Channel_operation*);
-
-    // Awaitable Operations
-    bool            await_ready();
-    bool            await_suspend(Task::Handle);
-    Channel_size    await_resume();
-
-private:
-    // Data
-    Task::Promise*      promisep;
-    Channel_operation*  first;
-    Channel_operation*  last;
-};
-
-
-/*
-    Channel Selection
-*/
-template<Channel_size N> Channel_select_awaitable   select(Channel_operation (&ops)[N]);
-Channel_select_awaitable                            select(Channel_operation*, Channel_operation*);
-template<Channel_size N> optional<Channel_size>     try_select(Channel_operation (&ops)[N]);
-optional<Channel_size>                              try_select(Channel_operation*, Channel_operation*);
 
 
 /*
@@ -707,6 +622,86 @@ private:
 
 
 /*
+    Channel Operation
+
+    Users can call select() or try_select() to choose an operation for
+    execution from a set of alternatives.  If more than one alternative
+    is ready, a choice is made at random.  Selecting from a set of channels
+    with disparate element types requires an operation interface that is
+    independent element types, so perhaps the ideal design would involve
+    channels which construct type-safe operation implementations using
+    inheritance to hide the element type.  But that would imply dynamic
+    memory allocation, so we temporarily avoid that approach in favor of
+    type-unsafe interfaces with which users needn't directly interact.
+    Perhaps the small object optimization could be employed in the future
+    to realize a better design.
+*/
+class Channel_operation {
+public:
+    // Names/Types
+    class Interface;
+    enum Type { none, send, receive };
+
+    // Construct/Move/Copy/Destroy
+    Channel_operation();
+    Channel_operation(Channel_base*, const void* rvaluep); // send copy
+    Channel_operation(Channel_base*, void* lvaluep, Type); // send movable/receive
+
+    // Channel
+    Channel_base*       channel();
+    const Channel_base* channel() const;
+
+    // Selection
+    bool is_ready() const;
+    void execute();
+    void enqueue(Task::Handle);
+    void dequeue(Task::Handle);
+
+    // Position
+    void            position(Channel_size);
+    Channel_size    position() const;
+
+private:
+    // Data
+    Channel_base*   chanp;
+    Type            kind;
+    const void*     rvalp;
+    void*           lvalp;
+    Channel_size    pos{0};
+};
+
+
+/*
+    Channel Selection Awaitable
+*/
+class Channel_select_awaitable {
+public:
+    // Construct
+    Channel_select_awaitable(Channel_operation*, Channel_operation*);
+
+    // Awaitable Operations
+    bool            await_ready();
+    bool            await_suspend(Task::Handle);
+    Channel_size    await_resume();
+
+private:
+    // Data
+    Task::Promise*      promisep;
+    Channel_operation*  first;
+    Channel_operation*  last;
+};
+
+
+/*
+    Channel Selection
+*/
+template<Channel_size N> Channel_select_awaitable   select(Channel_operation (&ops)[N]);
+Channel_select_awaitable                            select(Channel_operation*, Channel_operation*);
+template<Channel_size N> optional<Channel_size>     try_select(Channel_operation (&ops)[N]);
+optional<Channel_size>                              try_select(Channel_operation*, Channel_operation*);
+
+
+/*
     Future     
 */
 template<class T>
@@ -749,15 +744,13 @@ public:
 
     // Friends
     friend class Awaitable;
-    friend class Any_awaitable;
-    friend class All_awaitable;
 
 private:
     // Names/Types
     enum Operation_position { valuepos, errorpos };
 
     // Value Access
-    bool    suspend(Task::Handle);
+    bool    select(Task::Handle);
     T       resume(Task::Handle);
     T       result();
 
@@ -768,12 +761,6 @@ private:
     exception_ptr       ep;
     Channel_operation   ops[2];
 };
-
-
-/*
-    Future Waiting
-*/
-template<class T> typename Future<T>::Any_awaitable wait_any(const std::vector<Future<T>>&);
 
 
 /*
@@ -801,28 +788,6 @@ private:
 
 
 /*
-    Future Any Awaitable
-*/
-template<class T>
-class Future<T>::Any_awaitable {
-public:
-    // Construct
-    Any_awaitable(const Future<T>*, const Future<T>*);
-
-    // Awaitable Operations
-    bool            await_ready();
-    bool            await_suspend(Task::Handle);
-    Channel_size    await_resume();
-
-private:
-    // Data
-    const Future<T>*    first;
-    const Future<T>*    last;
-    Task::Handle        task;
-};
-
-
-/*
     Scheduler
 
     A Scheduler multiplexes Tasks onto operating system threads.
@@ -840,6 +805,7 @@ public:
 
     // Execution
     void submit(Task&&);
+    void yield(Task::Handle);
     void suspend(Task::Handle);
     void resume(Task::Handle);
 
@@ -873,11 +839,11 @@ private:
     class Task_queue_array {
     private:
         // Names/Types
-        using Task_queues = std::vector<Task_queue>;
+        using Queue_vector = std::vector<Task_queue>;
 
     public:
         // Names/Types
-        using Size = Task_queues::size_type;
+        using Size = Queue_vector::size_type;
     
         // Construct
         explicit Task_queue_array(Size n);
@@ -889,10 +855,10 @@ private:
         void            push(Task&&);
         optional<Task>  pop(Size qpref);
         void            interrupt();
-    
+
     private:
         // Data
-        Task_queues         qs;
+        Queue_vector        qs;
         std::atomic<Size>   nextq{0};
     };
 
