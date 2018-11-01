@@ -79,12 +79,17 @@ public:
     using Initial_suspend   = std::experimental::suspend_always;
     using Final_suspend     = std::experimental::suspend_always;
 
+    enum class Status { ready, suspended, done };
+
     class Promise {
     public: 
+        // Construct
+        Promise();
+
         // Coroutine Functions
         Task            get_return_object();
         Initial_suspend initial_suspend() const;
-        Final_suspend   final_suspend() const;
+        Final_suspend   final_suspend();
     
         // Channel Operation Selection
         template<Channel_size N> bool                           select(Channel_operation (&ops)[N], Task::Handle);
@@ -92,6 +97,13 @@ public:
         bool                                                    select(Channel_size);
         Channel_size                                            selected();
         template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
+
+        // Execution
+        void    suspend();
+        Status  status() const;
+
+        // Synchronization
+        void unlock();
 
     private:
         // Names/Types
@@ -137,8 +149,7 @@ public:
 
         private:
             // Data
-            Mutex                   mutex; // TODO: Could an atomic be used instead?
-            optional<Channel_size>  buffer;
+            optional<Channel_size> buffer;
         };
 
         // Channel Operation Selection
@@ -157,16 +168,19 @@ public:
         static void restore_positions(Channel_operation*, Channel_operation*);
 
         // Data
+        Mutex                   mutex;
         optional<Channel_size>  readyco;    // ready selection
         Channel_operation*      firstenqco; // enqueued (ordered by channel)
         Channel_operation*      lastenqco;  // "
         Enqueued_selection      selenqco;
+        Status                  taskstatus;
     };
 
     // Construct/Move/Destroy
     explicit Task(Handle = nullptr);
     Task(Task&&);
     Task& operator=(Task&&);
+    friend void swap(Task&, Task&);
     Task(const Task&) = delete;
     Task& operator=(const Task&) = delete;
     ~Task();
@@ -175,16 +189,15 @@ public:
     Handle handle() const;
 
     // Execution
-    void run();
+    Status resume();
+
+    // Synchronization
+    void unlock();
 
     // Comparisons
     friend bool operator==(const Task&, const Task&);
 
 private:
-    // Move/Destroy
-    void        steal(Task*);
-    static void destroy(Task*);
-
     // Data
     Handle coro;
 };
@@ -709,8 +722,7 @@ class Future : boost::equality_comparable<Future<T>> {
 public:
     // Names/Types
     class Awaitable;
-    class Any_awaitable;
-    class All_awaitable;
+    class Ready_awaitable;
     using Value             = T;
     using Value_receiver    = Receive_channel<T>;
     using Error_receiver    = Receive_channel<exception_ptr>;
@@ -729,30 +741,37 @@ public:
         swap(x.echan, y.echan);
         swap(x.v, y.v);
         swap(x.ep, y.ep);
+        swap(x.ops[0], y.ops[0]);
+        swap(x.ops[1], y.ops[1]);
+        swap(x.is_ready, y.is_ready);
     }
 
     // Result Access
-    Awaitable   get();
-    bool        is_valid() const;
+    Awaitable       get();
+    optional<T>     try_get();
+    bool            is_valid() const;
 
     // Comparisons
     inline friend bool operator==(const Future& x, const Future& y) {
         if (x.vchan != y.echan) return false;
         if (x.echan != y.echan) return false;
+        if (x.is_ready != y.is_ready)
+        if (x.v != y.v) return false;
+        if (x.ep != y.ep) return false;
         return true;
     }
 
     // Friends
     friend class Awaitable;
+    friend class Ready_awaitable;
 
 private:
     // Names/Types
     enum Operation_position { valuepos, errorpos };
 
-    // Value Access
-    bool    select(Task::Handle);
-    T       resume(Task::Handle);
-    T       result();
+    // Awaitable Operations
+    bool    await_suspend(Task::Handle);
+    T       await_resume(Task::Handle);
 
     // Data
     Value_receiver      vchan;
@@ -760,11 +779,12 @@ private:
     T                   v;
     exception_ptr       ep;
     Channel_operation   ops[2];
+    bool                is_ready;
 };
 
 
 /*
-    Future Result Awaitable
+    Future Awaitable
 */
 template<class T>
 class Future<T>::Awaitable {
@@ -788,6 +808,36 @@ private:
 
 
 /*
+    Future Awaitable
+*/
+template<class T>
+class Future<T>::Ready_awaitable {
+public:
+    // Awaitable Operations
+    bool await_ready();
+    bool await_suspend(Task::Handle);
+    void await_resume();
+
+    // Friends
+    friend class Future;
+
+private:
+    // Construct
+    Ready_awaitable(Future*);
+
+    // Data
+    Future* selfp;
+};
+
+
+/*
+    Future Waiting
+*/
+template<class T> typename std::vector<Future<T>>::size_type    wait_any(const std::vector<Future<T>>&);
+template<class T> void                                          wait_all(const std::vector<Future<T>>&);
+
+
+/*
     Scheduler
 
     A Scheduler multiplexes Tasks onto operating system threads.
@@ -805,8 +855,6 @@ public:
 
     // Execution
     void submit(Task&&);
-    void yield(Task::Handle);
-    void suspend(Task::Handle);
     void resume(Task::Handle);
 
 private:
@@ -853,16 +901,20 @@ private:
     
         // Queue Operations
         void            push(Task&&);
+        void            push(Size qpref, Task&&);
         optional<Task>  pop(Size qpref);
         void            interrupt();
 
     private:
+        // Queue Operations
+        static void push(Queue_vector*, Size qpref, Task&&);
+
         // Data
         Queue_vector        qs;
         std::atomic<Size>   nextq{0};
     };
 
-    class Task_list {
+    class Suspended_tasks {
     public:
         // Construct
         void insert(Task&&);
@@ -886,12 +938,12 @@ private:
     };
     
     // Execution
-    void run(unsigned qpos);
+    void run_tasks(unsigned qpos);
 
     // Data
-    Task_queue_array    queues;
+    Task_queue_array    workqueues;
     std::vector<Thread> threads;
-    Task_list           suspended;
+    Suspended_tasks     suspended;
 };
 
 

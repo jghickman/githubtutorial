@@ -18,6 +18,7 @@
 
 #include "isptech/concurrency/task.hpp"
 #include <algorithm>
+#include <windows.h>
 
 #pragma warning(disable: 4073)
 #pragma init_seg(lib)
@@ -85,40 +86,6 @@ inline void
 Task::Promise::Channel_sort::dismiss()
 {
     first = last;
-}
-
-
-/*
-    Task Promise Enqueued Selection
-
-    put() can be called by multiple threads racing to complete a blocking
-    channel select operation, so internal synchronization is required.
-    But since the task waiting for the selection calls get() only after
-    dequeueing the remaining operations, no synchronization is required
-    for that.
-*/
-Channel_size
-Task::Promise::Enqueued_selection::get()
-{
-    const Channel_size pos = *buffer;
-
-    buffer.reset();
-    return pos;
-}
-
-
-bool
-Task::Promise::Enqueued_selection::put(Channel_size pos)
-{
-    bool        is_put = false;
-    const Lock  lock{mutex, try_to_lock};
-
-    if (lock && !buffer) {
-        buffer = pos;
-        is_put = true;
-    }
-
-    return is_put;
 }
 
 
@@ -223,13 +190,14 @@ Task::Promise::select(Channel_operation* first, Channel_operation* last, Task::H
     Channel_locks   chanlocks{first, last};
 
     readyco = select_ready(first, last);
-    if (!readyco)
-        // keep enqueued operations in lock order until wakeup
+    if (!readyco) {
         enqueue(first, last, task);
+
+        // remember enqueued operations in lock order on wakeup
+        sortguard.dismiss();
         firstenqco = first;
         lastenqco = last;
-        sortguard.dismiss();
-        scheduler.suspend(task);
+        suspend();
     }
 
     return readyco ? true : false;
@@ -278,6 +246,28 @@ Task::Promise::sort_channels(Channel_operation* first, Channel_operation* last)
     sort(first, last, [](auto& x, auto& y) {
         return x.channel() < y.channel();
     });
+}
+
+
+inline void
+Task::Promise::suspend()
+{
+    taskstatus = Status::suspended;
+    mutex.lock();
+}
+
+
+inline Task::Status
+Task::Promise::status() const
+{
+    return taskstatus;
+}
+
+
+inline void
+Task::Promise::unlock()
+{
+    mutex.unlock();
 }
 
 
@@ -429,33 +419,34 @@ Channel_operation::position() const
 
 
 /*
-    Scheduler Task List
+    Scheduler Suspended Tasks
 */
 inline
-Scheduler::Task_list::handle_equal::handle_equal(Task::Handle task)
+Scheduler::Suspended_tasks::handle_equal::handle_equal(Task::Handle task)
     : h{task}
 {
 }
 
 
 inline bool
-Scheduler::Task_list::handle_equal::operator()(const Task& task) const
+Scheduler::Suspended_tasks::handle_equal::operator()(const Task& task) const
 {
     return task.handle() == h;
 }
 
 
 void
-Scheduler::Task_list::insert(Task&& task)
+Scheduler::Suspended_tasks::insert(Task&& task)
 {
     Lock lock{mutex};
 
     tasks.push_back(move(task));
+    tasks.back().unlock();
 }
 
 
 Task
-Scheduler::Task_list::release(Task::Handle h)
+Scheduler::Suspended_tasks::release(Task::Handle h)
 {
     Task task;
     Lock lock{mutex};
@@ -569,28 +560,45 @@ optional<Task>
 Scheduler::Task_queue_array::pop(Size qpref)
 {
     const auto      nqs = qs.size();
-    optional<Task>  task;
+    optional<Task>  taskp;
 
     // Try to dequeue a task without waiting.
-    for (Size i = 0; i < nqs && !task; ++i) {
+    for (Size i = 0; i < nqs && !taskp; ++i) {
         auto pos = (qpref + i) % nqs;
-        task = qs[pos].try_pop();
+        taskp = qs[pos].try_pop();
     }
 
     // If that failed, wait on the preferred queue.
-    if (!task)
-        task = qs[qpref].pop();
+    if (!taskp)
+        taskp = qs[qpref].pop();
 
-    return task;
+    return taskp;
 }
 
 
-void
+inline void
 Scheduler::Task_queue_array::push(Task&& task)
 {
     const auto  nqs     = qs.size();
     const auto  qpref   = nextq++ % nqs;
-    bool        done    = false;
+
+    push(&qs, qpref, move(task));
+}
+
+
+inline void
+Scheduler::Task_queue_array::push(Size qpref, Task&& task)
+{
+    push(&qs, qpref, move(task));
+}
+
+
+void
+Scheduler::Task_queue_array::push(Queue_vector* qvecp, Size qpref, Task&& task)
+{
+    Queue_vector&   qs      = *qvecp;
+    const auto      nqs     = qs.size();
+    bool            done    = false;
 
     // Try to enqueue the task without waiting.
     for (Size i = 0; i < nqs && !done; ++i) {
@@ -616,25 +624,25 @@ Scheduler::Task_queue_array::size() const
     Scheduler
 */
 Scheduler::Scheduler(int nthreads)
-    : queues{nthreads > 0 ? nthreads : Thread::hardware_concurrency()}
+    : workqueues{nthreads > 0 ? nthreads : Thread::hardware_concurrency()}
 {
-    const auto nqs = queues.size();
+    const auto nqs = workqueues.size();
 
     threads.reserve(nqs);
     for (unsigned q = 0; q != nqs; ++q)
-        threads.emplace_back([&,q]{ run(q); });
+        threads.emplace_back([&,q]{ run_tasks(q); });
 }
 
 
 /*
     TODO:  Could this destructor should be rendered unnecessary because
-    by arranging for (a) queues to shutdown implicitly (in their
-    destructors) and (b) queues to be joined implicitly (in their
+    by arranging for (a) workqueues to shutdown implicitly (in their
+    destructors) and (b) workqueues to be joined implicitly (in their
     destructors)?
 */
 Scheduler::~Scheduler()
 {
-    queues.interrupt();
+    workqueues.interrupt();
     for (auto& thread : threads)
         thread.join();
 }
@@ -643,7 +651,7 @@ Scheduler::~Scheduler()
 void
 Scheduler::resume(Task::Handle h)
 {
-    queues.push(suspended.release(h));
+    workqueues.push(suspended.release(h));
 }
 
 
@@ -653,13 +661,21 @@ Scheduler::resume(Task::Handle h)
     to think through how exceptions thrown by tasks should be handled.
 */
 void
-Scheduler::run(unsigned qpos)
+Scheduler::run_tasks(unsigned qpos)
 {
-    while (optional<Task> taskp = queues.pop(qpos)) {
+    while (optional<Task> taskp = workqueues.pop(qpos)) {
         try {
-            taskp->run();
+            switch(taskp->resume()) {
+            case Task::Status::ready:
+                workqueues.push(qpos, move(*taskp));
+                break;
+
+            case Task::Status::suspended:
+                suspended.insert(move(*taskp));
+                break;
+            }
         } catch (...) {
-            queues.interrupt();
+            workqueues.interrupt();
         }
     }
 }
@@ -668,21 +684,7 @@ Scheduler::run(unsigned qpos)
 void
 Scheduler::submit(Task&& task)
 {
-    queues.push(move(task));
-}
-
-
-void
-Scheduler::suspend(Task::Handle h)
-{
-    suspended.insert(Task(h));
-}
-
-
-void
-Scheduler::yield(Task::Handle h)
-{
-    queues.push(Task(h));
+    workqueues.push(move(task));
 }
 
 

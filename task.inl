@@ -24,87 +24,46 @@ namespace Concurrency   {
 
 
 /*
-    Task
+    Task Promise Enqueued Selection
 */
-inline
-Task::Task(Handle h)
-    : coro{h}
+inline Channel_size
+Task::Promise::Enqueued_selection::get()
 {
-}
+    const Channel_size pos = *buffer;
 
-
-inline
-Task::Task(Task&& other)
-{
-    steal(&other);
-}
-
-
-inline
-Task::~Task()
-{
-    destroy(this);
-}
-
-
-inline void
-Task::destroy(Task* taskp)
-{
-    if (taskp->coro)
-        taskp->coro.destroy();
-}
-
-
-inline Task::Handle
-Task::handle() const
-{
-    return coro;
-}
-
-
-inline Task&
-Task::operator=(Task&& other)
-{
-    destroy(this);
-    steal(&other);
-    return *this;
-}
-
-
-inline void
-Task::run()
-{
-    /*
-        A Task that doesn't complete has placed itself on a waitlist so,
-        in that case we relinquish coroutine ownership to that list.
-    */
-    coro.resume();
-    if (!coro.done())
-        coro = nullptr;
-}
-
-
-inline void
-Task::steal(Task* otherp)
-{
-    coro = otherp->coro;
-    otherp->coro = nullptr;
+    buffer.reset();
+    return pos;
 }
 
 
 inline bool
-operator==(const Task& x, const Task& y)
+Task::Promise::Enqueued_selection::put(Channel_size pos)
 {
-    return x.coro == y.coro;
+    bool is_selected = false;
+
+    if (!buffer) {
+        buffer      = pos;
+        is_selected = true;
+    }
+
+    return is_selected;
 }
 
 
 /*
     Task Promise
 */
-inline Task::Final_suspend
-Task::Promise::final_suspend() const
+inline
+Task::Promise::Promise()
+    : taskstatus{Status::ready}
 {
+}
+
+
+inline Task::Final_suspend
+Task::Promise::final_suspend()
+{
+    taskstatus = Status::done;
     return Final_suspend{};
 }
 
@@ -134,7 +93,8 @@ Task::Promise::select(Channel_operation (&ops)[N], Task::Handle task)
 inline bool
 Task::Promise::select(Channel_size pos)
 {
-    return selenqco.put(pos);
+    const Lock lock{mutex, std::try_to_lock};
+    return lock ? selenqco.put(pos) : false;
 }
 
 
@@ -148,6 +108,77 @@ Task::Promise::try_select(Channel_operation (&ops)[N])
     Channel_locks       chanlocks{first, last};
 
     return select_ready(first, last);
+}
+
+
+/*
+    Task
+*/
+inline
+Task::Task(Handle h)
+    : coro{h}
+{
+}
+
+
+inline
+Task::Task(Task&& other)
+    : coro{nullptr}
+{
+    swap(*this, other);
+}
+
+
+inline
+Task::~Task()
+{
+    if (coro)
+        coro.destroy();
+}
+
+
+inline Task::Handle
+Task::handle() const
+{
+    return coro;
+}
+
+
+inline Task&
+Task::operator=(Task&& other)
+{
+    swap(*this, other);
+    return *this;
+}
+
+
+inline Task::Status
+Task::resume()
+{
+    coro.resume();
+    return coro.promise().status();
+}
+
+inline void
+Task::unlock()
+{
+    coro.promise().unlock();
+}
+
+
+inline bool
+operator==(const Task& x, const Task& y)
+{
+    return x.coro == y.coro;
+}
+
+
+inline void
+swap(Task& x, Task& y)
+{
+    using std::swap;
+
+    swap(x.coro, y.coro);
 }
 
 
@@ -1404,7 +1435,7 @@ template<class T>
 inline T
 Future<T>::Awaitable::await_resume()
 {
-    return selfp->resume(task);
+    return selfp->await_resume(task);
 }
 
 
@@ -1413,7 +1444,7 @@ inline bool
 Future<T>::Awaitable::await_suspend(Task::Handle h)
 {
     task = h;
-    return selfp->select(task);
+    return selfp->await_suspend(task);
 }
 
 
@@ -1446,6 +1477,28 @@ Future<T>::Future(Future&& other)
     , ep{std::move(other.ep)}
     , ops{std::move(other.ops[0]), std::move(other.ops[1])}
 {
+}
+
+
+template<class T>
+T
+Future<T>::await_resume(Task::Handle task)
+{
+    using std::move;
+    using std::rethrow_exception;
+
+    if (task.promise().selected() == errorpos)
+        rethrow_exception(ep);
+
+    return move(v);
+}
+
+
+template<class T>
+inline bool
+Future<T>::await_suspend(Task::Handle task)
+{
+    return !task.promise().select(ops, task);
 }
 
 
@@ -1483,24 +1536,18 @@ Future<T>::is_valid() const
 
 
 template<class T>
-T
-Future<T>::resume(Task::Handle task)
+inline optional<T>
+Future<T>::try_get()
 {
     using std::move;
-    using std::rethrow_exception;
+    optional<T> result;
 
-    if (task.promise().selected() == errorpos)
+    if (vchan.try_receive(&v))
+        result = move(v);
+    else if (echan.try_receive(&ep))
         rethrow_exception(ep);
 
-    return move(v);
-}
-
-
-template<class T>
-bool
-Future<T>::select(Task::Handle task)
-{
-    return !task.promise().select(ops, task);
+    return result;
 }
 
 
@@ -1514,6 +1561,8 @@ swap(Future<T>& x, Future<T>& y)
     swap(x.echan, y.echan);
     swap(x.v, y.v);
     swap(x.ep, y.ep);
+    swap(x.ops[0], y.ops[0]);
+    swap(x.ops[1], y.ops[1]);
 }
 
 
@@ -1523,7 +1572,34 @@ operator==(const Future<T>& x, const Future<T>& y)
 {
     if (x.vchan != y.echan) return false;
     if (x.echan != y.echan) return false;
+    if (x.v != y.v) return false;
+    if (x.ep != y.ep) return false;
     return true;
+}
+
+
+template<class T>
+void
+wait_all(const std::vector<Future<T>>& fs)
+{
+    for (auto& f : fs)
+        co_await f.get();
+}
+
+
+template<class T>
+optional<Future<T>>
+wait_any(const std::vector<Future<T>>& fs)
+{
+    using Size = typename std::vector<Future<T>>::size_type;
+
+    optional<Size> pos;
+
+    if (!fs.empty()) {
+        bool done = false;
+        for (Size i = 0; i < fs.size(); ++i)
+
+    }
 }
 
 
