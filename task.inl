@@ -24,38 +24,13 @@ namespace Concurrency   {
 
 
 /*
-    Task Promise Enqueued Selection
-*/
-inline Channel_size
-Task::Promise::Enqueued_selection::get()
-{
-    const Channel_size pos = *buffer;
-
-    buffer.reset();
-    return pos;
-}
-
-
-inline bool
-Task::Promise::Enqueued_selection::put(Channel_size pos)
-{
-    bool is_selected = false;
-
-    if (!buffer) {
-        buffer      = pos;
-        is_selected = true;
-    }
-
-    return is_selected;
-}
-
-
-/*
     Task Promise
 */
 inline
 Task::Promise::Promise()
-    : taskstatus{Status::ready}
+    : firstenqco{nullptr}
+    , lastenqco{nullptr}
+    , taskstatus{Status::ready}
 {
 }
 
@@ -93,8 +68,15 @@ Task::Promise::select(Channel_operation (&ops)[N], Task::Handle task)
 inline bool
 Task::Promise::select(Channel_size pos)
 {
-    const Lock lock{mutex, std::try_to_lock};
-    return lock ? selenqco.put(pos) : false;
+    bool        is_selected = false;
+    const Lock  lock{mutex};
+
+    if (!selectco) {
+        selectco = pos;
+        is_selected = true;
+    }
+
+    return is_selected;
 }
 
 
@@ -144,6 +126,13 @@ Task::handle() const
 }
 
 
+inline void
+Task::make_ready()
+{
+    coro.promise().make_ready();
+}
+
+
 inline Task&
 Task::operator=(Task&& other)
 {
@@ -158,6 +147,7 @@ Task::resume()
     coro.resume();
     return coro.promise().status();
 }
+
 
 inline void
 Task::unlock()
@@ -539,6 +529,14 @@ Channel<T>::capacity() const
 
 
 template<class T>
+inline bool
+Channel<T>::is_empty() const
+{
+    return pimpl->is_empty();
+}
+
+
+template<class T>
 inline Channel_operation
 Channel<T>::make_receive(T* valuep) const
 {
@@ -708,6 +706,7 @@ template<class T>
 Channel_size
 Channel<T>::Impl::capacity() const
 {
+    const Lock lock{mutex};
     return buffer.capacity();
 }
 
@@ -816,6 +815,15 @@ Channel<T>::Impl::enqueue_send(Task::Handle task, Channel_size selpos, U* valuep
 
 template<class T>
 bool
+Channel<T>::Impl::is_empty() const
+{
+    const Lock lock{mutex};
+    return buffer.is_empty();
+}
+
+
+template<class T>
+bool
 Channel<T>::Impl::is_receive_ready() const
 {
     return !(buffer.is_empty() && receivers.is_empty());
@@ -909,6 +917,7 @@ template<class T>
 Channel_size
 Channel<T>::Impl::size() const
 {
+    const Lock lock{mutex};
     return buffer.size();
 }
 
@@ -1412,11 +1421,11 @@ make_channel(Channel_size n)
 
 
 /*
-    Future Awaitable
+    Future Result Awaitable
 */
 template<class T>
 inline
-Future<T>::Awaitable::Awaitable(Future* fp)
+Future<T>::Ready_awaitable::Ready_awaitable(const Future* fp)
     : selfp(fp)
 {
 }
@@ -1424,27 +1433,128 @@ Future<T>::Awaitable::Awaitable(Future* fp)
 
 template<class T>
 inline bool
-Future<T>::Awaitable::await_ready()
+Future<T>::Ready_awaitable::await_ready()
 {
-    assert(selfp->is_valid());
-    return false;
+    return selfp->pimpl->is_ready;
 }
 
 
 template<class T>
-inline T
-Future<T>::Awaitable::await_resume()
+inline void
+Future<T>::Ready_awaitable::await_resume()
 {
-    return selfp->await_resume(task);
+    selfp->pimpl->is_ready = true;
 }
 
 
 template<class T>
 inline bool
-Future<T>::Awaitable::await_suspend(Task::Handle h)
+Future<T>::Ready_awaitable::await_suspend(Task::Handle task)
 {
+    selfp->pimpl->select_ready(task);
+    return true;
+}
+
+
+/*
+    Future Result Awaitable
+*/
+template<class T>
+inline
+Future<T>::Result_awaitable::Result_awaitable(Future* fp)
+    : selfp(fp)
+{
+}
+
+
+template<class T>
+inline bool
+Future<T>::Result_awaitable::await_ready()
+{
+    return selfp->pimpl->is_ready;
+}
+
+
+template<class T>
+inline T
+Future<T>::Result_awaitable::await_resume()
+{
+    return selfp->pimpl->get_result();
+}
+
+
+template<class T>
+inline bool
+Future<T>::Result_awaitable::await_suspend(Task::Handle task)
+{
+    selfp->pimpl->select_ready(task);
+    return true;
+}
+
+
+/*
+    Future Implementation
+*/
+template<class T>
+inline
+Future<T>::Impl::Impl(Value_receiver&& vc, Error_receiver&& ec)
+    : vchan{std::move(vc)}
+    , echan{std::move(ec)}
+    , ops{vchan.make_receive(&v), echan.make_receive(&ep)}
+{
+}
+
+
+template<class T>
+T
+Future<T>::Impl::get_result()
+{
+    using std::move;
+    using std::rethrow_exception;
+
+    exception_ptr errorp;
+
+    if (is_ready || task.promise().selected() == errorpos)
+        errorp = ep;
+
+    ep = nullptr;
+    is_ready = false;
+
+    if (errorp)
+        rethrow_exception(errorp);
+
+    return move(v);
+}
+
+
+template<class T>
+inline bool
+Future<T>::Impl::select_ready(Task::Handle h)
+{
+    bool is_selected = is_ready;
+
     task = h;
-    return selfp->await_suspend(task);
+    if (!is_ready)
+        is_selected = task.promise().select(ops, task);
+
+    return is_selected;
+}
+
+
+template<class T>
+inline optional<T>
+Future<T>::Impl::try_get()
+{
+    using std::move;
+    optional<T> result;
+
+    if (vchan.try_receive(&v))
+        result = move(v);
+    else if (echan.try_receive(&ep))
+        rethrow_exception(ep);
+
+    is_ready = false;
+    return result;
 }
 
 
@@ -1461,9 +1571,7 @@ Future<T>::Future()
 template<class T>
 inline
 Future<T>::Future(Value_receiver vc, Error_receiver ec)
-    : vchan{std::move(vc)}
-    , echan{std::move(ec)}
-    , ops{vchan.make_receive(&v), echan.make_receive(&ep)}
+    : pimpl{std::make_shared<Impl>(std::move(vc), std::move(ec))}
 {
 }
 
@@ -1471,59 +1579,16 @@ Future<T>::Future(Value_receiver vc, Error_receiver ec)
 template<class T>
 inline
 Future<T>::Future(Future&& other)
-    : vchan{std::move(other.vchan)}
-    , echan{std::move(other.echan)}
-    , v{std::move(other.v)}
-    , ep{std::move(other.ep)}
-    , ops{std::move(other.ops[0]), std::move(other.ops[1])}
+    : pimpl{std::move(other.pimpl)}
 {
 }
 
 
 template<class T>
-T
-Future<T>::await_resume(Task::Handle task)
-{
-    using std::move;
-    using std::rethrow_exception;
-
-    if (task.promise().selected() == errorpos)
-        rethrow_exception(ep);
-
-    return move(v);
-}
-
-
-template<class T>
-inline bool
-Future<T>::await_suspend(Task::Handle task)
-{
-    return !task.promise().select(ops, task);
-}
-
-
-template<class T>
-inline Future<T>&
-Future<T>::operator=(Future&& other)
-{
-    using std::move;
-
-    vchan   = move(other.vchan);
-    echan   = move(other.echan);
-    v       = move(other.v);
-    ep      = move(other.ep);
-    ops[0]  = move(other.ops[0]);
-    ops[1]  = move(other.ops[1]);
-
-    return *this;
-}
-
-
-template<class T>
-inline typename Future<T>::Awaitable
+inline typename Future<T>::Result_awaitable
 Future<T>::get()
 {
-    return this;
+    return Result_awaitable(this);
 }
 
 
@@ -1531,7 +1596,16 @@ template<class T>
 inline bool
 Future<T>::is_valid() const
 {
-    return vchan && echan;
+    return pimpl ? true : false;
+}
+
+
+template<class T>
+inline Future<T>&
+Future<T>::operator=(Future&& other)
+{
+    pimpl = std::move(other.pimpl);
+    return *this;
 }
 
 
@@ -1539,15 +1613,15 @@ template<class T>
 inline optional<T>
 Future<T>::try_get()
 {
-    using std::move;
-    optional<T> result;
+    return pimpl->try_get();
+}
 
-    if (vchan.try_receive(&v))
-        result = move(v);
-    else if (echan.try_receive(&ep))
-        rethrow_exception(ep);
 
-    return result;
+template<class T>
+inline typename Future<T>::Ready_awaitable
+Future<T>::wait_ready() const
+{
+    return Ready_awaitable(this);
 }
 
 
@@ -1583,10 +1657,11 @@ void
 wait_all(const std::vector<Future<T>>& fs)
 {
     for (auto& f : fs)
-        co_await f.get();
+        co_await f.wait_ready();
 }
 
 
+#if 0
 template<class T>
 optional<Future<T>>
 wait_any(const std::vector<Future<T>>& fs)
@@ -1601,6 +1676,7 @@ wait_any(const std::vector<Future<T>>& fs)
 
     }
 }
+#endif
 
 
 /*

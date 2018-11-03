@@ -41,7 +41,7 @@ using std::try_to_lock;
 
 
 // Names/Types
-Scheduler scheduler;
+Scheduler scheduler(1);
 
 
 /*
@@ -186,21 +186,21 @@ Task::Promise::save_positions(Channel_operation* first, Channel_operation* last)
 bool
 Task::Promise::select(Channel_operation* first, Channel_operation* last, Task::Handle task)
 {
+    Lock            lock(mutex);
     Channel_sort    sortguard{first, last};
     Channel_locks   chanlocks{first, last};
 
-    readyco = select_ready(first, last);
-    if (!readyco) {
-        enqueue(first, last, task);
-
-        // remember enqueued operations in lock order on wakeup
+    selectco = select_ready(first, last);
+    if (!selectco) {
+        // store enqueued operations in lock order until wakeup
         sortguard.dismiss();
         firstenqco = first;
         lastenqco = last;
-        suspend();
+        enqueue(first, last, task);
+        suspend(&lock);
     }
 
-    return readyco ? true : false;
+    return selectco ? true : false;
 }
 
 
@@ -223,18 +223,27 @@ Task::Promise::select_ready(Channel_operation* first, Channel_operation* last)
 Channel_size
 Task::Promise::selected()
 {
-    Channel_size pos;
+    /*
+        If the task has been suspended while waiting for channel operations
+        to complete, they must be dequeued prior to reading the selection
+        (below) to avoid data races.
+    */
+    if (firstenqco != lastenqco) {
+        const Handle owntask = Handle::from_promise(*this);
 
-    if (readyco)
-        pos = *readyco;
-    else {
-        const Handle task = Handle::from_promise(*this);
-        dequeue(firstenqco, lastenqco, task);
+        dequeue(firstenqco, lastenqco, owntask);
         restore_positions(firstenqco, lastenqco);
-        pos = selenqco.get();
+        firstenqco = lastenqco;
     }
 
-    return pos;
+    return *selectco;
+}
+
+
+inline void
+Task::Promise::make_ready()
+{
+    taskstatus = Status::ready;
 }
 
 
@@ -249,18 +258,18 @@ Task::Promise::sort_channels(Channel_operation* first, Channel_operation* last)
 }
 
 
-inline void
-Task::Promise::suspend()
-{
-    taskstatus = Status::suspended;
-    mutex.lock();
-}
-
-
 inline Task::Status
 Task::Promise::status() const
 {
     return taskstatus;
+}
+
+
+inline void
+Task::Promise::suspend(Lock* lockp)
+{
+    taskstatus = Status::suspended;
+    lockp->release();
 }
 
 
@@ -338,6 +347,8 @@ void
 Channel_operation::dequeue(Task::Handle task)
 {
     if (chanp) {
+        chanp->lock();
+
         switch(kind) {
         case send:
             chanp->dequeue_send(task, pos);
@@ -347,6 +358,8 @@ Channel_operation::dequeue(Task::Handle task)
             chanp->dequeue_receive(task, pos);
             break;
         }
+
+        chanp->unlock();
     }
 }
 
@@ -651,7 +664,10 @@ Scheduler::~Scheduler()
 void
 Scheduler::resume(Task::Handle h)
 {
-    workqueues.push(suspended.release(h));
+    Task task = waiters.release(h);
+
+    task.make_ready();
+    workqueues.push(move(task));
 }
 
 
@@ -671,7 +687,7 @@ Scheduler::run_tasks(unsigned qpos)
                 break;
 
             case Task::Status::suspended:
-                suspended.insert(move(*taskp));
+                waiters.insert(move(*taskp));
                 break;
             }
         } catch (...) {

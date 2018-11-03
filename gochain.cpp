@@ -142,7 +142,7 @@ main(int argc, char* argv[])
 int
 add_one(int n)
 {
-    Sleep(5000);
+//    Sleep(5000);
     return n + 1;
 }
 
@@ -150,16 +150,26 @@ add_one(int n)
 Task
 add_one_task(int n, Send_channel<int> results)
 {
-    Future<int> f = async(add_one, n);
-    int r;
+    using Future_vector = std::vector<Future<int>>;
+    Future_vector fs;
 
-    try {
-        r = co_await f.get();
-    } catch (...) {
-        r = -1;
+    fs.push_back(async(add_one, n));
+    fs.push_back(async(add_one, n + 1));
+
+    for (auto& f : fs)
+        co_await f.wait_ready();
+
+    for (int i = 0; i < fs.size(); ++i) {
+        int r;
+        try {
+            r = co_await fs[i].get();
+        }
+        catch (...) {
+            r = -1;
+        }
+
+        co_await results.send(r);
     }
-
-    co_await results.send(r);
 }
 
 
@@ -168,12 +178,11 @@ add_one_task(int n, Send_channel<int> results)
 void
 main(int argc, char* argv[])
 {
-//    cout << "r = " << r.sync_receive() << endl;
 
-    Channel<int> result = make_channel<int>(1);
+    Channel<int> results = make_channel<int>(1);
 
-    start(add_one_task, 0, result);
-    cout << "result = " << result.sync_receive() << endl;
+    start(add_one_task, 0, results);
+    cout << "result = " << results.sync_receive() << endl;
     char c;
     cin >> c;
 }
