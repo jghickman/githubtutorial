@@ -184,19 +184,23 @@ Task::Promise::save_positions(Channel_operation* first, Channel_operation* last)
 
 
 bool
-Task::Promise::select(Channel_operation* first, Channel_operation* last, Task::Handle task)
+Task::Promise::select(Channel_operation* first, Channel_operation* last)
 {
     Lock            lock(mutex);
     Channel_sort    sortguard{first, last};
     Channel_locks   chanlocks{first, last};
 
     selectco = select_ready(first, last);
+
+    // If nothing is ready, enqueue the operations on their respective
+    // channels and maintain their lock order until we awake.
     if (!selectco) {
-        // store enqueued operations in lock order until wakeup
+        const Task::Handle owntask = Handle::from_promise(*this);
+
+        enqueue(first, last, owntask);
         sortguard.dismiss();
-        firstenqco = first;
-        lastenqco = last;
-        enqueue(first, last, task);
+        firstco = first;
+        lastco = last;
         suspend(&lock);
     }
 
@@ -224,16 +228,16 @@ Channel_size
 Task::Promise::selected()
 {
     /*
-        If the task has been suspended while waiting for channel operations
-        to complete, they must be dequeued prior to reading the selection
-        (below) to avoid data races.
+        If the task was suspended while waiting for channel operations to
+        complete, dequeue them prior to reading the selection to avoid data
+        races.
     */
-    if (firstenqco != lastenqco) {
+    if (firstco != lastco) {
         const Handle owntask = Handle::from_promise(*this);
 
-        dequeue(firstenqco, lastenqco, owntask);
-        restore_positions(firstenqco, lastenqco);
-        firstenqco = lastenqco;
+        dequeue(firstco, lastco, owntask);
+        restore_positions(firstco, lastco);
+        firstco = lastco;
     }
 
     return *selectco;

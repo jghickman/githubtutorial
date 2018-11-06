@@ -55,6 +55,9 @@ template<class T> class Channel;
 template<class T> class Send_channel;
 template<class T> class Receive_channel;
 template<class T> class Future;
+template<class T> class Future_all_awaitable;
+template<class T> class Future_any_awaitable;
+class Channel_base;
 class Channel_operation;
 using Channel_size = std::ptrdiff_t;
 using boost::optional;
@@ -92,11 +95,16 @@ public:
         Final_suspend   final_suspend();
     
         // Channel Operation Selection
-        template<Channel_size N> bool                           select(Channel_operation (&ops)[N], Task::Handle);
-        bool                                                    select(Channel_operation*, Channel_operation*, Task::Handle);
+        template<Channel_size N> bool                           select(Channel_operation (&ops)[N]);
+        bool                                                    select(Channel_operation*, Channel_operation*);
         bool                                                    select(Channel_size);
         Channel_size                                            selected();
         template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
+
+        // Future Waiting
+        template<class T> void          wait_all(const Future<T>*, const Future<T>*);
+        template<class T> Channel_size  wait_any(const Future<T>*, const Future<T>*);
+        Channel_size                    ready_future();
 
         // Execution
         void    make_ready();
@@ -104,6 +112,9 @@ public:
 
         // Synchronization
         void unlock();
+
+        // Friends
+        template <class T> friend class Future;
 
     private:
         // Names/Types
@@ -141,16 +152,13 @@ public:
             Channel_operation* last;
         };
 
-        class Enqueued_selection {
-        public:
-            // I/O
-            bool            put(Channel_size pos);
-            Channel_size    get();
-
-        private:
-            // Data
-            optional<Channel_size> buffer;
+        struct Waiting_future {
+            const Channel_base* valuep;
+            const Channel_base* errorp;
+            bool*               readyp;
         };
+
+        using Waiting_future_vector = std::vector<Waiting_future>;
 
         // Channel Operation Selection
         static optional<Channel_size>   select_ready(Channel_operation*, Channel_operation*);
@@ -163,18 +171,19 @@ public:
         // Channel Operation Synronization
         static void save_positions(Channel_operation*, Channel_operation*);
         static void sort_channels(Channel_operation*, Channel_operation*);
+        static void restore_positions(Channel_operation*, Channel_operation*);
         static void lock(Channel_operation*, Channel_operation*);
         static void unlock(Channel_operation*, Channel_operation*);
-        static void restore_positions(Channel_operation*, Channel_operation*);
 
         // Execution
         void suspend(Lock*);
 
         // Data
         Mutex                   mutex;
-        Channel_operation*      firstenqco; // enqueued
-        Channel_operation*      lastenqco;  // "
+        Channel_operation*      firstco;    // enqueued
+        Channel_operation*      lastco;     // "
         optional<Channel_size>  selectco;
+        Waiting_future_vector   futures;
         Status                  taskstatus;
     };
 
@@ -245,7 +254,7 @@ public:
 
 
 /*
-    Channel Construction
+    Channel Operations
 */
 template<class T> Channel<T> make_channel(Channel_size capacity=0);
 
@@ -272,15 +281,17 @@ public:
     Channel_size    capacity() const;
     bool            is_empty() const;
 
-    // Send/Receive
+    // Non-Blocking Send/Receive
     Send_awaitable      send(const T&) const;
-    Send_awaitable      send(T&& x) const;
+    Send_awaitable      send(T&&) const;
     Receive_awaitable   receive() const;
     bool                try_send(const T&) const;
     optional<T>         try_receive() const;
-    void                sync_send(const T&) const;
-    void                sync_send(T&&) const;
-    T                   sync_receive() const;
+
+    // Blocking Send/Receive (can move outside class body in VS 2017)
+    inline friend void  blocking_send(const Channel& c, const T& x) { c.pimpl->blocking_send(&x); }
+    inline friend void  blocking_send(const Channel& c, T&& x)      { c.pimpl->blocking_send(&x); }
+    inline friend T     blocking_receive(const Channel& c)          { return c.pimpl->blocking_receive(); }
 
     // Operation Selection
     Channel_operation make_send(const T&) const;
@@ -448,8 +459,8 @@ private:
         Receive_awaitable                   awaitable_receive();
         bool                                try_send(const T&);
         optional<T>                         try_receive();
-        template<class U> void              sync_send(U* valuep);
-        T                                   sync_receive();
+        template<class U> void              blocking_send(U* valuep);
+        T                                   blocking_receive();
 
         // Operation Construction
         Channel_operation make_send(const T* valuep);
@@ -572,12 +583,14 @@ public:
     Channel_size    capacity() const;
     bool            is_empty() const;
 
-    // Channel Operations
+    // Non-Blocking Channel Operations
     Awaitable   send(const T&) const;
     Awaitable   send(T&&) const;
     bool        try_send(const T&) const;
-    void        sync_send(const T&) const;
-    void        sync_send(T&&) const;
+
+    // Blocking Channel Operations (can move outside class body in VS 2017)
+    inline friend void blocking_send(const Send_channel& c, const T& x) { c.pimpl->blocking_send(&x); }
+    inline friend void blocking_send(const Send_channel& c, T&& x)      { c.pimpl->blocking_send(&x); }
 
     // Selectable Operations
     Channel_operation make_send(const T&) const;
@@ -618,10 +631,12 @@ public:
     Channel_size    capacity() const;
     bool            is_empty() const;
 
-    // Channel Operations
+    // Non-Blocking Channel Operations
     Awaitable   receive() const;
     optional<T> try_receive() const;
-    T           sync_receive() const;
+
+    // Blocking Channel Operations
+    inline friend T blocking_receive(const Receive_channel& c) { return c.pimpl->blocking_receive(); }
 
     // Selection
     Channel_operation make_receive(T*);
@@ -634,6 +649,9 @@ public:
     // Comparisons
     inline friend bool operator==(const Receive_channel& x, const Receive_channel& y) { return x.pimpl == y.pimpl; }
     inline friend bool operator< (const Receive_channel& x, const Receive_channel& y) { return x.pimpl < y.pimpl; }
+
+    // Friends
+    friend class Future<T>;
 
 private:
     // Data
@@ -706,7 +724,7 @@ public:
 
 private:
     // Data
-    Task::Promise*      promisep;
+    Task::Handle        task;
     Channel_operation*  first;
     Channel_operation*  last;
 };
@@ -724,8 +742,8 @@ optional<Channel_size>                              try_select(Channel_operation
 /*
     Future Waiting
 */
-template<class T> void                                          wait_all(const std::vector<Future<T>>&);
-template<class T> typename std::vector<Future<T>>::size_type    wait_any(const std::vector<Future<T>>&);
+template<class T> Future_all_awaitable<T> wait_all(const std::vector<Future<T>>&);
+template<class T> Future_any_awaitable<T> wait_any(const std::vector<Future<T>>&);
 
 
 /*
@@ -735,8 +753,7 @@ template<class T>
 class Future : boost::equality_comparable<Future<T>> {
 public:
     // Names/Types
-    class Result_awaitable;
-    class Ready_awaitable;
+    class Awaitable;
     using Value             = T;
     using Value_receiver    = Receive_channel<T>;
     using Error_receiver    = Receive_channel<exception_ptr>;
@@ -750,57 +767,54 @@ public:
     Future& operator=(Future&&);
     inline friend void swap(Future& x, Future& y) {
         using std::swap;
-        swap(x.pimpl, y.pimpl);
+        swap(x.vchan, y.vchan);
+        swap(x.echan, y.echan);
+        swap(x.isready, y.isready);
     }
 
     // Result Access
-    Result_awaitable    get();
-    optional<T>         try_get();
-    bool                is_valid() const;
+    Awaitable   get();
+    optional<T> try_get();
+
+    // Observers
+    bool is_valid() const;
 
     // Comparisons
     inline friend bool operator==(const Future& x, const Future& y) {
-        return x.pimpl == y.pimpl;
+        if (x.vchan != y.vchan) return false;
+        if (x.echan != y.echan) return false;
+        if (x.isready != y.isready) return false;
+        return true;
     }
 
-    // Waiting
-    Ready_awaitable wait_ready() const;
-
     // Friends
-    friend class Result_awaitable;
-    friend class Ready_awaitable;
-    friend void wait_all<T>(const std::vector<Future<T>>&);
+    friend class Awaitable;
 
 private:
-    // Names/Types
-    enum Operation_position { valuepos, errorpos };
+    // Result Access
+    bool    is_ready() const;
+    T       get_ready();
 
-    struct Impl {
-        // Construct
-        Impl(Value_receiver&&, Error_receiver&&);
-    
-        bool        select_ready(Task::Handle);
-        T           get_result();
-        optional<T> try_get();
+    // Waiting (used by Task)
+    const Channel_base* value_channel() const;
+    const Channel_base* error_channel() const;
+    bool*               ready_flag() const;
 
-        Value_receiver      vchan;
-        Error_receiver      echan;
-        T                   v;
-        exception_ptr       ep;
-        Channel_operation   ops[2];
-        bool                is_ready{false};
-        Task::Handle        task;
-    };
+    // Friends
+    friend void Task::Promise::wait_all(const Future<T>*, const Future<T>*);
 
-    std::shared_ptr<Impl> pimpl;
+    // Data
+    Value_receiver  vchan;
+    Error_receiver  echan;
+    bool            isready;
 };
 
 
 /*
-    Future Result Awaitable
+    Future Awaitable
 */
 template<class T>
-class Future<T>::Result_awaitable {
+class Future<T>::Awaitable {
 public:
     // Awaitable Operations
     bool    await_ready();
@@ -812,33 +826,59 @@ public:
 
 private:
     // Construct
-    Result_awaitable(Future*);
+    Awaitable(Future*);
 
     // Data
-    Future* selfp;
+    Future*             selfp;
+    T                   v;
+    exception_ptr       ep;
+    Channel_operation   ops[2];
 };
 
 
 /*
-    Future Ready Awaitable
+    Future All Awaitable
 */
 template<class T>
-class Future<T>::Ready_awaitable {
+class Future_all_awaitable {
 public:
+    // Construct
+    Future_all_awaitable(const Future<T>*, const Future<T>*);
+
     // Awaitable Operations
     bool await_ready();
     bool await_suspend(Task::Handle);
     void await_resume();
 
-    // Friends
-    friend class Future;
+private:
+    // Data
+    const Future<T>* first;
+    const Future<T>* last;
+};
+
+
+/*
+    Future Any Awaitable
+*/
+template<class T>
+class Future_any_awaitable {
+public:
+    // Names/Types
+    using Vector        = std::vector<Future<T>>;
+    using Vector_size   = typename Vector::size_type;
+
+    // Construct
+    explicit Future_any_awaitable(const Vector*);
+
+    // Awaitable Operations
+    bool        await_ready();
+    bool        await_suspend(Task::Handle);
+    Vector_size await_resume();
 
 private:
-    // Construct
-    Ready_awaitable(const Future*);
-
     // Data
-    const Future* selfp;
+    const Future<T>* first;
+    const Future<T>* last;
 };
 
 

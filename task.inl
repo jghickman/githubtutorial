@@ -28,8 +28,8 @@ namespace Concurrency   {
 */
 inline
 Task::Promise::Promise()
-    : firstenqco{nullptr}
-    , lastenqco{nullptr}
+    : firstco{nullptr}
+    , lastco{nullptr}
     , taskstatus{Status::ready}
 {
 }
@@ -59,9 +59,9 @@ Task::Promise::initial_suspend() const
 
 template<Channel_size N>
 inline bool
-Task::Promise::select(Channel_operation (&ops)[N], Task::Handle task)
+Task::Promise::select(Channel_operation (&ops)[N])
 {
-    return select(begin(ops), end(ops), task);
+    return select(begin(ops), end(ops));
 }
 
 
@@ -90,6 +90,25 @@ Task::Promise::try_select(Channel_operation (&ops)[N])
     Channel_locks       chanlocks{first, last};
 
     return select_ready(first, last);
+}
+
+
+template<class T>
+void
+Task::Promise::wait_all(const Future<T>* first, const Future<T>* last)
+{
+    using Size = Future_channel_vector::size_type;
+
+    const Size          n   = last - first;
+    const Future<T>*    fp  = first;
+
+    futures.resize(n);
+    for (Size i = 0; i < n; ++i) {
+        futures[i].valuep = fp->value_channel();
+        futures[i].errorp = fp->error_channel();
+        futures[i].readyp = fp->ready_flag();
+        ++fp;
+    }
 }
 
 
@@ -610,30 +629,6 @@ Channel<T>::size() const
 
 
 template<class T>
-inline T
-Channel<T>::sync_receive() const
-{
-    return pimpl->sync_receive();
-}
-
-
-template<class T>
-inline void
-Channel<T>::sync_send(const T& value) const
-{
-    return pimpl->sync_send(&value);
-}
-
-
-template<class T>
-inline void
-Channel<T>::sync_send(T&& value) const
-{
-    return pimpl->sync_send(&value);
-}
-
-
-template<class T>
 inline optional<T>
 Channel<T>::try_receive() const
 {
@@ -699,6 +694,40 @@ typename Channel<T>::Send_awaitable
 Channel<T>::Impl::awaitable_send(U* valuep)
 {
     return Send_awaitable(this, valuep);
+}
+
+
+template<class T>
+T
+Channel<T>::Impl::blocking_receive()
+{
+    T       value;
+    Lock    lock{mutex};
+
+    if (!dequeue(&senders, &value)) {
+        if (!buffer.is_empty())
+            buffer.pop(&value);
+        else
+            wait_for_sender(lock, &receivers, &value);
+    }
+
+    return value;
+}
+
+
+template<class T>
+template<class U>
+inline void
+Channel<T>::Impl::blocking_send(U* valuep)
+{
+    Lock lock{mutex};
+
+    if (!dequeue(&receivers, valuep)) {
+        if (!buffer.is_full())
+            buffer.push(move(*valuep));
+        else
+            wait_for_receiver(lock, &senders, valuep);
+    }
 }
 
 
@@ -923,40 +952,6 @@ Channel<T>::Impl::size() const
 
 
 template<class T>
-T
-Channel<T>::Impl::sync_receive()
-{
-    T       value;
-    Lock    lock{mutex};
-
-    if (!dequeue(&senders, &value)) {
-        if (!buffer.is_empty())
-            buffer.pop(&value);
-        else
-            wait_for_sender(lock, &receivers, &value);
-    }
-
-    return value;
-}
-
-
-template<class T>
-template<class U>
-inline void
-Channel<T>::Impl::sync_send(U* valuep)
-{
-    Lock lock{mutex};
-
-    if (!dequeue(&receivers, valuep)) {
-        if (!buffer.is_full())
-            buffer.push(move(*valuep));
-        else
-            wait_for_receiver(lock, &senders, valuep);
-    }
-}
-
-
-template<class T>
 optional<T>
 Channel<T>::Impl::try_receive()
 {
@@ -1003,8 +998,8 @@ template<class U>
 void
 Channel<T>::Impl::wait_for_receiver(Lock& lock, Sender_waitqueue* waitqp, U* sendbufp)
 {
-    Condition_variable ready;
-    const Waiting_sender ownsend{&ready, sendbufp};
+    Condition_variable      ready;
+    const Waiting_sender    ownsend{&ready, sendbufp};
 
     // Enqueue our send and wait for a receiver to remove it.
     waitqp->push(ownsend);
@@ -1017,7 +1012,7 @@ void
 Channel<T>::Impl::wait_for_sender(Lock& lock, Receiver_waitqueue* waitqp, T* recvbufp)
 {
     Condition_variable      ready;
-    const Waiting_receiver   ownrecv{&ready, recvbufp};
+    const Waiting_receiver  ownrecv{&ready, recvbufp};
 
     // Enqueue our receive and wait for a sender to remove it.
     waitqp->push(ownrecv);
@@ -1056,7 +1051,8 @@ template<class T>
 inline bool
 Channel<T>::Receive_awaitable::await_suspend(Task::Handle task)
 {
-    return !task.promise().select(receive, task);
+    task.promise().select(receive);
+    return true;
 }
 
 
@@ -1091,7 +1087,8 @@ template<class T>
 bool
 Channel<T>::Send_awaitable::await_suspend(Task::Handle task)
 {
-    return !task.promise().select(send, task);
+    task.promise().select(send);
+    return true;
 }
 
 
@@ -1168,14 +1165,6 @@ inline Channel_size
 Receive_channel<T>::size() const
 {
     return pimpl->size();
-}
-
-
-template<class T>
-inline T
-Receive_channel<T>::sync_receive() const
-{
-    return pimpl->sync_receive();
 }
 
 
@@ -1305,23 +1294,6 @@ Send_channel<T>::size() const
 
 
 template<class T>
-inline void
-Send_channel<T>::sync_send(const T& value) const
-{
-    pimpl->sync_send(value);
-}
-
-
-template<class T>
-inline void
-Send_channel<T>::sync_send(T&& value) const
-{
-    using std::move;
-    pimpl->sync_send(move(value));
-}
-
-
-template<class T>
 inline bool
 Send_channel<T>::try_send(const T& value) const
 {
@@ -1375,15 +1347,16 @@ Channel_select_awaitable::await_ready()
 inline Channel_size
 Channel_select_awaitable::await_resume()
 {
-    return promisep->selected();
+    return task.promise().selected();
 }
 
 
 inline bool
-Channel_select_awaitable::await_suspend(Task::Handle task)
+Channel_select_awaitable::await_suspend(Task::Handle h)
 {
-    promisep = &task.promise();
-    return !promisep->select(first, last, task);
+    task = h;
+    task.promise().select(first, last);
+    return true;
 }
 
 
@@ -1399,7 +1372,7 @@ select(Channel_operation (&ops)[N])
 
 
 /*
-    Non-Blocking Channel Select
+    Non-Blocking Channel Operation Selection
 */
 template<Channel_size N>
 inline optional<Channel_size>
@@ -1421,149 +1394,61 @@ make_channel(Channel_size n)
 
 
 /*
-    Future Result Awaitable
+    Future Awaitable
 */
 template<class T>
 inline
-Future<T>::Ready_awaitable::Ready_awaitable(const Future* fp)
-    : selfp(fp)
+Future<T>::Awaitable::Awaitable(Future* fp)
+    : selfp{fp}
 {
 }
 
 
 template<class T>
 inline bool
-Future<T>::Ready_awaitable::await_ready()
+Future<T>::Awaitable::await_ready()
 {
-    return selfp->pimpl->is_ready;
-}
-
-
-template<class T>
-inline void
-Future<T>::Ready_awaitable::await_resume()
-{
-    selfp->pimpl->is_ready = true;
-}
-
-
-template<class T>
-inline bool
-Future<T>::Ready_awaitable::await_suspend(Task::Handle task)
-{
-    selfp->pimpl->select_ready(task);
-    return true;
-}
-
-
-/*
-    Future Result Awaitable
-*/
-template<class T>
-inline
-Future<T>::Result_awaitable::Result_awaitable(Future* fp)
-    : selfp(fp)
-{
-}
-
-
-template<class T>
-inline bool
-Future<T>::Result_awaitable::await_ready()
-{
-    return selfp->pimpl->is_ready;
+    return selfp->is_ready();
 }
 
 
 template<class T>
 inline T
-Future<T>::Result_awaitable::await_resume()
+Future<T>::Awaitable::await_resume()
 {
-    return selfp->pimpl->get_result();
+    /*
+        If the future is ready we get the result from one of its channels;
+        otherwise, we just awoke from our own call to select having obtained
+        either an error or a value.
+    */
+    if (selfp->is_ready())
+        v = selfp->get_ready();
+    else if (ep)
+        rethrow_exception(ep);
+
+    return std::move(v);
 }
 
 
 template<class T>
 inline bool
-Future<T>::Result_awaitable::await_suspend(Task::Handle task)
+Future<T>::Awaitable::await_suspend(Task::Handle task)
 {
-    selfp->pimpl->select_ready(task);
+    ops[0] = selfp->vchan.make_receive(&v);
+    ops[1] = selfp->echan.make_receive(&ep);
+    task.promise().select(ops);
     return true;
 }
 
 
 /*
-    Future Implementation
-*/
-template<class T>
-inline
-Future<T>::Impl::Impl(Value_receiver&& vc, Error_receiver&& ec)
-    : vchan{std::move(vc)}
-    , echan{std::move(ec)}
-    , ops{vchan.make_receive(&v), echan.make_receive(&ep)}
-{
-}
-
-
-template<class T>
-T
-Future<T>::Impl::get_result()
-{
-    using std::move;
-    using std::rethrow_exception;
-
-    exception_ptr errorp;
-
-    if (is_ready || task.promise().selected() == errorpos)
-        errorp = ep;
-
-    ep = nullptr;
-    is_ready = false;
-
-    if (errorp)
-        rethrow_exception(errorp);
-
-    return move(v);
-}
-
-
-template<class T>
-inline bool
-Future<T>::Impl::select_ready(Task::Handle h)
-{
-    bool is_selected = is_ready;
-
-    task = h;
-    if (!is_ready)
-        is_selected = task.promise().select(ops, task);
-
-    return is_selected;
-}
-
-
-template<class T>
-inline optional<T>
-Future<T>::Impl::try_get()
-{
-    using std::move;
-    optional<T> result;
-
-    if (vchan.try_receive(&v))
-        result = move(v);
-    else if (echan.try_receive(&ep))
-        rethrow_exception(ep);
-
-    is_ready = false;
-    return result;
-}
-
-
 /*
     Future     
 */
 template<class T>
 inline
 Future<T>::Future()
+    : isready{false}
 {
 }
 
@@ -1571,7 +1456,9 @@ Future<T>::Future()
 template<class T>
 inline
 Future<T>::Future(Value_receiver vc, Error_receiver ec)
-    : pimpl{std::make_shared<Impl>(std::move(vc), std::move(ec))}
+    : vchan{std::move(vc)}
+    , echan{std::move(ec)}
+    , isready{vchan.size() > 0 || echan.size() > 0}
 {
 }
 
@@ -1579,16 +1466,42 @@ Future<T>::Future(Value_receiver vc, Error_receiver ec)
 template<class T>
 inline
 Future<T>::Future(Future&& other)
-    : pimpl{std::move(other.pimpl)}
+    : vchan{std::move(other.vchan)}
+    , echan{std::move(other.echan)}
+    , isready{other.isready}
 {
 }
 
 
 template<class T>
-inline typename Future<T>::Result_awaitable
+inline typename Future<T>::Awaitable
 Future<T>::get()
 {
-    return Result_awaitable(this);
+    return this;
+}
+
+
+template<class T>
+inline T
+Future<T>::get_ready()
+{
+    T               v;
+    exception_ptr   ep;
+
+    isready = false;
+
+    if (!vchan.try_receive(&v) && echan.try_receive(&ep))
+        rethrow_exception(ep);
+
+    return v;
+}
+
+
+template<class T>
+inline bool
+Future<T>::is_ready() const
+{
+    return isready;
 }
 
 
@@ -1596,7 +1509,7 @@ template<class T>
 inline bool
 Future<T>::is_valid() const
 {
-    return pimpl ? true : false;
+    return vchan && echan ? true : false;
 }
 
 
@@ -1604,79 +1517,82 @@ template<class T>
 inline Future<T>&
 Future<T>::operator=(Future&& other)
 {
-    pimpl = std::move(other.pimpl);
+    swap(*this, other);
     return *this;
 }
 
 
 template<class T>
-inline optional<T>
+optional<T>
 Future<T>::try_get()
 {
-    return pimpl->try_get();
+    using std::move;
+
+    optional<T>     r;
+    T               v;
+    exception_ptr   ep;
+
+    isready = false;
+
+    if (vchan.try_receive(&v))
+        r = move(v);
+    else if (echan.try_receive(&ep))
+        rethrow_exception(ep);
+
+    return r;
 }
 
 
+/*
+    Future All Awaitable
+*/
 template<class T>
-inline typename Future<T>::Ready_awaitable
-Future<T>::wait_ready() const
+inline
+Future_all_awaitable<T>::Future_all_awaitable(const Future<T>* fst, const Future<T>* lst)
+    : first{fst}
+    , last{lst}
 {
-    return Ready_awaitable(this);
-}
-
-
-template<class T>
-inline void
-swap(Future<T>& x, Future<T>& y)
-{
-    using std::swap;
-
-    swap(x.vchan, y.vchan);
-    swap(x.echan, y.echan);
-    swap(x.v, y.v);
-    swap(x.ep, y.ep);
-    swap(x.ops[0], y.ops[0]);
-    swap(x.ops[1], y.ops[1]);
 }
 
 
 template<class T>
 inline bool
-operator==(const Future<T>& x, const Future<T>& y)
+Future_all_awaitable<T>::await_ready()
 {
-    if (x.vchan != y.echan) return false;
-    if (x.echan != y.echan) return false;
-    if (x.v != y.v) return false;
-    if (x.ep != y.ep) return false;
+    return false;
+}
+
+
+template<class T>
+inline void
+Future_all_awaitable<T>::await_resume()
+{
+}
+
+
+template<class T>
+inline bool
+Future_all_awaitable<T>::await_suspend(Task::Handle task)
+{
+    task.promise().wait_all(first, last);
     return true;
 }
 
 
 template<class T>
-void
+inline Future_all_awaitable<T>
 wait_all(const std::vector<Future<T>>& fs)
 {
-    for (auto& f : fs)
-        co_await f.wait_ready();
-}
-
-
-#if 0
-template<class T>
-optional<Future<T>>
-wait_any(const std::vector<Future<T>>& fs)
-{
-    using Size = typename std::vector<Future<T>>::size_type;
-
-    optional<Size> pos;
+    const Future<T>* first{nullptr};
+    const Future<T>* last{nullptr};
 
     if (!fs.empty()) {
-        bool done = false;
-        for (Size i = 0; i < fs.size(); ++i)
-
+        first = &fs.front();
+        last = &fs.back();
     }
+
+    return Future_all_awaitable<T>(first, last);
 }
-#endif
 
 
 /*
