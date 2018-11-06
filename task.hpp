@@ -69,9 +69,9 @@ using std::exception_ptr;
 
     A Task is a lightweight cooperative thread implemented by a stackless
     coroutine.  Tasks are multiplexed onto operating system threads by a
-    Scheduler.  A Task can suspend its execution without blocking the stack
-    of the thread on which it was invoked, thus freeing the Scheduler to re-
-    allocate the thread to another ready Task.
+    Scheduler.  A Task can suspend its execution without blocking the thread
+    on which it was invoked, thus freeing the Scheduler to re-allocate the
+    thread to another ready Task.
 */
 class Task : boost::equality_comparable<Task> {
 public:
@@ -83,109 +83,6 @@ public:
     using Final_suspend     = std::experimental::suspend_always;
 
     enum class Status { ready, suspended, done };
-
-    class Promise {
-    public: 
-        // Construct
-        Promise();
-
-        // Coroutine Functions
-        Task            get_return_object();
-        Initial_suspend initial_suspend() const;
-        Final_suspend   final_suspend();
-    
-        // Channel Operation Selection
-        template<Channel_size N> bool                           select(Channel_operation (&ops)[N]);
-        bool                                                    select(Channel_operation*, Channel_operation*);
-        bool                                                    select(Channel_size);
-        Channel_size                                            selected();
-        template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
-
-        // Future Waiting
-        template<class T> void          wait_all(const Future<T>*, const Future<T>*);
-        template<class T> Channel_size  wait_any(const Future<T>*, const Future<T>*);
-        Channel_size                    ready_future();
-
-        // Execution
-        void    make_ready();
-        Status  status() const;
-
-        // Synchronization
-        void unlock();
-
-        // Friends
-        template <class T> friend class Future;
-
-    private:
-        // Names/Types
-        using Mutex = std::mutex;
-        using Lock  = std::unique_lock<Mutex>;
-
-        class Channel_sort {
-        public:
-            // Construct/Copy/Move/Destroy
-            Channel_sort(Channel_operation*, Channel_operation*);
-            Channel_sort(const Channel_sort&) = delete;
-            Channel_sort& operator=(const Channel_sort&) = delete;
-            ~Channel_sort();
-        
-            // Dismiss Guard
-            void dismiss();
-        
-        private:
-            // Data
-            Channel_operation* first;
-            Channel_operation* last;
-        };
-
-        class Channel_locks {
-        public:
-            // Construct/Copy/Move/Destroy
-            Channel_locks(Channel_operation*, Channel_operation*);
-            Channel_locks(const Channel_locks&) = delete;
-            Channel_locks& operator=(const Channel_locks&) = delete;
-            ~Channel_locks();
-        
-        private:
-            // Data
-            Channel_operation* first;
-            Channel_operation* last;
-        };
-
-        struct Waiting_future {
-            const Channel_base* valuep;
-            const Channel_base* errorp;
-            bool*               readyp;
-        };
-
-        using Waiting_future_vector = std::vector<Waiting_future>;
-
-        // Channel Operation Selection
-        static optional<Channel_size>   select_ready(Channel_operation*, Channel_operation*);
-        static Channel_size             count_ready(const Channel_operation*, const Channel_operation*);
-        static Channel_operation*       pick_ready(Channel_operation*, Channel_operation*, Channel_size nready);
-        static Channel_size             pick_random(Channel_size min, Channel_size max);
-        static void                     enqueue(Channel_operation*, Channel_operation*, Task::Handle);
-        static void                     dequeue(Channel_operation*, Channel_operation*, Task::Handle);
-
-        // Channel Operation Synronization
-        static void save_positions(Channel_operation*, Channel_operation*);
-        static void sort_channels(Channel_operation*, Channel_operation*);
-        static void restore_positions(Channel_operation*, Channel_operation*);
-        static void lock(Channel_operation*, Channel_operation*);
-        static void unlock(Channel_operation*, Channel_operation*);
-
-        // Execution
-        void suspend(Lock*);
-
-        // Data
-        Mutex                   mutex;
-        Channel_operation*      firstco;    // enqueued
-        Channel_operation*      lastco;     // "
-        optional<Channel_size>  selectco;
-        Waiting_future_vector   futures;
-        Status                  taskstatus;
-    };
 
     // Construct/Move/Destroy
     explicit Task(Handle = nullptr);
@@ -208,6 +105,140 @@ public:
 
     // Comparisons
     friend bool operator==(const Task&, const Task&);
+
+private:
+    // Names/Types
+    using Mutex = std::mutex;
+    using Lock  = std::unique_lock<Mutex>;
+
+    class Channel_selection {
+    public:
+        // Selection
+        bool                                                    select(Channel_operation*, Channel_operation*, Handle task);
+        bool                                                    select(Channel_size);
+        Channel_size                                            selected(Handle task);
+        template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
+
+    private:
+        // Names/Types
+        class Lock_guard {
+        public:
+            Lock_guard(Channel_operation*, Channel_operation*);
+            Lock_guard(const Lock_guard&) = delete;
+            Lock_guard& operator=(const Lock_guard&) = delete;
+            ~Lock_guard();
+        
+        private:
+            // Data
+            Channel_operation* first;
+            Channel_operation* last;
+        };
+
+        class Sort_guard {
+        public:
+            Sort_guard(Channel_operation*, Channel_operation*);
+            Sort_guard(const Sort_guard&) = delete;
+            Sort_guard& operator=(const Sort_guard&) = delete;
+            ~Sort_guard();
+        
+            // Dismissal
+            void dismiss();
+        
+        private:
+            // Data
+            Channel_operation* first;
+            Channel_operation* last;
+        };
+
+        // Selection
+        static optional<Channel_size>   select_ready(Channel_operation*, Channel_operation*);
+        static Channel_size             count_ready(const Channel_operation*, const Channel_operation*);
+        static Channel_operation*       pick_ready(Channel_operation*, Channel_operation*, Channel_size nready);
+        static void                     enqueue(Channel_operation*, Channel_operation*, Handle task);
+        static void                     dequeue(Channel_operation*, Channel_operation*, Handle task);
+
+        // Sorting
+        static void save_positions(Channel_operation*, Channel_operation*);
+        static void sort_channels(Channel_operation*, Channel_operation*);
+        static void restore_positions(Channel_operation*, Channel_operation*);
+
+        // Data
+        Channel_operation*      first;
+        Channel_operation*      last;
+        optional<Channel_size>  chosen;
+    };
+
+    class Future_selection {
+    public:
+        // Selection
+        template<class T> void  wait_any(const Future<T>*, const Future<T>*);
+        template<class T> void  wait_all(const Future<T>*, const Future<T>*);
+        void                    notify_receive_ready(Channel_size pos);
+        Channel_size            ready() const;
+
+    private:
+        // Names/Types
+        enum class Wait_type { none, any, all };
+
+        struct Waiting {
+            Channel_base*   channelp;
+            Channel_size    position;
+            bool*           readyp;
+        };
+
+        // Data
+        Wait_type               waittype{Wait_type::none};
+        std::vector<Waiting>    waiters;
+    };
+
+    // Random Number Generation
+    static Channel_size random(Channel_size min, Channel_size max);
+
+public:
+    // Names/Types
+    class Promise {
+    public: 
+        // Construct
+        Promise();
+
+        // Coroutine Functions
+        Task            get_return_object();
+        Initial_suspend initial_suspend() const;
+        Final_suspend   final_suspend();
+    
+        // Channel Operation Selection
+        template<Channel_size N> void                           select(Channel_operation (&ops)[N]);
+        void                                                    select(Channel_operation*, Channel_operation*);
+        bool                                                    select(Channel_size);
+        Channel_size                                            selected();
+        template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
+
+        // Future Waiting
+        template<class T> void          wait_all(const Future<T>*, const Future<T>*);
+        template<class T> Channel_size  wait_any(const Future<T>*, const Future<T>*);
+        void                            notify_receive_ready(Channel_size pos);
+        Channel_size                    ready_future();
+
+        // Execution
+        void    make_ready();
+        Status  status() const;
+
+        // Synchronization
+        void unlock();
+
+        // Friends
+        template <class T> friend class Future;
+
+    private:
+        // Execution
+        void suspend(Lock*);
+
+        // Data
+        mutable Mutex       mutex;
+        Channel_selection   channels;
+        Future_selection    futures;
+        Status              taskstat;
+    };
 
 private:
     // Data
@@ -246,6 +277,9 @@ public:
     virtual void dequeue_send(Task::Handle, Channel_size selpos) = 0;
     virtual void enqueue_receive(Task::Handle, Channel_size selpos, void* valuep) = 0;
     virtual void dequeue_receive(Task::Handle, Channel_size selpos) = 0;
+
+    // Waiting
+//    virtual void wait_receive_ready(Task::Handle, Channel_size pos) = 0;
 
     // Synchronization
     virtual void lock() = 0;
@@ -496,14 +530,14 @@ private:
         template<class U> static bool   dequeue(Receiver_waitqueue*, U* sendbufp);
         template<class U> static bool   dequeue(Sender_waitqueue*, U* recvbufp);
         template<class U> static void   dequeue(U* waitqp, Task::Handle, Channel_size selpos);
-        template<class U> static void   wait_for_receiver(Lock&, Sender_waitqueue*, U* sendbufp);
-        static void                     wait_for_sender(Lock&, Receiver_waitqueue*, T* recvbufp);
+        template<class U> static void   wait_for_receiver(Lock*, Sender_waitqueue*, U* sendbufp);
+        static void                     wait_for_sender(Lock*, Receiver_waitqueue*, T* recvbufp);
 
         // Data
         Buffer              buffer;
         Sender_waitqueue    senders;
         Receiver_waitqueue  receivers;
-        Mutex               mutex;
+        mutable Mutex       mutex;
     };
 
     using Impl_ptr = std::shared_ptr<Impl>;
@@ -651,7 +685,7 @@ public:
     inline friend bool operator< (const Receive_channel& x, const Receive_channel& y) { return x.pimpl < y.pimpl; }
 
     // Friends
-    friend class Future<T>;
+    template <class T> friend class Future;
 
 private:
     // Data
@@ -678,7 +712,7 @@ class Channel_operation {
 public:
     // Names/Types
     class Interface;
-    enum Type { none, send, receive };
+    enum class Type { none, send, receive };
 
     // Construct/Move/Copy/Destroy
     Channel_operation();
@@ -795,7 +829,7 @@ private:
     bool    is_ready() const;
     T       get_ready();
 
-    // Waiting (used by Task)
+    // Task Waiting
     const Channel_base* value_channel() const;
     const Channel_base* error_channel() const;
     bool*               ready_flag() const;
@@ -806,7 +840,7 @@ private:
     // Data
     Value_receiver  vchan;
     Error_receiver  echan;
-    bool            isready;
+    mutable bool    isready;
 };
 
 
@@ -925,7 +959,7 @@ private:
         // Data
         std::deque<Task>    tasks;
         bool                is_interrupt{false};
-        Mutex               mutex;
+        mutable Mutex       mutex;
         Condition_variable  ready;
     };
 
@@ -979,7 +1013,7 @@ private:
     
         // Data
         std::vector<Task>   tasks;
-        Mutex               mutex;
+        mutable Mutex       mutex;
     };
     
     // Execution

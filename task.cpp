@@ -40,85 +40,18 @@ using std::move;
 using std::try_to_lock;
 
 
-// Names/Types
-Scheduler scheduler(1);
+/*
+    Data
+*/
+Scheduler scheduler;
 
 
 /*
-    Task Promise Channel Locks
+    Task Channel Selection Lock Guard
 */
-inline
-Task::Promise::Channel_locks::Channel_locks(Channel_operation* begin, Channel_operation* end)
-    : first(begin)
-    , last(end)
-{
-    lock(first, last);
-}
-
-
-inline
-Task::Promise::Channel_locks::~Channel_locks()
-{
-    unlock(first, last);
-}
-
-
-/*
-    Task Promise Channel Sort
-*/
-Task::Promise::Channel_sort::Channel_sort(Channel_operation* begin, Channel_operation* end)
-    : first(begin)
-    , last(end)
-{
-    save_positions(first, last);
-    sort_channels(first, last);
-}
-
-
-inline
-Task::Promise::Channel_sort::~Channel_sort()
-{
-    restore_positions(first, last);
-}
-
-
-inline void
-Task::Promise::Channel_sort::dismiss()
-{
-    first = last;
-}
-
-
-/*
-    Task Promise
-*/
-Channel_size
-Task::Promise::count_ready(const Channel_operation* first, const Channel_operation* last)
-{
-    return count_if(first, last, [](auto& co) {
-        return co.is_ready();
-    });
-}
-
-
-void
-Task::Promise::dequeue(Channel_operation* first, Channel_operation* last, Task::Handle task)
-{
-    for (Channel_operation* cop = first; cop != last; ++cop)
-        cop->dequeue(task);
-}
-
-
-void
-Task::Promise::enqueue(Channel_operation* first, Channel_operation* last, Task::Handle task)
-{
-    for (Channel_operation* cop = first; cop != last; ++cop)
-        cop->enqueue(task);
-}
-
-
-void
-Task::Promise::lock(Channel_operation* first, Channel_operation* last)
+Task::Channel_selection::Lock_guard::Lock_guard(Channel_operation* fst, Channel_operation* lst)
+    : first(fst)
+    , last(lst)
 {
     Channel_base* prevchanp = nullptr;
 
@@ -132,26 +65,110 @@ Task::Promise::lock(Channel_operation* first, Channel_operation* last)
 }
 
 
-Channel_size
-Task::Promise::pick_random(Channel_size min, Channel_size max)
+Task::Channel_selection::Lock_guard::~Lock_guard()
 {
-    using Device        = std::random_device;
-    using Engine        = std::default_random_engine;
-    using Distribution  = std::uniform_int_distribution<Channel_size>;
+    Channel_base* prevchanp = nullptr;
 
-    static Device   rand;
-    static Engine   engine{rand()};
-    Distribution    dist{min, max};
-
-    return dist(engine);
+    for (Channel_operation* cop = first; cop != last; ++cop) {
+        Channel_base* chanp = cop->channel();
+        if (chanp && chanp != prevchanp) {
+            chanp->unlock();
+            prevchanp = chanp;
+        }
+    }
 }
-    
-   
+
+
+/*
+    Task Channel Selection Sort Guard
+*/
+inline
+Task::Channel_selection::Sort_guard::Sort_guard(Channel_operation* begin, Channel_operation* end)
+    : first(begin)
+    , last(end)
+{
+    save_positions(first, last);
+    sort_channels(first, last);
+}
+
+
+inline
+Task::Channel_selection::Sort_guard::~Sort_guard()
+{
+    restore_positions(first, last);
+}
+
+
+inline void
+Task::Channel_selection::Sort_guard::dismiss()
+{
+    first = last;
+}
+
+
+void
+Task::Channel_selection::restore_positions(Channel_operation* first, Channel_operation* last)
+{
+    using std::sort;
+
+    sort(first, last, [](auto& x, auto& y) {
+        return x.position() < y.position();
+    });
+}
+
+
+void
+Task::Channel_selection::save_positions(Channel_operation* first, Channel_operation* last)
+{
+    for (Channel_operation* cop = first; cop != last; ++cop)
+        cop->position(cop - first);
+}
+
+
+inline void
+Task::Channel_selection::sort_channels(Channel_operation* first, Channel_operation* last)
+{
+    using std::sort;
+
+    sort(first, last, [](auto& x, auto& y) {
+        return x.channel() < y.channel();
+    });
+}
+
+
+/*
+    Task Channel Selection
+*/
+Channel_size
+Task::Channel_selection::count_ready(const Channel_operation* first, const Channel_operation* last)
+{
+    return count_if(first, last, [](auto& co) {
+        return co.is_ready();
+    });
+}
+
+
+void
+Task::Channel_selection::dequeue(Channel_operation* first, Channel_operation* last, Handle task)
+{
+    for (Channel_operation* cop = first; cop != last; ++cop)
+        cop->dequeue(task);
+}
+
+
+void
+Task::Channel_selection::enqueue(Channel_operation* first, Channel_operation* last, Handle task)
+{
+    for (Channel_operation* cop = first; cop != last; ++cop)
+        cop->enqueue(task);
+}
+
+
 Channel_operation*
-Task::Promise::pick_ready(Channel_operation* first, Channel_operation* last, Channel_size nready)
+Task::Channel_selection::pick_ready(Channel_operation* first, Channel_operation* last, Channel_size nready)
 {
     Channel_operation*  readyp  = last;
-    Channel_size        n       = pick_random(1, nready);
+    Channel_size        n       = random(1, nready);
 
     for (Channel_operation* cop = first; cop != last; ++cop) {
         if (cop->is_ready() && --n == 0) {
@@ -164,52 +181,43 @@ Task::Promise::pick_ready(Channel_operation* first, Channel_operation* last, Cha
 }
 
 
-void
-Task::Promise::restore_positions(Channel_operation* first, Channel_operation* last)
+bool
+Task::Channel_selection::select(Channel_size pos)
 {
-    using std::sort;
+    bool is_chosen = false;
 
-    sort(first, last, [](auto& x, auto& y) {
-        return x.position() < y.position();
-    });
-}
+    if (!chosen) {
+        chosen = pos;
+        is_chosen = true;
+    }
 
-
-void
-Task::Promise::save_positions(Channel_operation* first, Channel_operation* last)
-{
-    for (Channel_operation* cop = first; cop != last; ++cop)
-        cop->position(cop - first);
+    return is_chosen;
 }
 
 
 bool
-Task::Promise::select(Channel_operation* first, Channel_operation* last)
+Task::Channel_selection::select(Channel_operation* first, Channel_operation* last, Handle task)
 {
-    Lock            lock(mutex);
-    Channel_sort    sortguard{first, last};
-    Channel_locks   chanlocks{first, last};
+    Sort_guard chansort{first, last};
+    Lock_guard chanlocks{first, last};
 
-    selectco = select_ready(first, last);
+    chosen = select_ready(first, last);
 
     // If nothing is ready, enqueue the operations on their respective
     // channels and maintain their lock order until we awake.
-    if (!selectco) {
-        const Task::Handle owntask = Handle::from_promise(*this);
-
-        enqueue(first, last, owntask);
-        sortguard.dismiss();
-        firstco = first;
-        lastco = last;
-        suspend(&lock);
+    if (!chosen) {
+        enqueue(first, last, task);
+        chansort.dismiss();
+        first = first;
+        last = last;
     }
 
-    return selectco ? true : false;
+    return chosen ? true : false;
 }
 
 
 optional<Channel_size>
-Task::Promise::select_ready(Channel_operation* first, Channel_operation* last)
+Task::Channel_selection::select_ready(Channel_operation* first, Channel_operation* last)
 {
     optional<Channel_size>  pos;
     const Channel_size      n = count_ready(first, last);
@@ -225,54 +233,57 @@ Task::Promise::select_ready(Channel_operation* first, Channel_operation* last)
 
    
 Channel_size
-Task::Promise::selected()
+Task::Channel_selection::selected(Handle task)
 {
     /*
         If the task was suspended while waiting for channel operations to
         complete, dequeue them prior to reading the selection to avoid data
         races.
     */
-    if (firstco != lastco) {
-        const Handle owntask = Handle::from_promise(*this);
-
-        dequeue(firstco, lastco, owntask);
-        restore_positions(firstco, lastco);
-        firstco = lastco;
+    if (first != last) {
+        dequeue(first, last, task);
+        restore_positions(first, last);
+        first = last;
     }
 
-    return *selectco;
+    return *chosen;
 }
 
 
+template<Channel_size N>
+optional<Channel_size>
+Task::Channel_selection::try_select(Channel_operation (&ops)[N])
+{
+    Channel_operation*  first = begin(ops);
+    Channel_operation*  last = end(ops);
+    Sort_guard          chansort{first, last};
+    Lock_guard          chanlocks{first, last};
+
+    return select_ready(first, last);
+}
+
+
+/*
+    Task Promise
+*/
 inline void
 Task::Promise::make_ready()
 {
-    taskstatus = Status::ready;
-}
-
-
-inline void
-Task::Promise::sort_channels(Channel_operation* first, Channel_operation* last)
-{
-    using std::sort;
-
-    sort(first, last, [](auto& x, auto& y) {
-        return x.channel() < y.channel();
-    });
+    taskstat = Status::ready;
 }
 
 
 inline Task::Status
 Task::Promise::status() const
 {
-    return taskstatus;
+    return taskstat;
 }
 
 
 inline void
 Task::Promise::suspend(Lock* lockp)
 {
-    taskstatus = Status::suspended;
+    taskstat = Status::suspended;
     lockp->release();
 }
 
@@ -284,26 +295,29 @@ Task::Promise::unlock()
 }
 
 
-void
-Task::Promise::unlock(Channel_operation* first, Channel_operation* last)
+/*
+    Task
+*/
+Channel_size
+Task::random(Channel_size min, Channel_size max)
 {
-    Channel_base* prevchanp = nullptr;
+    using Device        = std::random_device;
+    using Engine        = std::default_random_engine;
+    using Distribution  = std::uniform_int_distribution<Channel_size>;
 
-    for (Channel_operation* cop = first; cop != last; ++cop) {
-        Channel_base* chanp = cop->channel();
-        if (chanp && chanp != prevchanp) {
-            chanp->unlock();
-            prevchanp = chanp;
-        }
-    }
+    static Device   rand;
+    static Engine   engine{rand()};
+    Distribution    dist{min, max};
+
+    return dist(engine);
 }
-
-
+    
+   
 /*
     Channel Operation
 */
 Channel_operation::Channel_operation()
-    : kind{none}
+    : kind{Type::none}
     , chanp{nullptr}
     , rvalp{nullptr}
     , lvalp{nullptr}
@@ -312,7 +326,7 @@ Channel_operation::Channel_operation()
 
 
 Channel_operation::Channel_operation(Channel_base* cp, const void* rvaluep)
-    : kind{send}
+    : kind{Type::send}
     , chanp{cp}
     , rvalp{rvaluep}
     , lvalp{nullptr}
@@ -354,11 +368,11 @@ Channel_operation::dequeue(Task::Handle task)
         chanp->lock();
 
         switch(kind) {
-        case send:
+        case Type::send:
             chanp->dequeue_send(task, pos);
             break;
 
-        case receive:
+        case Type::receive:
             chanp->dequeue_receive(task, pos);
             break;
         }
@@ -373,14 +387,14 @@ Channel_operation::enqueue(Task::Handle task)
 {
     if (chanp) {
         switch(kind) {
-        case send:
+        case Type::send:
             if (rvalp)
                 chanp->enqueue_send(task, pos, rvalp);
             else
                 chanp->enqueue_send(task, pos, lvalp);
             break;
 
-        case receive:
+        case Type::receive:
             chanp->enqueue_receive(task, pos, lvalp);
             break;
         }
@@ -393,14 +407,14 @@ Channel_operation::execute()
 {
     if (chanp) {
         switch(kind) {
-        case send:
+        case Type::send:
             if (rvalp)
                 chanp->send_ready(rvalp);
             else
                 chanp->send_ready(lvalp);
             break;
 
-        case receive:
+        case Type::receive:
             chanp->receive_ready(lvalp);
             break;
         }
@@ -414,9 +428,9 @@ Channel_operation::is_ready() const
     if (!chanp) return false;
 
     switch(kind) {
-    case send:      return chanp->is_send_ready();
-    case receive:   return chanp->is_receive_ready();
-    default:        return false;
+    case Type::send:    return chanp->is_send_ready();
+    case Type::receive: return chanp->is_receive_ready();
+    default:            return false;
     }
 }
 

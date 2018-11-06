@@ -156,8 +156,7 @@ add_one_task(int n, Send_channel<int> results)
     fs.push_back(async(add_one, n));
     fs.push_back(async(add_one, n + 1));
 
-    for (auto& f : fs)
-        co_await f.wait_ready();
+    co_await wait_all(fs);
 
     for (int i = 0; i < fs.size(); ++i) {
         int r;
@@ -173,8 +172,6 @@ add_one_task(int n, Send_channel<int> results)
 }
 
 
-
-
 void
 main(int argc, char* argv[])
 {
@@ -182,7 +179,7 @@ main(int argc, char* argv[])
     Channel<int> results = make_channel<int>(1);
 
     start(add_one_task, 0, results);
-    cout << "result = " << results.sync_receive() << endl;
+    cout << "result = " << blocking_receive(results) << endl;
     char c;
     cin >> c;
 }
