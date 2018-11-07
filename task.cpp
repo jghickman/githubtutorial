@@ -106,36 +106,6 @@ Task::Channel_selection::Sort_guard::dismiss()
 }
 
 
-void
-Task::Channel_selection::restore_positions(Channel_operation* first, Channel_operation* last)
-{
-    using std::sort;
-
-    sort(first, last, [](auto& x, auto& y) {
-        return x.position() < y.position();
-    });
-}
-
-
-void
-Task::Channel_selection::save_positions(Channel_operation* first, Channel_operation* last)
-{
-    for (Channel_operation* cop = first; cop != last; ++cop)
-        cop->position(cop - first);
-}
-
-
-inline void
-Task::Channel_selection::sort_channels(Channel_operation* first, Channel_operation* last)
-{
-    using std::sort;
-
-    sort(first, last, [](auto& x, auto& y) {
-        return x.channel() < y.channel();
-    });
-}
-
-
 /*
     Task Channel Selection
 */
@@ -181,6 +151,25 @@ Task::Channel_selection::pick_ready(Channel_operation* first, Channel_operation*
 }
 
 
+void
+Task::Channel_selection::restore_positions(Channel_operation* first, Channel_operation* last)
+{
+    using std::sort;
+
+    sort(first, last, [](auto& x, auto& y) {
+        return x.position() < y.position();
+    });
+}
+
+
+void
+Task::Channel_selection::save_positions(Channel_operation* first, Channel_operation* last)
+{
+    for (Channel_operation* cop = first; cop != last; ++cop)
+        cop->position(cop - first);
+}
+
+
 bool
 Task::Channel_selection::select(Channel_size pos)
 {
@@ -208,8 +197,8 @@ Task::Channel_selection::select(Channel_operation* first, Channel_operation* las
     if (!chosen) {
         enqueue(first, last, task);
         chansort.dismiss();
-        first = first;
-        last = last;
+        begin = first;
+        end = last;
     }
 
     return chosen ? true : false;
@@ -240,13 +229,24 @@ Task::Channel_selection::selected(Handle task)
         complete, dequeue them prior to reading the selection to avoid data
         races.
     */
-    if (first != last) {
-        dequeue(first, last, task);
-        restore_positions(first, last);
-        first = last;
+    if (begin != end) {
+        dequeue(begin, end, task);
+        restore_positions(begin, end);
+        begin = end;
     }
 
     return *chosen;
+}
+
+
+inline void
+Task::Channel_selection::sort_channels(Channel_operation* first, Channel_operation* last)
+{
+    using std::sort;
+
+    sort(first, last, [](auto& x, auto& y) {
+        return x.channel() < y.channel();
+    });
 }
 
 

@@ -106,6 +106,9 @@ public:
     // Comparisons
     friend bool operator==(const Task&, const Task&);
 
+    // Friends
+    template<class T> friend class Future;
+
 private:
     // Names/Types
     using Mutex = std::mutex;
@@ -163,32 +166,90 @@ private:
         static void restore_positions(Channel_operation*, Channel_operation*);
 
         // Data
-        Channel_operation*      first;
-        Channel_operation*      last;
+        Channel_operation*      begin;
+        Channel_operation*      end;
         optional<Channel_size>  chosen;
     };
 
     class Future_selection {
     public:
         // Selection
-        template<class T> void  wait_any(const Future<T>*, const Future<T>*);
-        template<class T> void  wait_all(const Future<T>*, const Future<T>*);
-        void                    notify_receive_ready(Channel_size pos);
+        template<class T> bool  wait_any(const Future<T>*, const Future<T>*, Handle task);
+        template<class T> bool  wait_all(const Future<T>*, const Future<T>*, Handle task);
+        void                    notify_ready(Channel_size pos);
         Channel_size            ready() const;
+
+        // Friends
+        template<class T> friend class Future;
 
     private:
         // Names/Types
         enum class Wait_type { none, any, all };
 
-        struct Waiting {
+        class Wait {
+        public:
+            // Construct
+            Wait();
+            Wait(Channel_base*, bool* rdyflagp, Channel_size pos);
+
+            // Waiting
+            bool is_ready() const;
+            void enqueue(Handle task) const;
+            void dequeue(Handle task) const;
+            void complete() const;
+
+            // Observers
+            Channel_base*   channel() const;
+            Channel_size    position() const;
+
+            // Synchronization
+            void lock_channel() const;
+            void unlock_channel() const;
+
+        private:
+            // Data
             Channel_base*   channelp;
-            Channel_size    position;
             bool*           readyp;
+            Channel_size    waitpos;
         };
+
+        using Wait_vector = std::vector<Wait>;
+
+        template<class T>
+        class Transform {
+        public:
+            // Construct
+            Transform(const Future<T>*, const Future<T>*, Wait_vector*);
+
+        private:
+            // Transformation
+            static Wait value_wait(const Future<T>*, Channel_size pos);
+            static Wait error_wait(const Future<T>*, Channel_size pos);
+            static void sort_channels(Wait_vector*);
+            static void transform(const Future<T>*, const Future<T>*, Wait_vector::iterator out);
+        };
+
+        class Channel_locks {
+        public:
+            // Construct/Destroy
+            explicit Channel_locks(const Wait_vector*);
+            ~Channel_locks();
+
+        private:
+            // Data
+            const Wait_vector* waitsp;
+        };
+
+        // Selection
+        static Channel_size                 count_ready(const Wait_vector&);
+        static Wait_vector::const_iterator  pick_ready(const Wait_vector&, Channel_size nready);
+        static optional<Channel_size>       select_ready(const Wait_vector&);
+        static void                         enqueue(const Wait_vector&, Handle task);
 
         // Data
         Wait_type               waittype{Wait_type::none};
-        std::vector<Waiting>    waiters;
+        Wait_vector             waits;
+        optional<Channel_size>  chosen;
     };
 
     // Random Number Generation
@@ -214,10 +275,12 @@ public:
         template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
 
         // Future Waiting
-        template<class T> void          wait_all(const Future<T>*, const Future<T>*);
-        template<class T> Channel_size  wait_any(const Future<T>*, const Future<T>*);
-        void                            notify_receive_ready(Channel_size pos);
-        Channel_size                    ready_future();
+        template<class T> void  wait_all(const Future<T>*, const Future<T>*);
+        template<class T> void  wait_any(const Future<T>*, const Future<T>*);
+        Channel_size            ready_future();
+
+        // Event Waiting
+        void notify_receive_ready(Channel_size pos);
 
         // Execution
         void    make_ready();
@@ -225,9 +288,6 @@ public:
 
         // Synchronization
         void unlock();
-
-        // Friends
-        template <class T> friend class Future;
 
     private:
         // Execution
@@ -279,7 +339,8 @@ public:
     virtual void dequeue_receive(Task::Handle, Channel_size selpos) = 0;
 
     // Waiting
-//    virtual void wait_receive_ready(Task::Handle, Channel_size pos) = 0;
+    virtual void enqueue_receivable_wait(Task::Handle, Channel_size pos) = 0;
+    virtual void dequeue_receivable_wait(Task::Handle, Channel_size pos) = 0;
 
     // Synchronization
     virtual void lock() = 0;
@@ -349,6 +410,32 @@ private:
     using Lock                  = std::unique_lock<Mutex>;
     using Condition_variable    = std::condition_variable;
 
+    class Readable_waiter : boost::equality_comparable<Readable_waiter> {
+    public:
+        // Construct
+        Readable_waiter();
+        Readable_waiter(Task::Handle, Channel_size pos);
+
+        // Identity
+        Task::Handle task() const;
+        Channel_size position() const;
+
+        // Notification
+        void notify() const;
+
+        // Comparisons
+        friend bool operator==(const Readable_waiter& x, const Readable_waiter& y) {
+            if (x.task() != y.task()) return false;
+            if (x.position() != y.position()) return false;
+            return true;
+        }
+
+    private:
+        // Data
+        mutable Task::Handle    taskh;
+        Channel_size            waitpos;
+    };
+
     class Buffer {
     public:
         // Construct
@@ -365,10 +452,15 @@ private:
         void                    pop(optional<T>*);
         void                    pop(T*);
 
+        // Waiters
+        void enqueue(const Readable_waiter&);
+        void dequeue(const Readable_waiter&);
+
     private:
         // Data
-        std::queue<T>   q;
-        Channel_size    sizemax;
+        std::queue<T>               q;
+        Channel_size                sizemax;
+        std::deque<Readable_waiter> readers;
     };
 
     class Waiting_sender : boost::equality_comparable<Waiting_sender> {
@@ -517,6 +609,10 @@ private:
         void enqueue_receive(Task::Handle, Channel_size selpos, void* valuep) override;
         void dequeue_receive(Task::Handle, Channel_size selpos) override;
 
+        // Waiting
+        void enqueue_receivable_wait(Task::Handle, Channel_size pos) override;
+        void dequeue_receivable_wait(Task::Handle, Channel_size pos) override;
+
         // Synchronization
         void lock() override;
         void unlock() override;
@@ -534,10 +630,10 @@ private:
         static void                     wait_for_sender(Lock*, Receiver_waitqueue*, T* recvbufp);
 
         // Data
-        Buffer              buffer;
-        Sender_waitqueue    senders;
-        Receiver_waitqueue  receivers;
-        mutable Mutex       mutex;
+        Buffer                  buffer;
+        Sender_waitqueue        senders;
+        Receiver_waitqueue      receivers;
+        mutable Mutex           mutex;
     };
 
     using Impl_ptr = std::shared_ptr<Impl>;
@@ -830,12 +926,12 @@ private:
     T       get_ready();
 
     // Task Waiting
-    const Channel_base* value_channel() const;
-    const Channel_base* error_channel() const;
-    bool*               ready_flag() const;
+    Channel_base*   value_channel() const;
+    Channel_base*   error_channel() const;
+    bool*           ready_flag() const;
 
     // Friends
-    friend void Task::Promise::wait_all(const Future<T>*, const Future<T>*);
+    friend class Task::Future_selection;
 
     // Data
     Value_receiver  vchan;
@@ -876,7 +972,11 @@ private:
 template<class T>
 class Future_all_awaitable {
 public:
+    // Names/Types
+    using Vector = std::vector<Future<T>>;
+
     // Construct
+    explicit Future_all_awaitable(const Vector*);
     Future_all_awaitable(const Future<T>*, const Future<T>*);
 
     // Awaitable Operations
@@ -886,8 +986,9 @@ public:
 
 private:
     // Data
-    const Future<T>* first;
-    const Future<T>* last;
+    const Future<T>*    first;
+    const Future<T>*    last;
+    Task::Handle        task;
 };
 
 
@@ -903,6 +1004,7 @@ public:
 
     // Construct
     explicit Future_any_awaitable(const Vector*);
+    Future_any_awaitable(const Future<T>*, const Future<T>*);
 
     // Awaitable Operations
     bool        await_ready();
@@ -911,8 +1013,9 @@ public:
 
 private:
     // Data
-    const Future<T>* first;
-    const Future<T>* last;
+    const Future<T>*    first;
+    const Future<T>*    last;
+    Task::Handle        task;
 };
 
 
