@@ -95,8 +95,7 @@ public:
     Handle handle() const;
 
     // Execution
-    Status  resume();
-    void    make_ready();
+    Status resume();
 
     // Synchronization
     void unlock();
@@ -182,23 +181,21 @@ private:
 
     private:
         // Names/Types
-        enum class Wait_type { none, any, all };
-
-        class Wait {
+        class Channel_wait {
         public:
             // Construct
-            Wait();
-            Wait(Channel_base*, bool* readyflagp, Channel_size pos);
+            Channel_wait();
+            Channel_wait(Channel_base*, bool* readyflagp, Channel_size fpos);
 
-            // Waiting
+            // Channel_waiting
             bool is_ready() const;
-            void enqueue(Handle task) const;
-            void dequeue(Handle task) const;
+            void enqueue(Handle task, Channel_size pos) const;
+            void dequeue(Handle task, Channel_size pos) const;
             void complete() const;
 
             // Observers
             Channel_base*   channel() const;
-            Channel_size    position() const;
+            Channel_size    future() const;
 
             // Synchronization
             void lock_channel() const;
@@ -208,60 +205,61 @@ private:
             // Data
             Channel_base*   channelp;
             bool*           readyp;
-            Channel_size    waitpos;
+            Channel_size    futpos;
         };
 
-        using Wait_vector = std::vector<Wait>;
+        using Channel_wait_vector   = std::vector<Channel_wait>;
+        using Channel_wait_constptr = Channel_wait_vector::const_iterator;
 
         template<class T>
         class Transform {
         public:
             // Construct
-            Transform(const Future<T>*, const Future<T>*, Wait_vector*);
+            Transform(const Future<T>*, const Future<T>*, Channel_wait_vector*);
 
         private:
             // Transformation
-            static Wait value_wait(const Future<T>*, Channel_size pos);
-            static Wait error_wait(const Future<T>*, Channel_size pos);
-            static void sort_channels(Wait_vector*);
-            static void transform(const Future<T>*, const Future<T>*, Wait_vector::iterator out);
+            static Channel_wait value_wait(const Future<T>*, Channel_size pos);
+            static Channel_wait error_wait(const Future<T>*, Channel_size pos);
+            static void         sort_channels(Channel_wait_vector*);
+            static void         transform(const Future<T>*, const Future<T>*, Channel_wait_vector::iterator out);
         };
 
         class Channel_locks {
         public:
             // Construct/Destroy
-            explicit Channel_locks(const Wait_vector*);
+            explicit Channel_locks(const Channel_wait_vector*);
             ~Channel_locks();
 
         private:
             // Data
-            const Wait_vector* waitsp;
+            const Channel_wait_vector* waitsp;
         };
 
         class Future_sort {
         public:
             // Construct/Destroy
-            explicit Future_sort(Wait_vector*);
+            explicit Future_sort(Channel_wait_vector*);
             ~Future_sort();
 
         private:
             // Data
-            Wait_vector* waitsp;
+            Channel_wait_vector* waitsp;
         };
 
         // Selection
-        static void                         enqueue(const Wait_vector&, Handle task);
-        static Channel_size                 enqueue_not_ready(const Wait_vector&, Handle task);
-        static Channel_size                 count_ready(const Wait_vector&);
-        static Wait_vector::const_iterator  pick_ready(const Wait_vector&, Channel_size nready);
-        static optional<Channel_size>       select_ready(const Wait_vector&);
-        static void                         sort_positions(Wait_vector*);
-        static Channel_size                 future_count(const Wait_vector&);
+        static void                     enqueue(const Channel_wait_vector&, Handle task);
+        static Channel_size             enqueue_not_ready(const Channel_wait_vector&, Handle task);
+        static void                     dequeue(const Channel_wait_vector&);
+        static Channel_size             count_ready(const Channel_wait_vector&);
+        static Channel_wait_constptr    pick_ready(const Channel_wait_vector&, Channel_size nready);
+        static optional<Channel_size>   select_ready(const Channel_wait_vector&);
+        static Channel_size             future_count(const Channel_wait_vector&);
 
         // Data
-        Wait_type               waittype{Wait_type::none};
-        Wait_vector             waits;
-        Channel_size            nready;
+        Channel_wait_vector     waits;
+        Channel_size            ndesired;   // futures
+        Channel_size            nready;     // "
         optional<Channel_size>  chosen;
     };
 
