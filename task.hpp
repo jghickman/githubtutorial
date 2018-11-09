@@ -55,8 +55,6 @@ template<class T> class Channel;
 template<class T> class Send_channel;
 template<class T> class Receive_channel;
 template<class T> class Future;
-template<class T> class Future_all_awaitable;
-template<class T> class Future_any_awaitable;
 class Channel_base;
 class Channel_operation;
 using Channel_size = std::ptrdiff_t;
@@ -176,7 +174,7 @@ private:
         // Selection
         template<class T> bool  wait_any(const Future<T>*, const Future<T>*, Handle task);
         template<class T> bool  wait_all(const Future<T>*, const Future<T>*, Handle task);
-        void                    notify_ready(Channel_size pos);
+        bool                    notify_ready(Channel_size pos);
         Channel_size            ready() const;
 
         // Friends
@@ -190,7 +188,7 @@ private:
         public:
             // Construct
             Wait();
-            Wait(Channel_base*, bool* rdyflagp, Channel_size pos);
+            Wait(Channel_base*, bool* readyflagp, Channel_size pos);
 
             // Waiting
             bool is_ready() const;
@@ -240,15 +238,30 @@ private:
             const Wait_vector* waitsp;
         };
 
+        class Future_sort {
+        public:
+            // Construct/Destroy
+            explicit Future_sort(Wait_vector*);
+            ~Future_sort();
+
+        private:
+            // Data
+            Wait_vector* waitsp;
+        };
+
         // Selection
+        static void                         enqueue(const Wait_vector&, Handle task);
+        static Channel_size                 enqueue_not_ready(const Wait_vector&, Handle task);
         static Channel_size                 count_ready(const Wait_vector&);
         static Wait_vector::const_iterator  pick_ready(const Wait_vector&, Channel_size nready);
         static optional<Channel_size>       select_ready(const Wait_vector&);
-        static void                         enqueue(const Wait_vector&, Handle task);
+        static void                         sort_positions(Wait_vector*);
+        static Channel_size                 future_count(const Wait_vector&);
 
         // Data
         Wait_type               waittype{Wait_type::none};
         Wait_vector             waits;
+        Channel_size            nready;
         optional<Channel_size>  chosen;
     };
 
@@ -274,13 +287,11 @@ public:
         Channel_size                                            selected();
         template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
 
-        // Future Waiting
+        // Waiting
         template<class T> void  wait_all(const Future<T>*, const Future<T>*);
         template<class T> void  wait_any(const Future<T>*, const Future<T>*);
         Channel_size            ready_future();
-
-        // Event Waiting
-        void notify_receive_ready(Channel_size pos);
+        bool                    notify_ready(Channel_size pos);
 
         // Execution
         void    make_ready();
@@ -309,8 +320,9 @@ private:
 /*
     Task Launch
 */
-template<class TaskFun, class... Args> void                                     start(TaskFun, Args&&...);
-template<class Fun, class... Args> Future<std::result_of_t<Fun&&(Args&&...)>>   async(Fun, Args&&...);
+template<class TaskFun, class... Args> void                                 start(TaskFun, Args&&...);
+template<class Fun> Future<std::result_of_t<Fun()>>                         async(Fun);
+//template<class Fun, class... Args> Future<std::result_of_t<Fun(Args&&...)>> async(Fun, Args&&...);
 
 
 /*
@@ -325,22 +337,22 @@ public:
     virtual ~Channel_base() = default;
 
     // Non-Blocking Send/Receive
-    virtual bool is_send_ready() const = 0;
-    virtual void send_ready(void* valuep) = 0;
-    virtual void send_ready(const void* valuep) = 0;
-    virtual bool is_receive_ready() const = 0;
-    virtual void receive_ready(void* valuep) = 0;
+    virtual bool is_writable() const = 0;
+    virtual void write(void* valuep) = 0;
+    virtual void write(const void* valuep) = 0;
+    virtual bool is_readable() const = 0;
+    virtual void read(void* valuep) = 0;
 
     // Blocking Send/Receive
-    virtual void enqueue_send(Task::Handle, Channel_size selpos, void* valuep) = 0;
-    virtual void enqueue_send(Task::Handle, Channel_size selpos, const void* valuep) = 0;
-    virtual void dequeue_send(Task::Handle, Channel_size selpos) = 0;
-    virtual void enqueue_receive(Task::Handle, Channel_size selpos, void* valuep) = 0;
-    virtual void dequeue_receive(Task::Handle, Channel_size selpos) = 0;
+    virtual void enqueue_write(Task::Handle, Channel_size selpos, void* valuep) = 0;
+    virtual void enqueue_write(Task::Handle, Channel_size selpos, const void* valuep) = 0;
+    virtual void dequeue_write(Task::Handle, Channel_size selpos) = 0;
+    virtual void enqueue_read(Task::Handle, Channel_size selpos, void* valuep) = 0;
+    virtual void dequeue_read(Task::Handle, Channel_size selpos) = 0;
 
     // Waiting
-    virtual void enqueue_receivable_wait(Task::Handle, Channel_size pos) = 0;
-    virtual void dequeue_receivable_wait(Task::Handle, Channel_size pos) = 0;
+    virtual void enqueue_readable_wait(Task::Handle, Channel_size pos) = 0;
+    virtual void dequeue_readable_wait(Task::Handle, Channel_size pos) = 0;
 
     // Synchronization
     virtual void lock() = 0;
@@ -410,21 +422,21 @@ private:
     using Lock                  = std::unique_lock<Mutex>;
     using Condition_variable    = std::condition_variable;
 
-    class Readable_waiter : boost::equality_comparable<Readable_waiter> {
+    class Readable_wait : boost::equality_comparable<Readable_wait> {
     public:
         // Construct
-        Readable_waiter();
-        Readable_waiter(Task::Handle, Channel_size pos);
+        Readable_wait();
+        Readable_wait(Task::Handle, Channel_size pos);
 
         // Identity
         Task::Handle task() const;
         Channel_size position() const;
 
         // Notification
-        void notify() const;
+        void notify(Mutex*) const;
 
         // Comparisons
-        friend bool operator==(const Readable_waiter& x, const Readable_waiter& y) {
+        friend bool operator==(const Readable_wait& x, const Readable_wait& y) {
             if (x.task() != y.task()) return false;
             if (x.position() != y.position()) return false;
             return true;
@@ -448,38 +460,39 @@ private:
         bool            is_full() const;
 
         // Queue Operations
-        template<class U> void  push(U&&);
+        template<class U> void  push(U&&, Mutex*);
+        template<class U> void  push_silent(U&&);
         void                    pop(optional<T>*);
         void                    pop(T*);
 
         // Waiters
-        void enqueue(const Readable_waiter&);
-        void dequeue(const Readable_waiter&);
+        void enqueue(const Readable_wait&);
+        void dequeue(const Readable_wait&);
 
     private:
         // Data
         std::queue<T>               q;
         Channel_size                sizemax;
-        std::deque<Readable_waiter> readers;
+        std::deque<Readable_wait>   readers;
     };
 
-    class Waiting_sender : boost::equality_comparable<Waiting_sender> {
+    class Sender : boost::equality_comparable<Sender> {
     public:
         // Construct
-        Waiting_sender(Task::Handle, Channel_size selpos, const T* rvaluep);
-        Waiting_sender(Task::Handle, Channel_size selpos, T* lvaluep);
-        Waiting_sender(Condition_variable*, const T* rvaluep);
-        Waiting_sender(Condition_variable*, T* lvaluep);
+        Sender(Task::Handle, Channel_size selpos, const T* rvaluep);
+        Sender(Task::Handle, Channel_size selpos, T* lvaluep);
+        Sender(Condition_variable*, const T* rvaluep);
+        Sender(Condition_variable*, T* lvaluep);
     
         // Completion
-        template<class U> bool dequeue(U* recvbufp) const;
+        template<class U> bool dequeue(U* recvbufp, Mutex*) const;
 
         // Observers
         Task::Handle task() const;
         Channel_size select_position() const;
     
         // Comparisons
-        inline friend bool operator==(const Waiting_sender& x, const Waiting_sender& y) {
+        inline friend bool operator==(const Sender& x, const Sender& y) {
             if (x.threadp != y.threadp) return false;
             if (x.rvalp != y.rvalp) return false;
             if (x.lvalp != y.lvalp) return false;
@@ -494,28 +507,28 @@ private:
         static void                     move(T* lvalp, const T* rvalp, Buffer* destp);
     
         // Data
-        mutable Task::Handle    taskh;  // modify promise in dequeue()
+        mutable Task::Handle    taskh;  // poor Handle const usage forces mutable :(
         Channel_size            pos;    // select position
         const T*                rvalp;
         T*                      lvalp;
         Condition_variable*     threadp;
     };
     
-    class Waiting_receiver : boost::equality_comparable<Waiting_receiver> {
+    class Receiver : boost::equality_comparable<Receiver> {
     public:
         // Construct
-        Waiting_receiver(Task::Handle, Channel_size selpos, T* valuep);
-        Waiting_receiver(Condition_variable*, T* valuep);
+        Receiver(Task::Handle, Channel_size selpos, T* valuep);
+        Receiver(Condition_variable*, T* valuep);
     
         // Completion
-        template<class U> bool dequeue(U* valuep) const;
+        template<class U> bool dequeue(U* valuep, Mutex*) const;
     
         // Observers
         Task::Handle task() const;
         Channel_size select_position() const;
     
         // Comparisons
-        inline friend bool operator==(const Waiting_receiver& x, const Waiting_receiver& y) {
+        inline friend bool operator==(const Receiver& x, const Receiver& y) {
             if (x.threadp != y.threadp) return false;
             if (x.valp != y.valp) return false;
             if (x.taskh != y.taskh) return false;
@@ -525,14 +538,14 @@ private:
     
     private:
         // Data
-        mutable Task::Handle    taskh;  // modify promise in dequeue()
+        mutable Task::Handle    taskh;  // poor Handle const usage forces mutable :(
         Channel_size            pos;    // select position
         T*                      valp;
         Condition_variable*     threadp;
     };
 
     template<class U> 
-    class Waitqueue {
+    class Io_queue {
     private:
         // Names/Types
         struct operation_eq {
@@ -567,8 +580,8 @@ private:
     };
 
     // Names/Types
-    using Sender_waitqueue      = Waitqueue<Waiting_sender>;
-    using Receiver_waitqueue    = Waitqueue<Waiting_receiver>;
+    using Sender_queue      = Io_queue<Sender>;
+    using Receiver_queue    = Io_queue<Receiver>;
 
     class Impl final : public Channel_base {
     public:
@@ -593,47 +606,49 @@ private:
         Channel_operation make_send(T* valuep);
         Channel_operation make_receive(T* valuep);
 
-        // Operation Readiness
-        bool is_send_ready() const override;
-        bool is_receive_ready() const override;
+        // I/O Readiness
+        bool is_readable() const override;
+        bool is_writable() const override;
 
-        // Non-Blocking Send/Receive
-        void send_ready(const void* rvaluep) override;
-        void send_ready(void* lvaluep) override;
-        void receive_ready(void* valuep) override;
+        // Non-Blocking I/O
+        void read(void* valuep) override;
+        void write(const void* rvaluep) override;
+        void write(void* lvaluep) override;
 
-        // Blocking Send/Receive
-        void enqueue_send(Task::Handle, Channel_size selpos, const void* rvaluep) override;
-        void enqueue_send(Task::Handle, Channel_size selpos, void* lvaluep) override;
-        void dequeue_send(Task::Handle, Channel_size selpos) override;
-        void enqueue_receive(Task::Handle, Channel_size selpos, void* valuep) override;
-        void dequeue_receive(Task::Handle, Channel_size selpos) override;
+        // Blocking I/O
+        void enqueue_read(Task::Handle, Channel_size pos, void* valuep) override;
+        void dequeue_read(Task::Handle, Channel_size pos) override;
+        void enqueue_write(Task::Handle, Channel_size pos, const void* rvaluep) override;
+        void enqueue_write(Task::Handle, Channel_size pos, void* lvaluep) override;
+        void dequeue_write(Task::Handle, Channel_size pos) override;
 
         // Waiting
-        void enqueue_receivable_wait(Task::Handle, Channel_size pos) override;
-        void dequeue_receivable_wait(Task::Handle, Channel_size pos) override;
+        void enqueue_readable_wait(Task::Handle, Channel_size pos) override;
+        void dequeue_readable_wait(Task::Handle, Channel_size pos) override;
 
         // Synchronization
         void lock() override;
         void unlock() override;
 
     private:
-        // Send/Receive
-        template<class U> void          send_ready(U* valuep);
-        void                            receive_ready(T* valuep);
-        template<class U> void          enqueue_send(Task::Handle, Channel_size selpos, U* valuep);
-        void                            enqueue_receive(Task::Handle, Channel_size selpos, T* valuep);
-        template<class U> static bool   dequeue(Receiver_waitqueue*, U* sendbufp);
-        template<class U> static bool   dequeue(Sender_waitqueue*, U* recvbufp);
-        template<class U> static void   dequeue(U* waitqp, Task::Handle, Channel_size selpos);
-        template<class U> static void   wait_for_receiver(Lock*, Sender_waitqueue*, U* sendbufp);
-        static void                     wait_for_sender(Lock*, Receiver_waitqueue*, T* recvbufp);
+        // Non-Blocking I/O
+        void                    read(T* valuep);
+        template<class U> void  write(U* valuep);
+
+        // Blocking I/O
+        void                            enqueue_read(Task::Handle, Channel_size pos, T* valuep);
+        template<class U> void          enqueue_write(Task::Handle, Channel_size pos, U* valuep);
+        template<class U> static bool   dequeue(Receiver_queue*, U* sendbufp, Mutex*);
+        template<class U> static bool   dequeue(Sender_queue*, U* recvbufp, Mutex*);
+        template<class U> static void   dequeue(U* waitqp, Task::Handle, Channel_size pos);
+        static void                     wait_for_sender(Receiver_queue*, T* recvbufp, Lock*);
+        template<class U> static void   wait_for_receiver(Sender_queue*, U* sendbufp, Lock*);
 
         // Data
-        Buffer                  buffer;
-        Sender_waitqueue        senders;
-        Receiver_waitqueue      receivers;
-        mutable Mutex           mutex;
+        Buffer          buffer;
+        Sender_queue    senders;
+        Receiver_queue  receivers;
+        mutable Mutex   mutex;
     };
 
     using Impl_ptr = std::shared_ptr<Impl>;
@@ -870,13 +885,6 @@ optional<Channel_size>                              try_select(Channel_operation
 
 
 /*
-    Future Waiting
-*/
-template<class T> Future_all_awaitable<T> wait_all(const std::vector<Future<T>>&);
-template<class T> Future_any_awaitable<T> wait_any(const std::vector<Future<T>>&);
-
-
-/*
     Future     
 */
 template<class T>
@@ -986,9 +994,8 @@ public:
 
 private:
     // Data
-    const Future<T>*    first;
-    const Future<T>*    last;
-    Task::Handle        task;
+    const Future<T>* first;
+    const Future<T>* last;
 };
 
 
@@ -1017,6 +1024,13 @@ private:
     const Future<T>*    last;
     Task::Handle        task;
 };
+
+
+/*
+    Future Waiting
+*/
+template<class T> Future_all_awaitable<T> wait_all(const std::vector<Future<T>>&);
+template<class T> Future_any_awaitable<T> wait_any(const std::vector<Future<T>>&);
 
 
 /*

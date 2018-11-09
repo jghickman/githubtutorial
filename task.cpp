@@ -37,13 +37,14 @@ namespace Concurrency   {
 using std::count_if;
 using std::find_if;
 using std::move;
+using std::sort;
 using std::try_to_lock;
 
 
 /*
     Data
 */
-Scheduler scheduler;
+Scheduler scheduler(1);
 
 
 /*
@@ -226,8 +227,8 @@ Task::Channel_selection::selected(Handle task)
 {
     /*
         If the task was suspended while waiting for channel operations to
-        complete, dequeue them prior to reading the selection to avoid data
-        races.
+        complete, dequeue them prior to reading the selection in order to
+        avoid data races.
     */
     if (begin != end) {
         dequeue(begin, end, task);
@@ -264,6 +265,145 @@ Task::Channel_selection::try_select(Channel_operation (&ops)[N])
 
 
 /*
+    Task Future Selection Channel Locks
+*/
+Task::Future_selection::Channel_locks::Channel_locks(const Wait_vector* wsp)
+    : waitsp{wsp}
+{
+    for (const Wait& w : *waitsp)
+        w.lock_channel();
+}
+
+
+Task::Future_selection::Channel_locks::~Channel_locks()
+{
+    for (auto& w : *waitsp)
+        w.unlock_channel();
+}
+
+
+/*
+    Task Future Selection Future Sort
+*/
+Task::Future_selection::Future_sort::Future_sort(Wait_vector* wsp)
+    : waitsp{wsp}
+{
+    sort(waitsp->begin(), waitsp->end(), [](auto& x, auto& y) {
+        return x.position() < y.position();
+    });
+}
+
+
+Task::Future_selection::Future_sort::~Future_sort()
+{
+    sort(waitsp->begin(), waitsp->end(), [](auto& x, auto& y) {
+        return x.channel() < y.channel();
+    });
+}
+
+
+/*
+    Task Future Selection
+*/
+Channel_size
+Task::Future_selection::count_ready(const Wait_vector& ws)
+{
+    return count_if(ws.begin(), ws.end(), [](const Wait& w) {
+        return w.is_ready();
+    });
+}
+
+
+void
+Task::Future_selection::enqueue(const Wait_vector& ws, Handle task)
+{
+    for (const Wait& w : ws)
+        w.enqueue(task);
+}
+
+
+Channel_size
+Task::Future_selection::enqueue_not_ready(const Wait_vector& ws, Handle task)
+{
+    Channel_size n = 0;
+
+    for (auto p1 = ws.begin(); p1 != ws.end(); p1+=2) {
+        auto p2 = p1 + 1;
+        if (!p1->is_ready() && !p2->is_ready()) {
+            p1->enqueue(task);  // value channel
+            p2->enqueue(task);  // error channel
+            ++n;
+        }
+    }
+
+    return n;
+}
+
+
+bool
+Task::Future_selection::notify_ready(Channel_size pos)
+{
+    bool is_done = false;
+
+    switch(waittype) {
+    case Wait_type::any:
+        chosen = waits[pos].position();
+        is_done = true;
+        break;
+
+    case Wait_type::all:
+        if (++nready == future_count(waits))
+            is_done = true;
+        break;
+    }
+
+    return is_done;
+}
+
+
+Task::Future_selection::Wait_vector::const_iterator
+Task::Future_selection::pick_ready(const Wait_vector& waits, Channel_size nready)
+{
+    auto            readyp  = waits.end();
+    Channel_size    n       = random(1, nready);
+
+    for (auto wp = waits.begin(); wp != waits.end(); ++wp) {
+        if (wp->is_ready() && --n == 0) {
+            readyp = wp;
+            break;
+        }
+    }
+
+    return readyp;
+}
+
+
+optional<Channel_size>
+Task::Future_selection::select_ready(const Wait_vector& ws)
+{
+    optional<Channel_size>  pos;
+    const Channel_size      n = count_ready(ws);
+
+    if (n > 0) {
+        auto wp = pick_ready(ws, n);
+        pos = wp->position();
+        wp->complete();
+    }
+
+    return pos;
+}
+
+
+void
+Task::Future_selection::sort_positions(Wait_vector* wsp)
+{
+    std::sort(wsp->begin(), wsp->end(), [](auto& x, auto& y) {
+        return x.position() < y.position();
+    });
+}
+
+
+/*
     Task Promise
 */
 inline void
@@ -277,14 +417,6 @@ inline Task::Status
 Task::Promise::status() const
 {
     return taskstat;
-}
-
-
-inline void
-Task::Promise::suspend(Lock* lockp)
-{
-    taskstat = Status::suspended;
-    lockp->release();
 }
 
 
@@ -369,11 +501,11 @@ Channel_operation::dequeue(Task::Handle task)
 
         switch(kind) {
         case Type::send:
-            chanp->dequeue_send(task, pos);
+            chanp->dequeue_write(task, pos);
             break;
 
         case Type::receive:
-            chanp->dequeue_receive(task, pos);
+            chanp->dequeue_read(task, pos);
             break;
         }
 
@@ -389,13 +521,13 @@ Channel_operation::enqueue(Task::Handle task)
         switch(kind) {
         case Type::send:
             if (rvalp)
-                chanp->enqueue_send(task, pos, rvalp);
+                chanp->enqueue_write(task, pos, rvalp);
             else
-                chanp->enqueue_send(task, pos, lvalp);
+                chanp->enqueue_write(task, pos, lvalp);
             break;
 
         case Type::receive:
-            chanp->enqueue_receive(task, pos, lvalp);
+            chanp->enqueue_read(task, pos, lvalp);
             break;
         }
     }
@@ -409,13 +541,13 @@ Channel_operation::execute()
         switch(kind) {
         case Type::send:
             if (rvalp)
-                chanp->send_ready(rvalp);
+                chanp->write(rvalp);
             else
-                chanp->send_ready(lvalp);
+                chanp->write(lvalp);
             break;
 
         case Type::receive:
-            chanp->receive_ready(lvalp);
+            chanp->read(lvalp);
             break;
         }
     }
@@ -428,8 +560,8 @@ Channel_operation::is_ready() const
     if (!chanp) return false;
 
     switch(kind) {
-    case Type::send:    return chanp->is_send_ready();
-    case Type::receive: return chanp->is_receive_ready();
+    case Type::send:    return chanp->is_writable();
+    case Type::receive: return chanp->is_readable();
     default:            return false;
     }
 }
@@ -632,7 +764,7 @@ Scheduler::Task_queue_array::push(Queue_vector* qvecp, Size qpref, Task&& task)
     bool            done    = false;
 
     // Try to enqueue the task without waiting.
-    for (Size i = 0; i < nqs && !done; ++i) {
+    for (Size i = 0; !done && i < nqs; ++i) {
         auto pos = (qpref + i) % nqs;
         if (qs[pos].try_push(move(task)))
             done = true;
