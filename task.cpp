@@ -120,12 +120,12 @@ Task::Channel_selection::count_ready(const Channel_operation* first, const Chann
 
 
 Channel_size
-Task::Channel_selection::dequeue(Channel_operation* first, Channel_operation* last, Channel_size chosen, Handle task)
+Task::Channel_selection::dequeue(Channel_operation* first, Channel_operation* last, Channel_size selected, Handle task)
 {
     Channel_size n = 0;
 
     for (Channel_operation* cop = first; cop != last; ++cop) {
-        if (cop->position() == chosen || cop->dequeue(task))
+        if (cop->position() != selected && cop->dequeue(task))
             ++n;
     }
 
@@ -184,16 +184,15 @@ Task::Channel_selection::save_positions(Channel_operation* first, Channel_operat
 
 
 Task::Selection_status
-Task::Channel_selection::select(Channel_size pos)
+Task::Channel_selection::select(Channel_size pos, Handle task)
 {
-    if (!chosen) {
-        chosen      = pos;
-        ndequeued   = dequeue(begin, end, pos, task);
-    } else {
-        ++ndequeued;
+    --nenqueued;
+    if (!winner) {
+        winner = pos;
+        nenqueued -= dequeue(begin, end, pos, task);
     }
 
-    return Selection_status(*chosen, ndequeued == nenqueued)
+    return Selection_status(*winner, nenqueued == 0);
 }
 
 
@@ -204,19 +203,18 @@ Task::Channel_selection::select(Channel_operation* first, Channel_operation* las
     Lock_guard chanlocks{first, last};
 
     nenqueued   = 0;
-    ndequeued   = 0;
-    chosen      = select_ready(first, last);
+    winner      = select_ready(first, last);
 
     // If nothing is ready, enqueue the operations on their channels and
     // keep them in lock order until we awake.
-    if (!chosen) {
+    if (!winner) {
         nenqueued = enqueue(first, last, task);
         chansort.dismiss();
         begin = first;
         end = last;
     }
 
-    return chosen ? true : false;
+    return winner ? true : false;
 }
 
 
@@ -240,7 +238,7 @@ Channel_size
 Task::Channel_selection::selected() const
 {
     restore_positions(begin, end);
-    return *chosen;
+    return *winner;
 }
 
 
@@ -318,41 +316,17 @@ Task::Future_selection::count_ready(const Channel_wait_vector& ws)
 }
 
 
-void
-Task::Future_selection::enqueue(const Channel_wait_vector& ws, Handle task)
-{
-    using Vector_size = Channel_wait_vector::size_type;
-
-    for (Vector_size i = 0; i < ws.size(); i += 2) {
-        const Vector_size   vpos    = i;
-        const Vector_size   epos    = i+1;
-        const Channel_wait& vwait   = ws[vpos];
-        const Channel_wait& ewait   = ws[epos];
-        
-        vwait.enqueue(task, vpos);
-        ewait.enqueue(task, epos);
-    }
-}
-
-
-
 Channel_size
-Task::Future_selection::enqueue_not_ready(const Channel_wait_vector& ws, Handle task)
+Task::Future_selection::dequeue(const Channel_wait_vector& ws, Channel_size selected, Handle task)
 {
     using Vector_size = Channel_wait_vector::size_type;
 
-    Channel_size n = 0; // futures enqueued
+    Channel_size n = 0;
 
-    for (Vector_size i = 0; i < ws.size(); i += 2) {
-        const Vector_size   vpos    = i;
-        const Vector_size   epos    = i+1;
-        const Channel_wait& vwait   = ws[vpos];
-        const Channel_wait& ewait   = ws[epos];
-        
-        if (!(vwait.is_ready() || ewait.is_ready())) {
-            vwait.enqueue(task, vpos);
-            ewait.enqueue(task, epos);
-            ++n;
+    for (Vector_size i = 0; i < ws.size(); ++i) {
+        if (i != selected) {
+            if (ws[i].dequeue(task, i))
+                ++n;
         }
     }
 
@@ -360,20 +334,31 @@ Task::Future_selection::enqueue_not_ready(const Channel_wait_vector& ws, Handle 
 }
 
 
-bool
-Task::Future_selection::notify_ready(Channel_size pos)
+Channel_size
+Task::Future_selection::enqueue_not_ready(const Channel_wait_vector& ws, Handle task)
 {
-    bool            is_complete = false;
-    Channel_wait&   w           = waits[pos];
+    using Vector_size = Channel_wait_vector::size_type;
 
-    w.complete();
-    if (nready < ndesired) {
-        chosen = w.future();
-        if (++nready == ndesired)
-            is_complete = true;
+    Channel_size n = 0;
+
+    for (Vector_size i = 0; i < ws.size(); i += 2) {
+        const Vector_size   vpos    = i;
+        const Vector_size   epos    = i+1;
+        const Channel_wait& vwait   = ws[vpos]; // value
+        const Channel_wait& ewait   = ws[epos]; // error
+
+        if (vwait.is_ready())
+            vwait.complete();
+        else if (ewait.is_ready())
+            ewait.complete();
+        else {
+            vwait.enqueue(task, vpos);
+            ewait.enqueue(task, epos);
+            n += 2;
+        }
     }
 
-    return is_complete;
+    return n;
 }
 
 
@@ -394,28 +379,40 @@ Task::Future_selection::pick_ready(const Channel_wait_vector& waits, Channel_siz
 }
 
 
-Channel_size
-Task::Future_selection::ready()
+Task::Selection_status
+Task::Future_selection::select_channel(Channel_size chan, Handle task)
 {
-    dequeue(waits);
-    waits.clear();
-    return *chosen;
+    Channel_wait& wait = waits[chan];
+
+    wait.complete();
+    --nenqueued;
+    nenqueued -= 2;
+
+    if ()
+
+    if (!winner) {
+        winner = wait.future();
+        if (type == Type::any)
+            nenqueued -= dequeue(waits, chan, task);
+    }
+
+    return Selection_status(*winner, nenqueued == 0);
 }
 
 
 optional<Channel_size>
 Task::Future_selection::select_ready(const Channel_wait_vector& ws)
 {
-    optional<Channel_size>  fpos;
+    optional<Channel_size>  ready;
     const Channel_size      n = count_ready(ws);
 
     if (n > 0) {
         auto wp = pick_ready(ws, n);
-        fpos = wp->future();
+        ready = wp->future();
         wp->complete();
     }
 
-    return fpos;
+    return ready;
 }
 
 
@@ -509,24 +506,26 @@ Channel_operation::channel() const
 }
 
 
-void
+bool
 Channel_operation::dequeue(Task::Handle task)
 {
+    bool is_dequeued;
+
     if (chanp) {
-        chanp->lock();
+        Task::Channel_lock lock(chanp);
 
         switch(kind) {
         case Type::send:
-            chanp->dequeue_write(task, pos);
+            is_dequeued = chanp->dequeue_write(task, pos);
             break;
 
         case Type::receive:
-            chanp->dequeue_read(task, pos);
+            is_dequeued = chanp->dequeue_read(task, pos);
             break;
         }
-
-        chanp->unlock();
     }
+
+    return is_dequeued;
 }
 
 
