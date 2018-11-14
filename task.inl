@@ -24,6 +24,37 @@ namespace Concurrency   {
 
 
 /*
+    Task Selection Status
+*/
+inline
+Task::Selection_status::Selection_status()
+{
+}
+
+
+inline
+Task::Selection_status::Selection_status(Channel_size pos, bool comp)
+    : selpos{pos}
+    , iscomp{cmop}
+{
+}
+
+
+inline bool
+Task::Selection_status::is_complete() const
+{
+    return iscomp;
+}
+
+
+inline Channel_size
+Task::Selection_status::position() const
+{
+    return selpos;
+}
+
+
+/*
     Task Future Selection Channel Wait
 */
 inline
@@ -157,13 +188,6 @@ Task::Future_selection::future_count(const Channel_wait_vector& ws)
 }
 
 
-inline Channel_size
-Task::Future_selection::ready() const
-{
-    return *chosen;
-}
-
-
 template<class T>
 bool
 Task::Future_selection::wait_all(const Future<T>* first, const Future<T>* last, Handle task)
@@ -172,8 +196,7 @@ Task::Future_selection::wait_all(const Future<T>* first, const Future<T>* last, 
     Channel_locks   lock{&waits};
     Future_sort     sort{&waits};
 
-    ndesired = future_count(waits);
-    nready = 0;
+    nenqueued
 
     return enqueue_not_ready(waits, task) == 0;
 }
@@ -185,11 +208,16 @@ Task::Future_selection::wait_any(const Future<T>* first, const Future<T>* last, 
 {
     Transform<T>    transform(first, last, &waits);
     Channel_locks   lock(&waits);
+    Future_sort     sort{&waits};
 
-    ndesired = 1;
-    nready = 0;
+    nenqueued   = 0;
+    ndequeued   = 0;
+    chosen      = select_ready(waits);
 
-    chosen = select_ready(waits);
+    /*
+        If nothing is ready, enqueue each wait on its corrsponding channel
+        and keep them in lock order until we awake.
+    */
     if (!chosen)
         enqueue(waits, task);
 
@@ -261,17 +289,14 @@ inline bool
 Task::Promise::select(Channel_size pos)
 {
     const Lock lock{mutex};
-
     return channels.select(pos);
 }
 
 
 inline Channel_size
-Task::Promise::selected()
+Task::Promise::selected() const
 {
-    const Handle task = Handle::from_promise(*this);
-
-    return channels.selected(task);
+    return channels.selected();
 }
 
 
@@ -625,11 +650,11 @@ Channel<T>::Io_queue<U>::push(const Waiter& w)
 */
 template<class T>
 inline
-Channel<T>::Receiver::Receiver(Task::Handle tsk, Channel_size selpos, T* valuep)
+Channel<T>::Receiver::Receiver(Task::Handle tsk, Channel_size cop, T* valuep)
     : taskh{tsk}
-    , pos{selpos}
+    , chanop{cop}
     , valp{valuep}
-    , threadp{nullptr}
+    , threadcondp{nullptr}
 {
     assert(tsk);
     assert(valuep);
@@ -640,7 +665,7 @@ template<class T>
 inline
 Channel<T>::Receiver::Receiver(Condition_variable* waiterp, T* valuep)
     : valp{valuep}
-    , threadp{waiterp}
+    , threadcondp{waiterp}
 {
     assert(waiterp);
     assert(valuep);
@@ -649,52 +674,54 @@ Channel<T>::Receiver::Receiver(Condition_variable* waiterp, T* valuep)
 
 template<class T>
 template<class U>
-inline bool
+bool
 Channel<T>::Receiver::dequeue(U* valuep, Mutex* mtxp) const
 {
     using std::move;
 
-    bool is_received = false;
+    bool is_selected = true;
 
     if (taskh) {
         /*
-            The receiving task could be trying to dequeue itself from this
-            channel, so we release our lock to avoid a deadly embrace. If we
-            succeed in de-queueing the task, we're done; otherwise, we must
-            re-acquire the lock so the caller can safely search for another
-            receiver.
+            The receiving task could be in the midst of trying to dequeue
+            itself from this channel, so we release our own lock to avoid
+            a deadly embrace.  Our work is done if we succeed in dequeueing
+            the task; otherwise, we re-acquire our own lock to continue
+            searching for a candidate receiver.
         */
         mtxp->unlock();
-        if (!taskh.promise().select(pos))
-            mtxp->lock();
-        else {
-            *valp = move(*valuep);
-            scheduler.resume(taskh);
-            is_received = true;
+        if (!select(taskh, chanop, valuep)) {
+            is_selected = false;
+            mtsp->lock();
         }
     } else {
         *valp = move(*valuep);
-        threadp->notify_one();
-        is_received = true;
+        threadcondp->notify_one();
     }
 
-    return is_received;
+    return is_selected;
 }
 
 
 template<class T>
-inline Channel_size
-Channel<T>::Receiver::select_position() const
+template<class U>
+bool
+Channel<T>::Receiver::select(Task::Handle task, Channel_size chanop, U* valuep)
 {
-    return pos;
-}
+    using std::move;
 
+    const Task::Selection_status    select      = task.promise().select(chanop);
+    bool                            is_selected = false;
 
-template<class T>
-inline Task::Handle
-Channel<T>::Receiver::task() const
-{
-    return taskh;
+    if (select.position() == chanop) {
+        *valp = move(*valuep);
+        is_selected = true;
+    }
+
+    if (select.is_complete())
+        scheduler.resume(task);
+
+    return is_selected;
 }
 
 
@@ -703,12 +730,12 @@ Channel<T>::Receiver::task() const
 */
 template<class T>
 inline
-Channel<T>::Sender::Sender(Task::Handle tsk, Channel_size selpos, const T* rvaluep)
+Channel<T>::Sender::Sender(Task::Handle tsk, Channel_size cop, const T* rvaluep)
     : taskh{tsk}
-    , pos{selpos}
+    , chanop{cop}
     , rvalp{rvaluep}
     , lvalp{nullptr}
-    , threadp{nullptr}
+    , threadcondp{nullptr}
 {
     assert(tsk);
     assert(rvaluep);
@@ -717,12 +744,12 @@ Channel<T>::Sender::Sender(Task::Handle tsk, Channel_size selpos, const T* rvalu
 
 template<class T>
 inline
-Channel<T>::Sender::Sender(Task::Handle tsk, Channel_size selpos, T* lvaluep)
+Channel<T>::Sender::Sender(Task::Handle tsk, Channel_size cop, T* lvaluep)
     : taskh{tsk}
-    , pos{selpos}
+    , chanpos{cop}
     , rvalp{nullptr}
     , lvalp{lvaluep}
-    , threadp{nullptr}
+    , threadcondp{nullptr}
 {
     assert(tsk);
     assert(lvaluep);
@@ -734,7 +761,7 @@ inline
 Channel<T>::Sender::Sender(Condition_variable* waiterp, const T* rvaluep)
     : rvalp{rvaluep}
     , lvalp{nullptr}
-    , threadp{waiterp}
+    , threadcondp{waiterp}
 {
     assert(waiterp);
     assert(rvaluep);
@@ -746,7 +773,7 @@ inline
 Channel<T>::Sender::Sender(Condition_variable* waiterp, T* lvaluep)
     : rvalp{nullptr}
     , lvalp{lvaluep}
-    , threadp{waiterp}
+    , threadcondp{waiterp}
 {
     assert(waiterp);
     assert(lvaluep);
@@ -762,11 +789,11 @@ Channel<T>::Sender::dequeue(U* recvbufp, Mutex* mtxp) const
 
     if (taskh) {
         /*
-            The sending task could be trying to dequeue itself from this
-            channel, so we release our lock to avoid a deadly embrace.  If we
-            succeed in de-queueing the task, we're done; otherwise, we must
-            re-acquire the lock so the caller can safely search for another
-            receiver.
+            The sending task could be in the midst of dequeueing itself
+            from this channel, so we release our lock to avoid a deadly
+            embrace.  If we succeed in dequeueing the task, we're done;
+            otherwise, we must re-acquire the lock so the caller can safely
+            search for another receiver.
         */
         mtxp->unlock();
         if (taskh.promise().select(pos))
@@ -778,11 +805,40 @@ Channel<T>::Sender::dequeue(U* recvbufp, Mutex* mtxp) const
         }
     } else {
         move(lvalp, rvalp, recvbufp);
-        threadp->notify_one();
+        threadcondp->notify_one();
         is_sent = true;
     }
 
     return is_sent;
+}
+
+
+template<class T>
+template<class U>
+bool
+Channel<T>::Sender::dequeue(U* recvbufp, Mutex* mtxp) const
+{
+    bool is_selected = true;
+
+    if (taskh) {
+        /*
+            The sending task could be in the midst of trying to dequeue
+            itself from this channel, so we release our own lock to avoid
+            a deadly embrace.  Our work is done if we succeed in dequeueing
+            the task; otherwise, we re-acquire our own lock to continue
+            searching for a candidate sender.
+        */
+        mtxp->unlock();
+        if (!select(taskh, chanop, lvalp, rvalp, recvbufp)) {
+            is_selected = false;
+            mtsp->lock();
+        }
+    } else {
+        move(lvalp, rvalp, recvbufp);
+        threadcondp->notify_one();
+    }
+
+    return is_selected;
 }
 
 
@@ -807,18 +863,22 @@ Channel<T>::Sender::move(T* lvalp, const T* rvalp, Buffer* bufp)
 
 
 template<class T>
-inline Channel_size
-Channel<T>::Sender::select_position() const
+template<class U>
+bool
+Channel<T>::Sender::select(Task::Handle task, Channel_size chanop, T* lvalp, const T* rvalp, U* recvbufp)
 {
-    return pos;
-}
+    const Task::Selection_status    select      = task.promise().select(chanop);
+    bool                            is_selected = false;
 
+    if (select.position() == chanop) {
+        move(lvalp, rvalp, recvbufp);
+        is_selected = true;
+    }
 
-template<class T>
-inline Task::Handle
-Channel<T>::Sender::task() const
-{
-    return taskh;
+    if (select.is_complete())
+        scheduler.resume(task);
+
+    return is_selected;
 }
 
 
@@ -1075,20 +1135,24 @@ Channel<T>::Impl::dequeue(Sender_queue* qp, U* recvbufp, Mutex* mtxp)
 
 template<class T>
 template<class U>
-inline void
-Channel<T>::Impl::dequeue(U* waitqp, Task::Handle task, Channel_size selpos)
+inline bool
+Channel<T>::Impl::dequeue(U* waitqp, Task::Handle task, Channel_size chanop)
 {
-    auto wp = waitqp->find(task, selpos);
-    if (wp != waitqp->end())
+    auto wp             = waitqp->find(task, chanop);
+    const bool is_found = wp != waitqp->end();
+
+    if (is_found)
         waitqp->erase(wp);
+    
+    return is_found;
 }
 
 
 template<class T>
-void
-Channel<T>::Impl::dequeue_read(Task::Handle task, Channel_size selpos)
+bool
+Channel<T>::Impl::dequeue_read(Task::Handle task, Channel_size chanop)
 {
-    dequeue(&receivers, task, selpos);
+    return dequeue(&receivers, task, chanop);
 }
 
 
@@ -1101,10 +1165,10 @@ Channel<T>::Impl::dequeue_readable_wait(Task::Handle task, Channel_size pos)
 
 
 template<class T>
-void
-Channel<T>::Impl::dequeue_write(Task::Handle task, Channel_size selpos)
+bool
+Channel<T>::Impl::dequeue_write(Task::Handle task, Channel_size chanop)
 {
-    dequeue(&senders, task, selpos);
+    return dequeue(&senders, task, chanop);
 }
 
 

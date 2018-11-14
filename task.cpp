@@ -119,19 +119,31 @@ Task::Channel_selection::count_ready(const Channel_operation* first, const Chann
 }
 
 
-void
-Task::Channel_selection::dequeue(Channel_operation* first, Channel_operation* last, Handle task)
+Channel_size
+Task::Channel_selection::dequeue(Channel_operation* first, Channel_operation* last, Channel_size chosen, Handle task)
 {
-    for (Channel_operation* cop = first; cop != last; ++cop)
-        cop->dequeue(task);
+    Channel_size n = 0;
+
+    for (Channel_operation* cop = first; cop != last; ++cop) {
+        if (cop->position() == chosen || cop->dequeue(task))
+            ++n;
+    }
+
+    return n;
 }
 
 
-void
+Channel_size
 Task::Channel_selection::enqueue(Channel_operation* first, Channel_operation* last, Handle task)
 {
-    for (Channel_operation* cop = first; cop != last; ++cop)
+    Channel_size n = 0;
+
+    for (Channel_operation* cop = first; cop != last; ++cop) {
         cop->enqueue(task);
+        ++n;
+    }
+
+    return n;
 }
 
 
@@ -171,17 +183,17 @@ Task::Channel_selection::save_positions(Channel_operation* first, Channel_operat
 }
 
 
-bool
+Task::Selection_status
 Task::Channel_selection::select(Channel_size pos)
 {
-    bool is_chosen = false;
-
     if (!chosen) {
-        chosen = pos;
-        is_chosen = true;
+        chosen      = pos;
+        ndequeued   = dequeue(begin, end, pos, task);
+    } else {
+        ++ndequeued;
     }
 
-    return is_chosen;
+    return Selection_status(*chosen, ndequeued == nenqueued)
 }
 
 
@@ -191,12 +203,14 @@ Task::Channel_selection::select(Channel_operation* first, Channel_operation* las
     Sort_guard chansort{first, last};
     Lock_guard chanlocks{first, last};
 
-    chosen = select_ready(first, last);
+    nenqueued   = 0;
+    ndequeued   = 0;
+    chosen      = select_ready(first, last);
 
     // If nothing is ready, enqueue the operations on their channels and
     // keep them in lock order until we awake.
     if (!chosen) {
-        enqueue(first, last, task);
+        nenqueued = enqueue(first, last, task);
         chansort.dismiss();
         begin = first;
         end = last;
@@ -223,14 +237,8 @@ Task::Channel_selection::select_ready(Channel_operation* first, Channel_operatio
 
    
 Channel_size
-Task::Channel_selection::selected(Handle task)
+Task::Channel_selection::selected() const
 {
-    /*
-        If the task was suspended waiting for enqueued operations to
-        complete, dequeue them prior to reading the selection in order to
-        avoid data races.
-    */
-    dequeue(begin, end, task);
     restore_positions(begin, end);
     return *chosen;
 }
@@ -313,27 +321,19 @@ Task::Future_selection::count_ready(const Channel_wait_vector& ws)
 void
 Task::Future_selection::enqueue(const Channel_wait_vector& ws, Handle task)
 {
-    for (const auto& w : ws)
-        w.enqueue(task);
-}
+    using Vector_size = Channel_wait_vector::size_type;
 
-
-Channel_size
-Task::Future_selection::enqueue_not_ready(const Channel_wait_vector& ws, Handle task)
-{
-    Channel_size n = 0;
-
-    for (auto p1 = ws.begin(); p1 != ws.end(); p1+=2) {
-        auto p2 = p1 + 1;
-        if (!p1->is_ready() && !p2->is_ready()) {
-            p1->enqueue(task);  // value channel
-            p2->enqueue(task);  // error channel
-            ++n;
-        }
+    for (Vector_size i = 0; i < ws.size(); i += 2) {
+        const Vector_size   vpos    = i;
+        const Vector_size   epos    = i+1;
+        const Channel_wait& vwait   = ws[vpos];
+        const Channel_wait& ewait   = ws[epos];
+        
+        vwait.enqueue(task, vpos);
+        ewait.enqueue(task, epos);
     }
-
-    return n;
 }
+
 
 
 Channel_size
@@ -341,22 +341,22 @@ Task::Future_selection::enqueue_not_ready(const Channel_wait_vector& ws, Handle 
 {
     using Vector_size = Channel_wait_vector::size_type;
 
-    Channel_size nfutures; // enqueued
+    Channel_size n = 0; // futures enqueued
 
     for (Vector_size i = 0; i < ws.size(); i += 2) {
-        const Channel_size  vpos    = i;
-        const Channel_size  epos    = i+1;
+        const Vector_size   vpos    = i;
+        const Vector_size   epos    = i+1;
         const Channel_wait& vwait   = ws[vpos];
         const Channel_wait& ewait   = ws[epos];
         
         if (!(vwait.is_ready() || ewait.is_ready())) {
             vwait.enqueue(task, vpos);
             ewait.enqueue(task, epos);
-            ++nfutures;
+            ++n;
         }
     }
 
-    return nfutures;
+    return n;
 }
 
 

@@ -111,12 +111,28 @@ private:
     using Mutex = std::mutex;
     using Lock  = std::unique_lock<Mutex>;
 
+    class Selection_status {
+    public:
+        // Construct
+        Selection_status();
+        Selection_status(Channel_size pos, bool comp);
+
+        // Observers
+        Channel_size    position() const;
+        bool            is_complete() const;
+
+    private:
+        // Data
+        Channel_size    selpos;
+        bool            iscomp;
+    };
+
     class Channel_selection {
     public:
         // Selection
         bool                                                    select(Channel_operation*, Channel_operation*, Handle task);
-        bool                                                    select(Channel_size);
-        Channel_size                                            selected(Handle task);
+        Selection_status                                        select(Channel_size);
+        Channel_size                                            selected();
         template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
 
     private:
@@ -154,8 +170,8 @@ private:
         static optional<Channel_size>   select_ready(Channel_operation*, Channel_operation*);
         static Channel_size             count_ready(const Channel_operation*, const Channel_operation*);
         static Channel_operation*       pick_ready(Channel_operation*, Channel_operation*, Channel_size nready);
-        static void                     enqueue(Channel_operation*, Channel_operation*, Handle task);
-        static void                     dequeue(Channel_operation*, Channel_operation*, Handle task);
+        static Channel_size             enqueue(Channel_operation*, Channel_operation*, Handle task);
+        static Channel_size             dequeue(Channel_operation*, Channel_operation*, Channel_size chosen, Handle task);
 
         // Sorting
         static void save_positions(Channel_operation*, Channel_operation*);
@@ -166,6 +182,8 @@ private:
         Channel_operation*      begin;
         Channel_operation*      end;
         optional<Channel_size>  chosen;
+        Channel_size            nenqueued;
+        Channel_size            ndequeued;
     };
 
     class Future_selection {
@@ -173,8 +191,8 @@ private:
         // Selection
         template<class T> bool  wait_any(const Future<T>*, const Future<T>*, Handle task);
         template<class T> bool  wait_all(const Future<T>*, const Future<T>*, Handle task);
-        bool                    notify_ready(Channel_size pos);
-        Channel_size            ready() const;
+        Selection_status        notify_ready(Channel_size chanop);
+        Channel_size            ready();
 
         // Friends
         template<class T> friend class Future;
@@ -185,7 +203,7 @@ private:
         public:
             // Construct
             Channel_wait();
-            Channel_wait(Channel_base*, bool* readyflagp, Channel_size fpos);
+            Channel_wait(Channel_base*, bool* rdyflagp, Channel_size fpos);
 
             // Channel_waiting
             bool is_ready() const;
@@ -258,9 +276,9 @@ private:
 
         // Data
         Channel_wait_vector     waits;
-        Channel_size            ndesired;   // futures
-        Channel_size            nready;     // "
         optional<Channel_size>  chosen;
+        Channel_size            nenqueued;  // futures (not channels)
+        Channel_size            ndequeued;  // "
     };
 
     // Random Number Generation
@@ -344,13 +362,13 @@ public:
     // Blocking Send/Receive
     virtual void enqueue_write(Task::Handle, Channel_size selpos, void* valuep) = 0;
     virtual void enqueue_write(Task::Handle, Channel_size selpos, const void* valuep) = 0;
-    virtual void dequeue_write(Task::Handle, Channel_size selpos) = 0;
+    virtual bool dequeue_write(Task::Handle, Channel_size selpos) = 0;
     virtual void enqueue_read(Task::Handle, Channel_size selpos, void* valuep) = 0;
-    virtual void dequeue_read(Task::Handle, Channel_size selpos) = 0;
+    virtual bool dequeue_read(Task::Handle, Channel_size selpos) = 0;
 
     // Waiting
     virtual void enqueue_readable_wait(Task::Handle, Channel_size pos) = 0;
-    virtual void dequeue_readable_wait(Task::Handle, Channel_size pos) = 0;
+    virtual bool dequeue_readable_wait(Task::Handle, Channel_size pos) = 0;
 
     // Synchronization
     virtual void lock() = 0;
@@ -485,61 +503,59 @@ private:
         // Completion
         template<class U> bool dequeue(U* recvbufp, Mutex*) const;
 
-        // Observers
-        Task::Handle task() const;
-        Channel_size select_position() const;
-    
         // Comparisons
         inline friend bool operator==(const Sender& x, const Sender& y) {
-            if (x.threadp != y.threadp) return false;
+            if (x.threadcondp != y.threadcondp) return false;
             if (x.rvalp != y.rvalp) return false;
             if (x.lvalp != y.lvalp) return false;
             if (x.taskh != y.taskh) return false;
-            if (x.pos != y.pos) return false;
+            if (x.chanop != y.chanop) return false;
             return true;
         }
     
     private:
+        // Selection
+        template<class U> static bool select(Task::Handle, Channel_size chanop, T* lvalp, const T* rvalp, U* recvbufp);
+
         // Data Transefer
         template<class U> static void   move(T* lvalp, const T* rvalp, U* destp);
         static void                     move(T* lvalp, const T* rvalp, Buffer* destp);
     
         // Data
-        mutable Task::Handle    taskh;  // poor Handle const usage forces mutable :(
-        Channel_size            pos;    // select position
+        mutable Task::Handle    taskh; // poor Handle const usage forces mutable
+        Channel_size            chanop;
         const T*                rvalp;
         T*                      lvalp;
-        Condition_variable*     threadp;
+        Condition_variable*     threadcondp;
     };
     
     class Receiver : boost::equality_comparable<Receiver> {
     public:
         // Construct
-        Receiver(Task::Handle, Channel_size selpos, T* valuep);
+        Receiver(Task::Handle, Channel_size cop, T* valuep);
         Receiver(Condition_variable*, T* valuep);
     
-        // Completion
+        // Selection
         template<class U> bool dequeue(U* valuep, Mutex*) const;
-    
-        // Observers
-        Task::Handle task() const;
-        Channel_size select_position() const;
     
         // Comparisons
         inline friend bool operator==(const Receiver& x, const Receiver& y) {
-            if (x.threadp != y.threadp) return false;
+            if (x.threadcondp != y.threadcondp) return false;
             if (x.valp != y.valp) return false;
             if (x.taskh != y.taskh) return false;
-            if (x.pos != y.pos) return false;
+            if (x.chanop != y.chanop) return false;
             return true;
         }
     
     private:
+        // Selection
+        template<class U> static bool select(Task::Handle, Channel_size chanop, U* valuep);
+
         // Data
-        mutable Task::Handle    taskh;  // poor Handle const usage forces mutable :(
-        Channel_size            pos;    // select position
+        mutable Task::Handle    taskh; // poor Handle const usage forces mutable
+        Channel_size            chanop;
         T*                      valp;
-        Condition_variable*     threadp;
+        Condition_variable*     threadcondp;
     };
 
     template<class U> 
@@ -615,10 +631,10 @@ private:
 
         // Blocking I/O
         void enqueue_read(Task::Handle, Channel_size pos, void* valuep) override;
-        void dequeue_read(Task::Handle, Channel_size pos) override;
+        bool dequeue_read(Task::Handle, Channel_size pos) override;
         void enqueue_write(Task::Handle, Channel_size pos, const void* rvaluep) override;
         void enqueue_write(Task::Handle, Channel_size pos, void* lvaluep) override;
-        void dequeue_write(Task::Handle, Channel_size pos) override;
+        bool dequeue_write(Task::Handle, Channel_size pos) override;
 
         // Waiting
         void enqueue_readable_wait(Task::Handle, Channel_size pos) override;
@@ -634,11 +650,11 @@ private:
         template<class U> void  write(U* valuep);
 
         // Blocking I/O
-        void                            enqueue_read(Task::Handle, Channel_size pos, T* valuep);
-        template<class U> void          enqueue_write(Task::Handle, Channel_size pos, U* valuep);
+        void                            enqueue_read(Task::Handle, Channel_size chanop, T* valuep);
+        template<class U> void          enqueue_write(Task::Handle, Channel_size chanop, U* valuep);
         template<class U> static bool   dequeue(Receiver_queue*, U* sendbufp, Mutex*);
         template<class U> static bool   dequeue(Sender_queue*, U* recvbufp, Mutex*);
-        template<class U> static void   dequeue(U* waitqp, Task::Handle, Channel_size pos);
+        template<class U> static bool   dequeue(U* waitqp, Task::Handle, Channel_size chanop);
         static void                     wait_for_sender(Receiver_queue*, T* recvbufp, Lock*);
         template<class U> static void   wait_for_receiver(Sender_queue*, U* sendbufp, Lock*);
 
@@ -836,7 +852,7 @@ public:
     bool is_ready() const;
     void execute();
     void enqueue(Task::Handle);
-    void dequeue(Task::Handle);
+    bool dequeue(Task::Handle);
 
     // Position
     void            position(Channel_size);
