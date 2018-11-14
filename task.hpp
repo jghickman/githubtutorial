@@ -82,6 +82,22 @@ public:
 
     enum class Status { ready, suspended, done };
 
+    class Selection_status {
+    public:
+        // Construct
+        Selection_status();
+        Selection_status(Channel_size pos, bool comp);
+
+        // Observers
+        Channel_size    position() const;
+        bool            is_complete() const;
+
+    private:
+        // Data
+        Channel_size    selpos;
+        bool            iscomp;
+    };
+
     // Construct/Move/Destroy
     explicit Task(Handle = nullptr);
     Task(Task&&);
@@ -104,6 +120,7 @@ public:
     friend bool operator==(const Task&, const Task&);
 
     // Friends
+    friend class Channel_operation; // for Channel_lock :(
     template<class T> friend class Future;
 
 private:
@@ -111,28 +128,23 @@ private:
     using Mutex = std::mutex;
     using Lock  = std::unique_lock<Mutex>;
 
-    class Selection_status {
+    class Channel_lock {
     public:
-        // Construct
-        Selection_status();
-        Selection_status(Channel_size pos, bool comp);
-
-        // Observers
-        Channel_size    position() const;
-        bool            is_complete() const;
+        // Construct/Destory
+        explicit Channel_lock(Channel_base*);
+        ~Channel_lock();
 
     private:
         // Data
-        Channel_size    selpos;
-        bool            iscomp;
+        Channel_base* chanp;
     };
 
     class Channel_selection {
     public:
         // Selection
         bool                                                    select(Channel_operation*, Channel_operation*, Handle task);
-        Selection_status                                        select(Channel_size);
-        Channel_size                                            selected();
+        Selection_status                                        select(Channel_size op, Handle task);
+        Channel_size                                            selected() const;
         template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
 
     private:
@@ -171,7 +183,7 @@ private:
         static Channel_size             count_ready(const Channel_operation*, const Channel_operation*);
         static Channel_operation*       pick_ready(Channel_operation*, Channel_operation*, Channel_size nready);
         static Channel_size             enqueue(Channel_operation*, Channel_operation*, Handle task);
-        static Channel_size             dequeue(Channel_operation*, Channel_operation*, Channel_size chosen, Handle task);
+        static Channel_size             dequeue(Channel_operation*, Channel_operation*, Channel_size selected, Handle task);
 
         // Sorting
         static void save_positions(Channel_operation*, Channel_operation*);
@@ -181,9 +193,8 @@ private:
         // Data
         Channel_operation*      begin;
         Channel_operation*      end;
-        optional<Channel_size>  chosen;
         Channel_size            nenqueued;
-        Channel_size            ndequeued;
+        optional<Channel_size>  winner;
     };
 
     class Future_selection {
@@ -191,25 +202,25 @@ private:
         // Selection
         template<class T> bool  wait_any(const Future<T>*, const Future<T>*, Handle task);
         template<class T> bool  wait_all(const Future<T>*, const Future<T>*, Handle task);
-        Selection_status        notify_ready(Channel_size chanop);
-        Channel_size            ready();
+        Selection_status        select_channel(Channel_size pos, Handle task);
+        Channel_size            selected() const;
 
         // Friends
         template<class T> friend class Future;
 
     private:
         // Names/Types
+        enum class Type { any, all };
+
         class Channel_wait {
         public:
             // Construct
             Channel_wait();
-            Channel_wait(Channel_base*, bool* rdyflagp, Channel_size fpos);
+            Channel_wait(Channel_base*, Channel_size fpos);
 
             // Channel_waiting
-            bool is_ready() const;
             void enqueue(Handle task, Channel_size pos) const;
             bool dequeue(Handle task, Channel_size pos) const;
-            void complete() const;
 
             // Observers
             Channel_base*   channel() const;
@@ -222,18 +233,40 @@ private:
         private:
             // Data
             Channel_base*   channelp;
-            bool*           readyp;
             Channel_size    futpos;
         };
 
         using Channel_wait_vector   = std::vector<Channel_wait>;
         using Channel_wait_constptr = Channel_wait_vector::const_iterator;
 
-        template<class T>
-        class Transform {
+        class Future_wait {
         public:
             // Construct
-            Transform(const Future<T>*, const Future<T>*, Channel_wait_vector*);
+            template<class T> explicit Future_wait(const Future<T>*=0);
+
+            // Completion
+            void complete(const Channel_wait&);
+            bool is_ready() const;
+
+            // Channels
+            Channel_wait value() const;
+            Channel_wait error() const;
+
+        private:
+            // Data
+            Channel_base*   vchanp;
+            Channel_base*   echanp;
+            Channel_base*   chosenp;
+            bool*           readyflagp;
+        };
+
+        using Future_wait_vector = std::vector<Future_wait>;
+
+        template<class T>
+        class Future_transform {
+        public:
+            // Construct
+            Future_transform(const Future<T>*, const Future<T>*, Channel_wait_vector*);
 
         private:
             // Transformation
@@ -268,17 +301,17 @@ private:
         // Selection
         static void                     enqueue(const Channel_wait_vector&, Handle task);
         static Channel_size             enqueue_not_ready(const Channel_wait_vector&, Handle task);
-        static void                     dequeue(const Channel_wait_vector&);
+        static Channel_size             dequeue(const Channel_wait_vector&, Channel_size selected, Handle task);
         static Channel_size             count_ready(const Channel_wait_vector&);
         static Channel_wait_constptr    pick_ready(const Channel_wait_vector&, Channel_size nready);
         static optional<Channel_size>   select_ready(const Channel_wait_vector&);
-        static Channel_size             future_count(const Channel_wait_vector&);
 
         // Data
-        Channel_wait_vector     waits;
-        optional<Channel_size>  chosen;
-        Channel_size            nenqueued;  // futures (not channels)
-        Channel_size            ndequeued;  // "
+        Type                    type;
+        Future_wait_vector      futures;
+        Channel_wait_vector     channels;
+        Channel_size            nenqueued;
+        optional<Channel_size>  winner;
     };
 
     // Random Number Generation
@@ -299,15 +332,15 @@ public:
         // Channel Operation Selection
         template<Channel_size N> void                           select(Channel_operation (&ops)[N]);
         void                                                    select(Channel_operation*, Channel_operation*);
-        bool                                                    select(Channel_size);
-        Channel_size                                            selected();
+        Selection_status                                        select_channel(Channel_size);
+        Channel_size                                            selected_channel() const;
         template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
 
         // Waiting
         template<class T> void  wait_all(const Future<T>*, const Future<T>*);
         template<class T> void  wait_any(const Future<T>*, const Future<T>*);
-        Channel_size            ready_future();
-        bool                    notify_ready(Channel_size pos);
+        Selection_status        select_future_channel(Channel_size chan);
+        Channel_size            selected_future() const;
 
         // Execution
         void    make_ready();
@@ -442,11 +475,11 @@ private:
     public:
         // Construct
         Readable_wait();
-        Readable_wait(Task::Handle, Channel_size pos);
+        Readable_wait(Task::Handle, Channel_size chanpos);
 
         // Identity
         Task::Handle task() const;
-        Channel_size position() const;
+        Channel_size channel() const;
 
         // Notification
         void notify(Mutex*) const;
@@ -454,14 +487,16 @@ private:
         // Comparisons
         friend bool operator==(const Readable_wait& x, const Readable_wait& y) {
             if (x.task() != y.task()) return false;
-            if (x.position() != y.position()) return false;
+            if (x.channel() != y.channel()) return false;
             return true;
         }
 
     private:
         // Data
+        static void select(Task::Handle task, Channel_size chan);
+
         mutable Task::Handle    taskh;
-        Channel_size            waitpos;
+        Channel_size            chan;
     };
 
     class Buffer {
@@ -500,6 +535,10 @@ private:
         Sender(Condition_variable*, const T* rvaluep);
         Sender(Condition_variable*, T* lvaluep);
     
+        // Observers
+        Task::Handle task() const;
+        Channel_size operation() const;
+
         // Completion
         template<class U> bool dequeue(U* recvbufp, Mutex*) const;
 
@@ -534,9 +573,13 @@ private:
         // Construct
         Receiver(Task::Handle, Channel_size cop, T* valuep);
         Receiver(Condition_variable*, T* valuep);
+
+        // Observers
+        Task::Handle task() const;
+        Channel_size operation() const;
     
         // Selection
-        template<class U> bool dequeue(U* valuep, Mutex*) const;
+        template<class U> bool dequeue(U* sendbufp, Mutex*) const;
     
         // Comparisons
         inline friend bool operator==(const Receiver& x, const Receiver& y) {
@@ -549,7 +592,7 @@ private:
     
     private:
         // Selection
-        template<class U> static bool select(Task::Handle, Channel_size chanop, U* valuep);
+        template<class U> static bool select(Task::Handle, Channel_size chanop, T* valp, U* sendbufp);
 
         // Data
         mutable Task::Handle    taskh; // poor Handle const usage forces mutable
@@ -565,7 +608,7 @@ private:
         struct operation_eq {
             operation_eq(Task::Handle h, Channel_size selpos) : task{h}, pos{selpos} {}
             bool operator()(const U& w) const {
-                return w.task() == task && w.select_position() == pos;
+                return w.task() == task && w.operation() == pos;
             }
             Task::Handle task;
             Channel_size pos;
@@ -953,7 +996,7 @@ private:
     bool*           ready_flag() const;
 
     // Friends
-    friend class Task::Future_selection;
+    friend class Task::Future_wait;
 
     // Data
     Value_receiver  vchan;
