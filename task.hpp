@@ -208,7 +208,7 @@ private:
             // Channel_waiting
             bool is_ready() const;
             void enqueue(Handle task, Channel_size pos) const;
-            void dequeue(Handle task, Channel_size pos) const;
+            bool dequeue(Handle task, Channel_size pos) const;
             void complete() const;
 
             // Observers
@@ -483,7 +483,7 @@ private:
 
         // Waiters
         void enqueue(const Readable_wait&);
-        void dequeue(const Readable_wait&);
+        bool dequeue(const Readable_wait&);
 
     private:
         // Data
@@ -638,7 +638,7 @@ private:
 
         // Waiting
         void enqueue_readable_wait(Task::Handle, Channel_size pos) override;
-        void dequeue_readable_wait(Task::Handle, Channel_size pos) override;
+        bool dequeue_readable_wait(Task::Handle, Channel_size pos) override;
 
         // Synchronization
         void lock() override;

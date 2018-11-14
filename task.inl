@@ -86,10 +86,10 @@ Task::Future_selection::Channel_wait::complete() const
 }
 
 
-inline void
+inline bool
 Task::Future_selection::Channel_wait::dequeue(Task::Handle task, Channel_size pos) const
 {
-    channelp->dequeue_readable_wait(task, pos);
+    return channelp->dequeue_readable_wait(task, pos);
 }
 
 
@@ -482,14 +482,18 @@ Channel<T>::Buffer::enqueue(const Readable_wait& w)
 
 
 template<class T>
-inline void
+inline bool
 Channel<T>::Buffer::dequeue(const Readable_wait& w)
 {
     using std::find;
 
-    auto wp = find(readers.begin(), readers.end(), w);
-    if (wp != readers.end())
+    auto wp             = find(readers.begin(), readers.end(), w);
+    const bool is_found = wp != readers.end();
+
+    if (is_found)
         readers.erase(wp);
+
+    return is_found;
 }
 
 
@@ -1157,10 +1161,10 @@ Channel<T>::Impl::dequeue_read(Task::Handle task, Channel_size chanop)
 
 
 template<class T>
-void
+bool
 Channel<T>::Impl::dequeue_readable_wait(Task::Handle task, Channel_size pos)
 {
-    buffer.dequeue(Readable_wait(task, pos));
+    return buffer.dequeue(Readable_wait(task, pos));
 }
 
 
