@@ -97,7 +97,7 @@ Task::Future_selection::Channel_wait::channel() const
 
 
 inline bool
-Task::Future_selection::Channel_wait::dequeue(Task::Handle task, Channel_size pos)
+Task::Future_selection::Channel_wait::dequeue(Channel_size pos, Task::Handle task) const
 {
     const Channel_lock lock(chanp);
     return chanp->dequeue_readable_wait(task, pos);
@@ -106,7 +106,7 @@ Task::Future_selection::Channel_wait::dequeue(Task::Handle task, Channel_size po
 
 
 inline void
-Task::Future_selection::Channel_wait::enqueue(Task::Handle task, Channel_size pos)
+Task::Future_selection::Channel_wait::enqueue(Channel_size pos, Task::Handle task) const
 {
     chanp->enqueue_readable_wait(task, pos);
 }
@@ -154,9 +154,27 @@ Task::Future_selection::Future_wait::Future_wait(bool* readyp, Channel_size vpos
 
 
 inline void
-Task::Future_selection::Future_wait::complete()
+Task::Future_selection::Future_wait::complete(const Channel_wait_vector& chans, Channel_size pos, Task::Handle task) const
 {
+    const Channel_size other = (pos == vchan) ? echan : vchan;
+
+    chans[other].dequeue(other, task);
     *isreadyp = true;
+}
+
+
+inline bool
+Task::Future_selection::Future_wait::dequeue(const Channel_wait_vector& chans, Task::Handle task) const
+{
+    bool is_dequeued = true;
+
+    if (!chans[vchan].dequeue(vchan, task))
+        is_dequeued = false;
+
+    if (!chans[echan].dequeue(echan, task))
+        is_dequeued = false;
+
+    return is_dequeued;
 }
 
 
@@ -167,9 +185,20 @@ Task::Future_selection::Future_wait::error() const
 }
 
 
-inline bool
-Task::Future_selection::Future_wait::is_ready() const
+inline void
+Task::Future_selection::Future_wait::enqueue(const Channel_wait_vector& chans, Task::Handle task) const
 {
+    chans[vchan].enqueue(vchan, task);
+    chans[echan].enqueue(echan, task);
+}
+
+
+inline bool
+Task::Future_selection::Future_wait::is_ready(const Channel_wait_vector& chans) const
+{
+    if (!*isreadyp && (chans[vchan].is_ready() || chans[echan].is_ready()))
+        *isreadyp = true;
+
     return *isreadyp;
 }
 
@@ -226,7 +255,7 @@ Task::Future_selection::wait_all(const Future<T>* first, const Future<T>* last, 
     Channel_locks       lock{&channels};
 
     type        = Type::all;
-    nenqueued   = enqueue_not_ready(&futures, &channels, task);
+    nenqueued   = enqueue_not_ready(futures, channels, task);
     return nenqueued == 0;
 }
 
@@ -239,11 +268,11 @@ Task::Future_selection::wait_any(const Future<T>* first, const Future<T>* last, 
     Channel_locks       lock(&channels);
 
     type        = Type::any;
-    winner      = select_ready(&futures, channels);
+    winner      = select_ready(futures, channels);
     nenqueued   = 0;
 
     if (!winner)
-        nenqueued = enqueue_all(&futures, &channels, task);
+        nenqueued = enqueue_all(futures, channels, task);
 
     return nenqueued == 0;
 }

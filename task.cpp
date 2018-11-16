@@ -18,6 +18,7 @@
 
 #include "isptech/concurrency/task.hpp"
 #include <algorithm>
+#include <numeric>
 #include <windows.h>
 
 #pragma warning(disable: 4073)
@@ -34,6 +35,7 @@ namespace Concurrency   {
 /*
     Names/Types
 */
+using std::accumulate;
 using std::count_if;
 using std::find_if;
 using std::move;
@@ -307,84 +309,73 @@ Task::Future_selection::Future_sort::~Future_sort()
     Task Future Selection
 */
 Channel_size
-Task::Future_selection::count_ready(const Channel_wait_vector& ws)
+Task::Future_selection::count_ready(const Future_wait_vector& fs, const Channel_wait_vector& chans)
 {
-    return count_if(ws.begin(), ws.end(), [](auto& w) {
-        return w.is_ready();
+    return count_if(fs.begin(), fs.end(), [](auto& future) {
+        return future.is_ready(chans);
     });
 }
 
 
 Channel_size
-Task::Future_selection::dequeue_not_ready(Future_wait_vector* futsp, Channel_wait_vector* chansp, Handle task)
+Task::Future_selection::dequeue_not_ready(const Future_wait_vector& fs, const Channel_wait_vector& chans, Task::Handle task)
 {
-    using Vector_size = Future_wait_vector::size_type;
-
-    Future_wait_vector&     futures = *futsp;
-    Channel_wait_vector&    channels = *chansp;
-    Channel_size            n = 0;
-
-    for (Vector_size i = 0; i < futures.size(); ++i) {
-        Future_wait& future = futures[i];
-        if (!future.is_ready())
-            future.dequeue(&channels);
-    }
-
-    return n;
+    return accumulate(fs.begin(), fs.end(), 0, [&](auto n, auto& future) {
+        if (!future.is_ready(chans)) {
+            future.dequeue(chans, task);
+            ++n;
+        }
+        return n;
+    });
 }
 
 
 Channel_size
-Task::Future_selection::enqueue_not_ready(Future_wait_vector* futsp, Channel_wait_vector* chansp, Handle task)
+Task::Future_selection::enqueue_not_ready(const Future_wait_vector& fs, const Channel_wait_vector& chans, Task::Handle task)
 {
-    using Vector_size = Future_wait_vector::size_type;
-
-    Future_wait_vector&     futures     = *futsp;
-    Channel_wait_vector&    channels    = *chansp;
-    Channel_size            n           = 0;
-
-    for (Vector_size i = 0; i < futures.size(); ++i) {
-        Future_wait& future = futures[i];
-
-        if (future.is_ready(channels))
-            future.complete();
-        else {
-            future.enqueue(task, &channels);
+    return accumulate(fs.begin(), fs.end(), 0, [&](auto n, auto& future) {
+        if (!future.is_ready(chans)) {
+            future.enqueue(chans, task);
             ++n;
         }
-    }
-
-    return n;
+        return n;
+    });
 }
 
 
-Task::Future_selection::Channel_wait_vector::const_iterator
-Task::Future_selection::pick_ready(const Channel_wait_vector& waits, Channel_size nready)
+optional<Channel_size>
+Task::Future_selection::pick_ready(const Future_wait_vector& futures, const Channel_wait_vector& chans, Channel_size nready)
 {
-    auto            readyp  = waits.end();
-    Channel_size    n       = random(1, nready);
+    optional<Channel_size> ready;
 
-    for (auto wp = waits.begin(); wp != waits.end(); ++wp) {
-        if (wp->is_ready() && --n == 0) {
-            readyp = wp;
-            break;
+    if (nready > 0) {
+        Channel_size n = random(1, nready);
+
+        for (auto i = 0; i < futures.size(); ++i) {
+            if (futures[i].is_ready(chans) && --n == 0) {
+                ready = i;
+                break;
+            }
         }
     }
 
-    return readyp;
+    return ready;
 }
 
 
 Task::Selection_status
-Task::Future_selection::select_channel(Channel_size pos, Handle task)
+Task::Future_selection::select_channel(Channel_size pos, Task::Handle task)
 {
-    complete(&futures, &channels, pos, task);
+    const Channel_size futpos = channels[pos].future();
+    const Future_wait& future = futures[futpos];
+
+    future.complete(channels, pos, task);
     --nenqueued;
 
     if (!winner) {
-        winner = channels[pos].future();
+        winner = futpos;
         if (type == Type::any)
-            nenqueued -= dequeue_not_ready(&futures, &channels, task);
+            nenqueued -= dequeue_not_ready(futures, channels, task);
     }
 
     return Selection_status(*winner, nenqueued == 0);
@@ -392,18 +383,10 @@ Task::Future_selection::select_channel(Channel_size pos, Handle task)
 
 
 optional<Channel_size>
-Task::Future_selection::select_ready(const Channel_wait_vector& ws)
+Task::Future_selection::select_ready(const Future_wait_vector& futures, const Channel_wait_vector& chans)
 {
-    optional<Channel_size>  ready;
-    const Channel_size      n = count_ready(ws);
-
-    if (n > 0) {
-        auto wp = pick_ready(ws, n);
-        ready = wp->future();
-        wp->complete();
-    }
-
-    return ready;
+    auto n = count_ready(futures, chans);
+    return pick_ready(futures, chans, n);
 }
 
 

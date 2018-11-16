@@ -182,8 +182,8 @@ private:
         static optional<Channel_size>   select_ready(Channel_operation*, Channel_operation*);
         static Channel_size             count_ready(const Channel_operation*, const Channel_operation*);
         static Channel_operation*       pick_ready(Channel_operation*, Channel_operation*, Channel_size nready);
-        static Channel_size             enqueue(Channel_operation*, Channel_operation*, Handle task);
-        static Channel_size             dequeue(Channel_operation*, Channel_operation*, Channel_size selected, Handle task);
+        static Channel_size             enqueue(Channel_operation*, Channel_operation*, Task::Handle);
+        static Channel_size             dequeue(Channel_operation*, Channel_operation*, Channel_size selected, Task::Handle);
 
         // Sorting
         static void save_positions(Channel_operation*, Channel_operation*);
@@ -200,9 +200,9 @@ private:
     class Future_selection {
     public:
         // Selection
-        template<class T> bool  wait_any(const Future<T>*, const Future<T>*, Handle task);
-        template<class T> bool  wait_all(const Future<T>*, const Future<T>*, Handle task);
-        Selection_status        select_channel(Channel_size pos, Handle task);
+        template<class T> bool  wait_any(const Future<T>*, const Future<T>*, Task::Handle);
+        template<class T> bool  wait_all(const Future<T>*, const Future<T>*, Task::Handle);
+        Selection_status        select_channel(Channel_size pos, Task::Handle);
         Channel_size            selected() const;
 
         // Friends
@@ -219,8 +219,8 @@ private:
             Channel_wait(Channel_base*, Channel_size fpos);
 
             // Channel_waiting
-            void enqueue(Handle task, Channel_size pos);
-            bool dequeue(Handle task, Channel_size pos);
+            void enqueue(Channel_size pos, Task::Handle) const;
+            bool dequeue(Channel_size pos, Task::Handle) const;
 
             // Observers
             bool            is_ready() const;
@@ -250,9 +250,13 @@ private:
             Channel_size value() const;
             Channel_size error() const;
 
+            // Enqueue/Dequeue
+            void enqueue(const Channel_wait_vector&, Task::Handle) const;
+            bool dequeue(const Channel_wait_vector&, Task::Handle) const;
+
             // Completion
-            void complete();
-            bool is_ready() const;
+            void complete(const Channel_wait_vector&, Channel_size pos, Task::Handle) const;
+            bool is_ready(const Channel_wait_vector&) const;
 
         private:
             // Data
@@ -309,14 +313,14 @@ private:
         };
 
         // Selection
-        static void                     enqueue(const Channel_wait_vector&, Handle task);
-        static Channel_size             enqueue_not_ready(Future_wait_vector*, Channel_wait_vector*, Handle task);
-        static Channel_size             dequeue_not_ready(Future_wait_vector*, Channel_wait_vector*, Handle task);
-        static Channel_size             count_ready(const Channel_wait_vector&);
-        static Channel_wait_constptr    pick_ready(const Channel_wait_vector&, Channel_size nready);
-        static optional<Channel_size>   select_ready(Future_wait_vector*, const Channel_wait_vector&);
+        static void                     enqueue_all(const Future_wait_vector&, const Channel_wait_vector&, Task::Handle);
+        static Channel_size             enqueue_not_ready(const Future_wait_vector&, const Channel_wait_vector&, Task::Handle);
+        static Channel_size             dequeue_not_ready(const Future_wait_vector&, const Channel_wait_vector&, Task::Handle);
+        static Channel_size             count_ready(const Future_waite_vector&, const Channel_wait_vector&);
+        static optional<Channel_size>   pick_ready(const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
+        static optional<Channel_size>   select_ready(const Future_wait_vector&, const Channel_wait_vector&);
         static void                     sort_channels(Channel_wait_vector*);
-        static void                     complete(Future_wait_vector*, Channel_wait_vector*, Channel_size pos, Handle task);
+        static void                     complete(const Future_wait_vector&, const Channel_wait_vector&, Channel_size chan, Task::Handle);
 
         // Data
         Type                    type;
