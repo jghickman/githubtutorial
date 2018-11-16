@@ -272,6 +272,7 @@ Task::Channel_selection::try_select(Channel_operation (&ops)[N])
 Task::Future_selection::Channel_locks::Channel_locks(const Channel_wait_vector* wsp)
     : waitsp{wsp}
 {
+    sort_channels(waitsp);
     for (auto& w : *waitsp)
         w.lock_channel();
 }
@@ -298,9 +299,7 @@ Task::Future_selection::Future_sort::Future_sort(Channel_wait_vector* wsp)
 
 Task::Future_selection::Future_sort::~Future_sort()
 {
-    sort(waitsp->begin(), waitsp->end(), [](auto& x, auto& y) {
-        return x.channel() < y.channel();
-    });
+    sort_channels(waitsp->begin(), waitsp->end());
 }
 
 
@@ -317,17 +316,18 @@ Task::Future_selection::count_ready(const Channel_wait_vector& ws)
 
 
 Channel_size
-Task::Future_selection::dequeue(const Channel_wait_vector& ws, Channel_size selected, Handle task)
+Task::Future_selection::dequeue_not_ready(Future_wait_vector* futsp, Channel_wait_vector* chansp, Handle task)
 {
-    using Vector_size = Channel_wait_vector::size_type;
+    using Vector_size = Future_wait_vector::size_type;
 
-    Channel_size n = 0;
+    Future_wait_vector&     futures = *futsp;
+    Channel_wait_vector&    channels = *chansp;
+    Channel_size            n = 0;
 
-    for (Vector_size i = 0; i < ws.size(); ++i) {
-        if (i != selected) {
-            if (ws[i].dequeue(task, i))
-                ++n;
-        }
+    for (Vector_size i = 0; i < futures.size(); ++i) {
+        Future_wait& future = futures[i];
+        if (!future.is_ready())
+            future.dequeue(&channels);
     }
 
     return n;
@@ -335,26 +335,22 @@ Task::Future_selection::dequeue(const Channel_wait_vector& ws, Channel_size sele
 
 
 Channel_size
-Task::Future_selection::enqueue_not_ready(const Channel_wait_vector& ws, Handle task)
+Task::Future_selection::enqueue_not_ready(Future_wait_vector* futsp, Channel_wait_vector* chansp, Handle task)
 {
-    using Vector_size = Channel_wait_vector::size_type;
+    using Vector_size = Future_wait_vector::size_type;
 
-    Channel_size n = 0;
+    Future_wait_vector&     futures     = *futsp;
+    Channel_wait_vector&    channels    = *chansp;
+    Channel_size            n           = 0;
 
-    for (Vector_size i = 0; i < ws.size(); i += 2) {
-        const Vector_size   vpos    = i;
-        const Vector_size   epos    = i+1;
-        const Channel_wait& vwait   = ws[vpos]; // value
-        const Channel_wait& ewait   = ws[epos]; // error
+    for (Vector_size i = 0; i < futures.size(); ++i) {
+        Future_wait& future = futures[i];
 
-        if (vwait.is_ready())
-            vwait.complete();
-        else if (ewait.is_ready())
-            ewait.complete();
+        if (future.is_ready(channels))
+            future.complete();
         else {
-            vwait.enqueue(task, vpos);
-            ewait.enqueue(task, epos);
-            n += 2;
+            future.enqueue(task, &channels);
+            ++n;
         }
     }
 
@@ -380,20 +376,15 @@ Task::Future_selection::pick_ready(const Channel_wait_vector& waits, Channel_siz
 
 
 Task::Selection_status
-Task::Future_selection::select_channel(Channel_size chan, Handle task)
+Task::Future_selection::select_channel(Channel_size pos, Handle task)
 {
-    Channel_wait& wait = waits[chan];
-
-    wait.complete();
+    complete(&futures, &channels, pos, task);
     --nenqueued;
-    nenqueued -= 2;
-
-    if ()
 
     if (!winner) {
-        winner = wait.future();
+        winner = channels[pos].future();
         if (type == Type::any)
-            nenqueued -= dequeue(waits, chan, task);
+            nenqueued -= dequeue_not_ready(&futures, &channels, task);
     }
 
     return Selection_status(*winner, nenqueued == 0);
@@ -413,6 +404,15 @@ Task::Future_selection::select_ready(const Channel_wait_vector& ws)
     }
 
     return ready;
+}
+
+
+void
+Task::Future_selection::sort_channels(Channel_wait_vector* waitsp)
+{
+    std::sort(waitsp->begin(), waitsp->end(), [](auto& x, auto& y) {
+        return x.channel() < y.channel();
+    });
 }
 
 
