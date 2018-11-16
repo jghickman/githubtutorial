@@ -300,33 +300,21 @@ private:
             Channel_wait_vector* waitsp;
         };
 
-        class Future_sort {
-        public:
-            // Construct/Destroy
-            explicit Future_sort(Channel_wait_vector*);
-            ~Future_sort();
-
-        private:
-            // Data
-            Channel_wait* first;
-            Channel_wait* last;
-        };
-
         // Selection
         static void                     enqueue_all(const Future_wait_vector&, const Channel_wait_vector&, Task::Handle);
         static Channel_size             enqueue_not_ready(const Future_wait_vector&, const Channel_wait_vector&, Task::Handle);
         static Channel_size             dequeue_not_ready(const Future_wait_vector&, const Channel_wait_vector&, Task::Handle);
-        static Channel_size             count_ready(const Future_waite_vector&, const Channel_wait_vector&);
+        static Channel_size             count_ready(const Future_wait_vector&, const Channel_wait_vector&);
         static optional<Channel_size>   pick_ready(const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
         static optional<Channel_size>   select_ready(const Future_wait_vector&, const Channel_wait_vector&);
         static void                     sort_channels(Channel_wait_vector*);
-        static void                     complete(const Future_wait_vector&, const Channel_wait_vector&, Channel_size chan, Task::Handle);
+        static Channel_size             complete(const Future_wait_vector&, const Channel_wait_vector&, Channel_size chanpos, Task::Handle);
 
         // Data
         Type                    type;
         Future_wait_vector      futures;
         Channel_wait_vector     channels;
-        Channel_size            nenqueued;
+        Channel_size            nenqueued;  // futures
         optional<Channel_size>  winner;
     };
 
@@ -1012,7 +1000,7 @@ private:
     bool*           ready() const;
 
     // Friends
-    friend class Task::Future_wait;
+    friend class Task::Future_selection::Future_wait;
 
     // Data
     Value_receiver  vchan;

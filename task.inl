@@ -143,7 +143,6 @@ Task::Future_selection::Channel_wait::unlock_channel() const
 /*
     Task Future Selection Future Wait
 */
-template<class T>
 inline
 Task::Future_selection::Future_wait::Future_wait(bool* readyp, Channel_size vpos, Channel_size epos)
     : vchan{vpos}
@@ -214,7 +213,7 @@ Task::Future_selection::Future_wait::value() const
     Task Future Selection Wait Transform
 */
 template<class T>
-Task::Future_selection::Future_transform::Future_transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
+Task::Future_selection::Future_transform<T>::Future_transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
 {
     const Channel_size      nfutures    = last - first;
     Future_wait_vector&     fwaits      = *fwaitsp;
@@ -229,9 +228,9 @@ Task::Future_selection::Future_transform::Future_transform(const Future<T>* firs
         const Channel_size vpos = nextchan++;
         const Channel_size epos = nextchan++;
 
-        cwaits[vpos]    = Channel_wait(futurep->value(), i);
-        cwaits[epos]    = Channel_wait(futurep->error(), i);
-        fwaits[i]       = Future_wait(futurep++, vpos, epos);
+        cwaits[vpos]    = Channel_wait{futurep->value(), i};
+        cwaits[epos]    = Channel_wait{futurep->error(), i};
+        fwaits[i]       = Future_wait{futurep++, vpos, epos};
     }
 }
 
@@ -264,12 +263,12 @@ template<class T>
 bool
 Task::Future_selection::wait_any(const Future<T>* first, const Future<T>* last, Handle task)
 {
-    Future_transform    transform(first, last, &futures, &channels);
-    Channel_locks       lock(&channels);
+    Future_transform    transform{first, last, &futures, &channels};
+    Channel_locks       lock{&channels};
 
     type        = Type::any;
-    winner      = select_ready(futures, channels);
     nenqueued   = 0;
+    winner      = select_ready(futures, channels);
 
     if (!winner)
         nenqueued = enqueue_all(futures, channels, task);
