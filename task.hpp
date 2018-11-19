@@ -142,8 +142,8 @@ private:
     class Channel_selection {
     public:
         // Selection
-        bool                                                    select(Channel_operation*, Channel_operation*, Handle task);
-        Selection_status                                        select(Channel_size op, Handle task);
+        bool                                                    select(Task::Handle, Channel_operation*, Channel_operation*);
+        Selection_status                                        select(Task::Handle, Channel_size op);
         Channel_size                                            selected() const;
         template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
 
@@ -182,8 +182,8 @@ private:
         static optional<Channel_size>   select_ready(Channel_operation*, Channel_operation*);
         static Channel_size             count_ready(const Channel_operation*, const Channel_operation*);
         static Channel_operation*       pick_ready(Channel_operation*, Channel_operation*, Channel_size nready);
-        static Channel_size             enqueue(Channel_operation*, Channel_operation*, Task::Handle);
-        static Channel_size             dequeue(Channel_operation*, Channel_operation*, Channel_size selected, Task::Handle);
+        static Channel_size             enqueue(Task::Handle, Channel_operation*, Channel_operation*);
+        static Channel_size             dequeue(Task::Handle, Channel_operation*, Channel_operation*, Channel_size selected);
 
         // Sorting
         static void save_positions(Channel_operation*, Channel_operation*);
@@ -200,9 +200,9 @@ private:
     class Future_selection {
     public:
         // Selection
-        template<class T> bool  wait_any(const Future<T>*, const Future<T>*, Task::Handle);
-        template<class T> bool  wait_all(const Future<T>*, const Future<T>*, Task::Handle);
-        Selection_status        select_channel(Channel_size pos, Task::Handle);
+        template<class T> bool  wait_any(Task::Handle, const Future<T>*, const Future<T>*);
+        template<class T> bool  wait_all(Task::Handle, const Future<T>*, const Future<T>*);
+        Selection_status        select_channel(Task::Handle, Channel_size pos);
         Channel_size            selected() const;
 
         // Friends
@@ -219,8 +219,8 @@ private:
             Channel_wait(Channel_base*, Channel_size fpos);
 
             // Channel_waiting
-            void enqueue(Channel_size pos, Task::Handle) const;
-            bool dequeue(Channel_size pos, Task::Handle) const;
+            void enqueue(Task::Handle, Channel_size pos) const;
+            bool dequeue(Task::Handle, Channel_size pos) const;
 
             // Observers
             bool            is_ready() const;
@@ -237,8 +237,7 @@ private:
             Channel_size    futpos;
         };
 
-        using Channel_wait_vector   = std::vector<Channel_wait>;
-        using Channel_wait_constptr = Channel_wait_vector::const_iterator;
+        using Channel_wait_vector = std::vector<Channel_wait>;
 
         class Future_wait {
         public:
@@ -251,11 +250,11 @@ private:
             Channel_size error() const;
 
             // Enqueue/Dequeue
-            void enqueue(const Channel_wait_vector&, Task::Handle) const;
-            bool dequeue(const Channel_wait_vector&, Task::Handle) const;
+            void enqueue(Task::Handle, const Channel_wait_vector&) const;
+            bool dequeue(Task::Handle, const Channel_wait_vector&) const;
 
             // Completion
-            void complete(const Channel_wait_vector&, Channel_size pos, Task::Handle) const;
+            void complete(Task::Handle, const Channel_wait_vector&, Channel_size pos) const;
             bool is_ready(const Channel_wait_vector&) const;
 
         private:
@@ -295,13 +294,13 @@ private:
         };
 
         // Selection
-        static void                     enqueue_all(const Future_wait_vector&, const Channel_wait_vector&, Task::Handle);
-        static Channel_size             enqueue_not_ready(const Future_wait_vector&, const Channel_wait_vector&, Task::Handle);
-        static Channel_size             dequeue_not_ready(const Future_wait_vector&, const Channel_wait_vector&, Task::Handle);
+        static Channel_size             complete(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&, Channel_size chanpos);
         static Channel_size             count_ready(const Future_wait_vector&, const Channel_wait_vector&);
+        static Channel_size             dequeue_not_ready(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
+        static void                     enqueue_all(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
+        static Channel_size             enqueue_not_ready(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
         static optional<Channel_size>   pick_ready(const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
         static optional<Channel_size>   select_ready(const Future_wait_vector&, const Channel_wait_vector&);
-        static Channel_size             complete(const Future_wait_vector&, const Channel_wait_vector&, Channel_size chanpos, Task::Handle);
         static void                     sort_channels(Channel_wait_vector*);
 
         // Data
@@ -334,10 +333,12 @@ public:
         Channel_size                                            selected_channel() const;
         template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
 
-        // Waiting
+        // Channel Event Selection
+        Selection_status select_readable(Channel_size chan);
+
+        // Future Selection
         template<class T> void  wait_all(const Future<T>*, const Future<T>*);
         template<class T> void  wait_any(const Future<T>*, const Future<T>*);
-        Selection_status        select_future_channel(Channel_size chan);
         Channel_size            selected_future() const;
 
         // Execution
@@ -368,8 +369,8 @@ private:
     Task Launch
 */
 template<class TaskFun, class... Args> void                                 start(TaskFun, Args&&...);
-template<class Fun> Future<std::result_of_t<Fun()>>                         async(Fun);
-//template<class Fun, class... Args> Future<std::result_of_t<Fun(Args&&...)>> async(Fun, Args&&...);
+//template<class Fun> Future<std::result_of_t<Fun()>>                         async(Fun);
+template<class Fun, class... Args> Future<std::result_of_t<Fun(Args&&...)>> async(Fun, Args&&...);
 
 
 /*
@@ -391,11 +392,11 @@ public:
     virtual void read(void* valuep) = 0;
 
     // Blocking Send/Receive
-    virtual void enqueue_write(Task::Handle, Channel_size selpos, void* valuep) = 0;
-    virtual void enqueue_write(Task::Handle, Channel_size selpos, const void* valuep) = 0;
-    virtual bool dequeue_write(Task::Handle, Channel_size selpos) = 0;
-    virtual void enqueue_read(Task::Handle, Channel_size selpos, void* valuep) = 0;
-    virtual bool dequeue_read(Task::Handle, Channel_size selpos) = 0;
+    virtual void enqueue_write(Task::Handle, Channel_size pos, void* valuep) = 0;
+    virtual void enqueue_write(Task::Handle, Channel_size pos, const void* valuep) = 0;
+    virtual bool dequeue_write(Task::Handle, Channel_size pos) = 0;
+    virtual void enqueue_read(Task::Handle, Channel_size pos, void* valuep) = 0;
+    virtual bool dequeue_read(Task::Handle, Channel_size pos) = 0;
 
     // Waiting
     virtual void enqueue_readable_wait(Task::Handle, Channel_size pos) = 0;
@@ -479,7 +480,7 @@ private:
         Task::Handle task() const;
         Channel_size channel() const;
 
-        // Notification
+        // Selection
         void notify(Mutex*) const;
 
         // Comparisons
@@ -490,9 +491,10 @@ private:
         }
 
     private:
-        // Data
+        // Selection
         static void select(Task::Handle task, Channel_size chan);
 
+        // Data
         mutable Task::Handle    taskh;
         Channel_size            chan;
     };
@@ -528,8 +530,8 @@ private:
     class Sender : boost::equality_comparable<Sender> {
     public:
         // Construct
-        Sender(Task::Handle, Channel_size selpos, const T* rvaluep);
-        Sender(Task::Handle, Channel_size selpos, T* lvaluep);
+        Sender(Task::Handle, Channel_size pos, const T* rvaluep);
+        Sender(Task::Handle, Channel_size pos, T* lvaluep);
         Sender(Condition_variable*, const T* rvaluep);
         Sender(Condition_variable*, T* lvaluep);
     
@@ -546,13 +548,13 @@ private:
             if (x.rvalp != y.rvalp) return false;
             if (x.lvalp != y.lvalp) return false;
             if (x.taskh != y.taskh) return false;
-            if (x.chanop != y.chanop) return false;
+            if (x.oper != y.oper) return false;
             return true;
         }
     
     private:
         // Selection
-        template<class U> static bool select(Task::Handle, Channel_size chanop, T* lvalp, const T* rvalp, U* recvbufp);
+        template<class U> static bool select(Task::Handle, Channel_size oper, T* lvalp, const T* rvalp, U* recvbufp);
 
         // Data Transefer
         template<class U> static void   move(T* lvalp, const T* rvalp, U* destp);
@@ -560,7 +562,7 @@ private:
     
         // Data
         mutable Task::Handle    taskh; // poor Handle const usage forces mutable
-        Channel_size            chanop;
+        Channel_size            oper;
         const T*                rvalp;
         T*                      lvalp;
         Condition_variable*     threadcondp;
@@ -569,7 +571,7 @@ private:
     class Receiver : boost::equality_comparable<Receiver> {
     public:
         // Construct
-        Receiver(Task::Handle, Channel_size cop, T* valuep);
+        Receiver(Task::Handle, Channel_size pos, T* valuep);
         Receiver(Condition_variable*, T* valuep);
 
         // Observers
@@ -584,17 +586,17 @@ private:
             if (x.threadcondp != y.threadcondp) return false;
             if (x.valp != y.valp) return false;
             if (x.taskh != y.taskh) return false;
-            if (x.chanop != y.chanop) return false;
+            if (x.oper != y.oper) return false;
             return true;
         }
     
     private:
         // Selection
-        template<class U> static bool select(Task::Handle, Channel_size chanop, T* valp, U* sendbufp);
+        template<class U> static bool select(Task::Handle, Channel_size oper, T* valp, U* sendbufp);
 
         // Data
         mutable Task::Handle    taskh; // poor Handle const usage forces mutable
-        Channel_size            chanop;
+        Channel_size            oper;
         T*                      valp;
         Condition_variable*     threadcondp;
     };
@@ -604,12 +606,12 @@ private:
     private:
         // Names/Types
         struct operation_eq {
-            operation_eq(Task::Handle h, Channel_size selpos) : task{h}, pos{selpos} {}
+            operation_eq(Task::Handle h, Channel_size pos) : task{h}, oper{pos} {}
             bool operator()(const U& w) const {
-                return w.task() == task && w.operation() == pos;
+                return w.task() == task && w.operation() == oper;
             }
             Task::Handle task;
-            Channel_size pos;
+            Channel_size oper;
         };
 
         // Data
@@ -630,7 +632,7 @@ private:
         void        push(const Waiter&);
         Waiter      pop();
         void        erase(Iterator);
-        Iterator    find(Task::Handle, Channel_size selpos);
+        Iterator    find(Task::Handle, Channel_size pos);
         bool        is_found(const Waiter&) const;
     };
 
@@ -1084,8 +1086,8 @@ private:
 /*
     Future Waiting
 */
-template<class T> Future_all_awaitable<T> wait_all(const std::vector<Future<T>>&);
 template<class T> Future_any_awaitable<T> wait_any(const std::vector<Future<T>>&);
+template<class T> Future_all_awaitable<T> wait_all(const std::vector<Future<T>>&);
 
 
 /*

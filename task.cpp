@@ -46,7 +46,7 @@ using std::try_to_lock;
 /*
     Data
 */
-Scheduler scheduler(1);
+Scheduler scheduler;
 
 
 /*
@@ -115,14 +115,14 @@ Task::Channel_selection::Sort_guard::dismiss()
 Channel_size
 Task::Channel_selection::count_ready(const Channel_operation* first, const Channel_operation* last)
 {
-    return count_if(first, last, [](auto& co) {
+    return count_if(first, last, [](const auto& co) {
         return co.is_ready();
     });
 }
 
 
 Channel_size
-Task::Channel_selection::dequeue(Channel_operation* first, Channel_operation* last, Channel_size selected, Handle task)
+Task::Channel_selection::dequeue(Task::Handle task, Channel_operation* first, Channel_operation* last, Channel_size selected)
 {
     Channel_size n = 0;
 
@@ -136,7 +136,7 @@ Task::Channel_selection::dequeue(Channel_operation* first, Channel_operation* la
 
 
 Channel_size
-Task::Channel_selection::enqueue(Channel_operation* first, Channel_operation* last, Handle task)
+Task::Channel_selection::enqueue(Task::Handle task, Channel_operation* first, Channel_operation* last)
 {
     Channel_size n = 0;
 
@@ -169,7 +169,7 @@ Task::Channel_selection::pick_ready(Channel_operation* first, Channel_operation*
 void
 Task::Channel_selection::restore_positions(Channel_operation* first, Channel_operation* last)
 {
-    sort(first, last, [](auto& x, auto& y) {
+    sort(first, last, [](const auto& x, const auto& y) {
         return x.position() < y.position();
     });
 }
@@ -184,12 +184,12 @@ Task::Channel_selection::save_positions(Channel_operation* first, Channel_operat
 
 
 Task::Selection_status
-Task::Channel_selection::select(Channel_size pos, Handle task)
+Task::Channel_selection::select(Task::Handle task, Channel_size pos)
 {
     --nenqueued;
     if (!winner) {
         winner = pos;
-        nenqueued -= dequeue(begin, end, pos, task);
+        nenqueued -= dequeue(task, begin, end, pos);
     }
 
     return Selection_status(*winner, nenqueued == 0);
@@ -197,7 +197,7 @@ Task::Channel_selection::select(Channel_size pos, Handle task)
 
 
 bool
-Task::Channel_selection::select(Channel_operation* first, Channel_operation* last, Handle task)
+Task::Channel_selection::select(Task::Handle task, Channel_operation* first, Channel_operation* last)
 {
     Sort_guard chansort{first, last};
     Lock_guard chanlocks{first, last};
@@ -208,7 +208,7 @@ Task::Channel_selection::select(Channel_operation* first, Channel_operation* las
     // If nothing is ready, enqueue the operations on their channels and
     // keep them in lock order until we awake.
     if (!winner) {
-        nenqueued = enqueue(first, last, task);
+        nenqueued = enqueue(task, first, last);
         chansort.dismiss();
         begin = first;
         end = last;
@@ -245,7 +245,7 @@ Task::Channel_selection::selected() const
 inline void
 Task::Channel_selection::sort_channels(Channel_operation* first, Channel_operation* last)
 {
-    sort(first, last, [](auto& x, auto& y) {
+    sort(first, last, [](const auto& x, const auto& y) {
         return x.channel() < y.channel();
     });
 }
@@ -270,14 +270,14 @@ Task::Channel_selection::try_select(Channel_operation (&ops)[N])
 Task::Future_selection::Channel_locks::Channel_locks(Channel_wait_vector* wsp)
     : waitsp{wsp}
 {
-    for (auto& w : *waitsp)
+    for (const auto& w : *waitsp)
         w.lock_channel();
 }
 
 
 Task::Future_selection::Channel_locks::~Channel_locks()
 {
-    for (auto& w : *waitsp)
+    for (const auto& w : *waitsp)
         w.unlock_channel();
 }
 
@@ -286,12 +286,12 @@ Task::Future_selection::Channel_locks::~Channel_locks()
     Task Future Selection
 */
 Channel_size
-Task::Future_selection::complete(const Future_wait_vector& futures, const Channel_wait_vector& chans, Channel_size pos, Task::Handle task)
+Task::Future_selection::complete(Task::Handle task, const Future_wait_vector& futures, const Channel_wait_vector& chans, Channel_size pos)
 {
     const Channel_size futpos = chans[pos].future();
     const Future_wait& future = futures[futpos];
 
-    future.complete(chans, pos, task);
+    future.complete(task, chans, pos);
     return futpos;
 }
 
@@ -299,18 +299,18 @@ Task::Future_selection::complete(const Future_wait_vector& futures, const Channe
 Channel_size
 Task::Future_selection::count_ready(const Future_wait_vector& fs, const Channel_wait_vector& chans)
 {
-    return count_if(fs.begin(), fs.end(), [&](auto& future) {
+    return count_if(fs.begin(), fs.end(), [&](const auto& future) {
         return future.is_ready(chans);
     });
 }
 
 
 Channel_size
-Task::Future_selection::dequeue_not_ready(const Future_wait_vector& fs, const Channel_wait_vector& chans, Task::Handle task)
+Task::Future_selection::dequeue_not_ready(Task::Handle task, const Future_wait_vector& fs, const Channel_wait_vector& chans)
 {
-    return accumulate(fs.begin(), fs.end(), 0, [&](auto n, auto& future) {
+    return accumulate(fs.begin(), fs.end(), 0, [&](auto n, const auto& future) {
         if (!future.is_ready(chans)) {
-            future.dequeue(chans, task);
+            future.dequeue(task, chans);
             ++n;
         }
         return n;
@@ -319,19 +319,19 @@ Task::Future_selection::dequeue_not_ready(const Future_wait_vector& fs, const Ch
 
 
 void
-Task::Future_selection::enqueue_all(const Future_wait_vector& fs, const Channel_wait_vector& chans, Task::Handle task)
+Task::Future_selection::enqueue_all(Task::Handle task, const Future_wait_vector& fs, const Channel_wait_vector& chans)
 {
-    for (auto& future : fs)
-        future.enqueue(chans, task);
+    for (const auto& future : fs)
+        future.enqueue(task, chans);
 }
 
 
 Channel_size
-Task::Future_selection::enqueue_not_ready(const Future_wait_vector& fs, const Channel_wait_vector& chans, Task::Handle task)
+Task::Future_selection::enqueue_not_ready(Task::Handle task, const Future_wait_vector& fs, const Channel_wait_vector& chans)
 {
-    return accumulate(fs.begin(), fs.end(), 0, [&](auto n, auto& future) {
+    return accumulate(fs.begin(), fs.end(), 0, [&](auto n, const auto& future) {
         if (!future.is_ready(chans)) {
-            future.enqueue(chans, task);
+            future.enqueue(task, chans);
             ++n;
         }
         return n;
@@ -342,12 +342,14 @@ Task::Future_selection::enqueue_not_ready(const Future_wait_vector& fs, const Ch
 optional<Channel_size>
 Task::Future_selection::pick_ready(const Future_wait_vector& futures, const Channel_wait_vector& chans, Channel_size nready)
 {
+    using Size = Future_wait_vector::size_type;
+
     optional<Channel_size> ready;
 
     if (nready > 0) {
-        Channel_size n = random(1, nready);
-        for (auto i = 0; i < futures.size(); ++i) {
-            if (futures[i].is_ready(chans) && --n == 0) {
+        Channel_size choice = random(1, nready);
+        for (Size i = 0, n = futures.size(); i < n; ++i) {
+            if (futures[i].is_ready(chans) && --choice == 0) {
                 ready = i;
                 break;
             }
@@ -359,15 +361,15 @@ Task::Future_selection::pick_ready(const Future_wait_vector& futures, const Chan
 
 
 Task::Selection_status
-Task::Future_selection::select_channel(Channel_size pos, Task::Handle task)
+Task::Future_selection::select_channel(Task::Handle task, Channel_size pos)
 {
-    const Channel_size futpos = complete(futures, channels, pos, task);
+    const Channel_size futpos = complete(task, futures, channels, pos);
 
     --nenqueued;
     if (!winner) {
         winner = futpos;
         if (type == Type::any)
-            nenqueued -= dequeue_not_ready(futures, channels, task);
+            nenqueued -= dequeue_not_ready(task, futures, channels);
     }
 
     return Selection_status(*winner, nenqueued == 0);
@@ -377,7 +379,7 @@ Task::Future_selection::select_channel(Channel_size pos, Task::Handle task)
 optional<Channel_size>
 Task::Future_selection::select_ready(const Future_wait_vector& futures, const Channel_wait_vector& chans)
 {
-    auto n = count_ready(futures, chans);
+    const auto n = count_ready(futures, chans);
     return pick_ready(futures, chans, n);
 }
 
@@ -385,7 +387,7 @@ Task::Future_selection::select_ready(const Future_wait_vector& futures, const Ch
 void
 Task::Future_selection::sort_channels(Channel_wait_vector* waitsp)
 {
-    return sort(waitsp->begin(), waitsp->end(), [](auto& x, auto& y) {
+    return sort(waitsp->begin(), waitsp->end(), [](const auto& x, const auto& y) {
         return x.channel() < y.channel();
     });
 }
@@ -601,9 +603,9 @@ Scheduler::Suspended_tasks::insert(Task&& task)
 Task
 Scheduler::Suspended_tasks::release(Task::Handle h)
 {
-    Task task;
-    Lock lock{mutex};
-    auto taskp = find_if(tasks.begin(), tasks.end(), handle_equal(h));
+    Task        task;
+    Lock        lock{mutex};
+    const auto  taskp = find_if(tasks.begin(), tasks.end(), handle_equal(h));
 
     if (taskp != tasks.end()) {
         task = move(*taskp);
