@@ -267,11 +267,10 @@ private:
 
         using Future_wait_vector = std::vector<Future_wait>;
 
-        template<class T>
         class Future_transform {
         public:
             // Construct
-            Future_transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
+            template<class T> Future_transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
         };
 
         class Channel_locks {
@@ -287,13 +286,8 @@ private:
 
         class Channel_sort {
         public:
-            // Construct/Destroy
+            // Construct
             explicit Channel_sort(Channel_wait_vector*);
-            Channel_sort(Channel_wait*, Channel_wait*);
-            ~Channel_sort();
-
-            // Dismiss Guard
-            void dismiss();
 
         private:
             // Data
@@ -307,8 +301,8 @@ private:
         static Channel_size             count_ready(const Future_wait_vector&, const Channel_wait_vector&);
         static optional<Channel_size>   pick_ready(const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
         static optional<Channel_size>   select_ready(const Future_wait_vector&, const Channel_wait_vector&);
-        static void                     sort_channels(Channel_wait_vector*);
         static Channel_size             complete(const Future_wait_vector&, const Channel_wait_vector&, Channel_size chanpos, Task::Handle);
+        static void                     sort_channels(Channel_wait_vector*);
 
         // Data
         Type                    type;
@@ -1000,7 +994,7 @@ private:
     bool*           ready() const;
 
     // Friends
-    friend class Task::Future_selection::Future_wait;
+    friend class Task::Future_selection::Future_transform;
 
     // Data
     Value_receiver  vchan;

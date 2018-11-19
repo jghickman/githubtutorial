@@ -141,8 +141,25 @@ Task::Future_selection::Channel_wait::unlock_channel() const
 
 
 /*
+    Task Future Selection Channel Sort
+*/
+inline
+Task::Future_selection::Channel_sort::Channel_sort(Channel_wait_vector* wsp)
+    : waitsp{wsp}
+{
+    sort_channels(waitsp);
+}
+
+
+/*
     Task Future Selection Future Wait
 */
+inline
+Task::Future_selection::Future_wait::Future_wait()
+{
+}
+
+
 inline
 Task::Future_selection::Future_wait::Future_wait(bool* readyp, Channel_size vpos, Channel_size epos)
     : vchan{vpos}
@@ -213,15 +230,15 @@ Task::Future_selection::Future_wait::value() const
     Task Future Selection Wait Transform
 */
 template<class T>
-Task::Future_selection::Future_transform<T>::Future_transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
+Task::Future_selection::Future_transform::Future_transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
 {
     const Channel_size      nfutures    = last - first;
     Future_wait_vector&     fwaits      = *fwaitsp;
     Channel_wait_vector&    cwaits      = *cwaitsp;
     const Future<T>*        futurep     = first;
-    Channel_wait            nextchan    = 0;
+    Channel_size            nextchan    = 0;
 
-    fwaits.resize(nfutures)
+    fwaits.resize(nfutures);
     cwaits.resize(nfutures * 2);
 
     for (Channel_size i=0; i < nfutures; ++i) {
@@ -230,7 +247,8 @@ Task::Future_selection::Future_transform<T>::Future_transform(const Future<T>* f
 
         cwaits[vpos]    = Channel_wait{futurep->value(), i};
         cwaits[epos]    = Channel_wait{futurep->error(), i};
-        fwaits[i]       = Future_wait{futurep++, vpos, epos};
+        fwaits[i]       = Future_wait{futurep->ready(), vpos, epos};
+        ++futurep;
     }
 }
 
@@ -511,6 +529,10 @@ template<class T>
 void
 Channel<T>::Readable_wait::select(Task::Handle task, Channel_size chan)
 {
+    /*
+        TODO:   select_future_channel() must become generic wait_complete() or
+                somesuch.
+    */
     const Task::Selection_status select = task.promise().select_future_channel(chan);
 
     if (select.is_complete())

@@ -382,7 +382,7 @@ Task::Future_selection::select_ready(const Future_wait_vector& futures, const Ch
 }
 
 
-inline void
+void
 Task::Future_selection::sort_channels(Channel_wait_vector* waitsp)
 {
     return sort(waitsp->begin(), waitsp->end(), [](auto& x, auto& y) {
