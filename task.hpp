@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <condition_variable>
 #include <cstdlib>
@@ -59,7 +60,9 @@ class Channel_base;
 class Channel_operation;
 using Channel_size = std::ptrdiff_t;
 using boost::optional;
+using std::chrono::nanoseconds;
 using std::exception_ptr;
+using std::vector;
 
 
 /*
@@ -130,8 +133,10 @@ private:
 
     class Channel_lock {
     public:
-        // Construct/Destory
+        // Construct/Copy/Destory
         explicit Channel_lock(Channel_base*);
+        Channel_lock(const Channel_lock&) = delete;
+        Channel_lock& operator=(const Channel_lock&) = delete;
         ~Channel_lock();
 
     private:
@@ -141,6 +146,11 @@ private:
 
     class Channel_selection {
     public:
+        // Construct/Copy 
+        Channel_selection();
+        Channel_selection(const Channel_selection&) = delete;
+        Channel_selection& operator=(const Channel_selection&) = delete;
+
         // Selection
         bool                                                    select(Task::Handle, Channel_operation*, Channel_operation*);
         Selection_status                                        select(Task::Handle, Channel_size op);
@@ -169,9 +179,6 @@ private:
             Sort_guard& operator=(const Sort_guard&) = delete;
             ~Sort_guard();
         
-            // Dismissal
-            void dismiss();
-        
         private:
             // Data
             Channel_operation* first;
@@ -199,6 +206,11 @@ private:
 
     class Future_selection {
     public:
+        // Construct/Copy
+        Future_selection();
+        Future_selection(const Future_selection&) = delete;
+        Future_selection& operator=(const Future_selection&) = delete;
+
         // Selection
         template<class T> bool  wait_any(Task::Handle, const Future<T>*, const Future<T>*);
         template<class T> bool  wait_all(Task::Handle, const Future<T>*, const Future<T>*);
@@ -274,8 +286,10 @@ private:
 
         class Channel_locks {
         public:
-            // Construct/Destroy
+            // Construct/Copy/Destroy
             explicit Channel_locks(Channel_wait_vector*);
+            Channel_locks(const Channel_locks&) = delete;
+            Channel_locks& operator=(const Channel_locks&) = delete;
             ~Channel_locks();
 
         private:
@@ -307,7 +321,7 @@ private:
         Type                    type;
         Future_wait_vector      futures;
         Channel_wait_vector     channels;
-        Channel_size            nenqueued;  // futures
+        Channel_size            nenqueued;
         optional<Channel_size>  winner;
     };
 
@@ -318,8 +332,10 @@ public:
     // Names/Types
     class Promise {
     public: 
-        // Construct
+        // Construct/Copy
         Promise();
+        Promise(const Promise&) = delete;
+        Promise& operator=(const Promise&) = delete;
 
         // Coroutine Functions
         Task            get_return_object();
@@ -511,10 +527,9 @@ private:
         bool            is_full() const;
 
         // Queue Operations
-        template<class U> void  push(U&&, Mutex*);
-        template<class U> void  push_silent(U&&);
-        void                    pop(optional<T>*);
-        void                    pop(T*);
+        template<class U> bool push(U&&, Mutex*);
+        template<class U> bool push_silent(U&&);
+        template<class U> bool pop(U*);
 
         // Waiters
         void enqueue(const Readable_wait&);
@@ -689,15 +704,15 @@ private:
 
     private:
         // Non-Blocking I/O
-        void                    read(T* valuep);
-        template<class U> void  write(U* valuep);
+        template<class U> bool read_element(U* valuep, Buffer*, Sender_queue*, Mutex*);
+        template<class U> bool write_element(U* valp, Buffer*, Receiver_queue*, Mutex*);
 
         // Blocking I/O
-        void                            enqueue_read(Task::Handle, Channel_size chanop, T* valuep);
-        template<class U> void          enqueue_write(Task::Handle, Channel_size chanop, U* valuep);
+        void                            enqueue_read(Task::Handle, Channel_size pos, T* valuep);
+        template<class U> void          enqueue_write(Task::Handle, Channel_size pos, U* valuep);
         template<class U> static bool   dequeue(Receiver_queue*, U* sendbufp, Mutex*);
         template<class U> static bool   dequeue(Sender_queue*, U* recvbufp, Mutex*);
-        template<class U> static bool   dequeue(U* waitqp, Task::Handle, Channel_size chanop);
+        template<class U> static bool   dequeue(U* waitqp, Task::Handle, Channel_size pos);
         static void                     wait_for_sender(Receiver_queue*, T* recvbufp, Lock*);
         template<class U> static void   wait_for_receiver(Sender_queue*, U* sendbufp, Lock*);
 
@@ -879,7 +894,6 @@ private:
 class Channel_operation {
 public:
     // Names/Types
-    class Interface;
     enum class Type { none, send, receive };
 
     // Construct/Move/Copy/Destroy
@@ -1037,11 +1051,7 @@ private:
 template<class T>
 class Future_all_awaitable {
 public:
-    // Names/Types
-    using Vector = std::vector<Future<T>>;
-
     // Construct
-    explicit Future_all_awaitable(const Vector*);
     Future_all_awaitable(const Future<T>*, const Future<T>*);
 
     // Awaitable Operations
@@ -1062,18 +1072,13 @@ private:
 template<class T>
 class Future_any_awaitable {
 public:
-    // Names/Types
-    using Vector        = std::vector<Future<T>>;
-    using Vector_size   = typename Vector::size_type;
-
     // Construct
-    explicit Future_any_awaitable(const Vector*);
     Future_any_awaitable(const Future<T>*, const Future<T>*);
 
     // Awaitable Operations
-    bool        await_ready();
-    bool        await_suspend(Task::Handle);
-    Vector_size await_resume();
+    bool            await_ready();
+    bool            await_suspend(Task::Handle);
+    Channel_size    await_resume();
 
 private:
     // Data
@@ -1086,8 +1091,10 @@ private:
 /*
     Future Waiting
 */
-template<class T> Future_any_awaitable<T> wait_any(const std::vector<Future<T>>&);
-template<class T> Future_all_awaitable<T> wait_all(const std::vector<Future<T>>&);
+template<class T> Future_any_awaitable<T> wait_any(const vector<Future<T>>&);
+template<class T> Future_any_awaitable<T> wait_any(const Future<T>*, const Future<T>*);
+template<class T> Future_all_awaitable<T> wait_all(const vector<Future<T>>&);
+template<class T> Future_all_awaitable<T> wait_all(const Future<T>*, const Future<T>*);
 
 
 /*
@@ -1095,8 +1102,8 @@ template<class T> Future_all_awaitable<T> wait_all(const std::vector<Future<T>>&
 
     A Scheduler multiplexes Tasks onto operating system threads.
 
-    TODO: This concept should probably be generalized to accommodate
-    distinct scheduling policies (consider virtual functions).
+    TODO: Should this concept should be generalized using virtual functions
+    to accommodate distinct scheduling policies?
 */
 class Scheduler {
 public:

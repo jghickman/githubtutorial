@@ -299,13 +299,6 @@ Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Futu
 /*
     Task Promise
 */
-inline
-Task::Promise::Promise()
-    : taskstat{Status::ready}
-{
-}
-
-
 inline Task::Final_suspend
 Task::Promise::final_suspend()
 {
@@ -613,50 +606,55 @@ Channel<T>::Buffer::max_size() const
 
 
 template<class T>
-inline void
-Channel<T>::Buffer::pop(T* valuep)
+template<class U>
+inline bool
+Channel<T>::Buffer::pop(U* valuep)
 {
     using std::move;
 
-    *valuep = move(q.front());
-    q.pop();
-}
+    const bool is_data = !is_empty();
 
+    if (is_data) {
+        *valuep = move(q.front());
+        q.pop();
+    }
 
-template<class T>
-inline void
-Channel<T>::Buffer::pop(optional<T>* valuep)
-{
-    using std::move;
-
-    *valuep = move(q.front());
-    q.pop();
+    return is_data;
 }
 
 
 template<class T>
 template<class U>
-void
+bool
 Channel<T>::Buffer::push(U&& value, Mutex* mtxp)
 {
-    push_silent(std::move(value));
+    using std::move;
 
-    if (!readers.empty()) {
+    const bool is_pushed = push_silent(move(value));
+
+    if (is_pushed && !readers.empty()) {
         const Readable_wait reader = readers.front();
         readers.pop_front();
         reader.notify(mtxp);
     }
+
+    return is_pushed;
 }
 
 
 template<class T>
 template<class U>
-void
+bool
 Channel<T>::Buffer::push_silent(U&& value)
 {
     using std::move;
 
-    q.push(move(value));
+    bool is_space = !is_full();
+
+    if (is_space)
+        q.push(move(value));
+
+    return is_space;
 }
 
 
@@ -774,24 +772,24 @@ Channel<T>::Receiver::dequeue(U* sendbufp, Mutex* mtxp) const
 {
     using std::move;
 
-    bool is_selected = true;
+    bool is_dequeued = true;
 
     if (taskh) {
         /*
-            The receiving task could also be in the midst of trying to
+            The receiving task could be simultaneously trying to
             dequeue this operation, so temporarily unlock the channel to
             avoid a deadly embrace between sender and receiver.
         */
         mtxp->unlock();
         if (!select(taskh, oper, valp, sendbufp))
-            is_selected = false;
+            is_dequeued = false;
         mtxp->lock();
     } else {
         *valp = move(*sendbufp);
         threadcondp->notify_one();
     }
 
-    return is_selected;
+    return is_dequeued;
 }
 
 
@@ -879,7 +877,7 @@ Channel<T>::Sender::Sender(Condition_variable* waiterp, const T* rvaluep)
 template<class T>
 inline
 Channel<T>::Sender::Sender(Condition_variable* waiterp, T* lvaluep)
-    : rvalp{nullptr}
+    : rvalp{nullptr}    
     , lvalp{lvaluep}
     , threadcondp{waiterp}
 {
@@ -893,33 +891,35 @@ template<class U>
 bool
 Channel<T>::Sender::dequeue(U* recvbufp, Mutex* mtxp) const
 {
-    bool is_selected = true;
+    bool is_dequeued = true;
 
     if (taskh) {
         /*
-            The sending task could also be in the midst of trying to dequeue
+            The sending task could be simultaneously trying to dequeue
             this operation, so temporarily unlock the channel to avoid a
             deadly embrace between sender and receiver.
         */
         mtxp->unlock();
         if (!select(taskh, oper, lvalp, rvalp, recvbufp))
-            is_selected = false;
+            is_dequeued = false;
         mtxp->lock();
     } else {
         move(lvalp, rvalp, recvbufp);
         threadcondp->notify_one();
     }
 
-    return is_selected;
+    return is_dequeued;
 }
 
 
 template<class T>
 template<class U>
 inline void
-Channel<T>::Sender::move(T* lvalp, const T* rvalp, U* recvbufp)
+Channel<T>::Sender::move(T* lvalp, const T* rvalp, U* bufp)
 {
-    *recvbufp = lvalp ? std::move(*lvalp) : *rvalp;
+    using std::move;
+
+    *bufp = lvalp ? move(*lvalp) : *rvalp;
 }
 
 
@@ -927,8 +927,10 @@ template<class T>
 inline void
 Channel<T>::Sender::move(T* lvalp, const T* rvalp, Buffer* bufp)
 {
+    using std::move;
+
     if (lvalp)
-        bufp->push_silent(std::move(*lvalp));
+        bufp->push_silent(move(*lvalp));
     else
         bufp->push_silent(*rvalp);
 }
@@ -1153,9 +1155,7 @@ Channel<T>::Impl::blocking_receive()
     T       value;
     Lock    lock{mutex};
 
-    if (!buffer.is_empty())
-        buffer.pop(&value);
-    else if (!dequeue(&senders, &value, &mutex))
+    if (!read_element(&value, &buffer, &senders, &mutex))
         wait_for_sender(&receivers, &value, &lock);
 
     return value;
@@ -1169,12 +1169,8 @@ Channel<T>::Impl::blocking_send(U* valuep)
 {
     Lock lock{mutex};
 
-    if (!dequeue(&receivers, valuep, &mutex)) {
-        if (!buffer.is_full())
-            buffer.push(move(*valuep), &mutex);
-        else
-            wait_for_receiver(&senders, valuep, &lock);
-    }
+    if (!write_element(valuep, &buffer, &receivers, &mutex))
+        wait_for_receiver(&senders, valuep, &lock);
 }
 
 
@@ -1222,9 +1218,9 @@ Channel<T>::Impl::dequeue(Sender_queue* qp, U* recvbufp, Mutex* mtxp)
 template<class T>
 template<class U>
 inline bool
-Channel<T>::Impl::dequeue(U* waitqp, Task::Handle task, Channel_size chanop)
+Channel<T>::Impl::dequeue(U* waitqp, Task::Handle task, Channel_size pos)
 {
-    const auto wp       = waitqp->find(task, chanop);
+    const auto wp       = waitqp->find(task, pos);
     const bool is_found = wp != waitqp->end();
 
     if (is_found)
@@ -1236,9 +1232,9 @@ Channel<T>::Impl::dequeue(U* waitqp, Task::Handle task, Channel_size chanop)
 
 template<class T>
 bool
-Channel<T>::Impl::dequeue_read(Task::Handle task, Channel_size chanop)
+Channel<T>::Impl::dequeue_read(Task::Handle task, Channel_size pos)
 {
-    return dequeue(&receivers, task, chanop);
+    return dequeue(&receivers, task, pos);
 }
 
 
@@ -1252,25 +1248,25 @@ Channel<T>::Impl::dequeue_readable_wait(Task::Handle task, Channel_size pos)
 
 template<class T>
 bool
-Channel<T>::Impl::dequeue_write(Task::Handle task, Channel_size chanop)
+Channel<T>::Impl::dequeue_write(Task::Handle task, Channel_size pos)
 {
-    return dequeue(&senders, task, chanop);
+    return dequeue(&senders, task, pos);
 }
 
 
 template<class T>
 void
-Channel<T>::Impl::enqueue_read(Task::Handle task, Channel_size selpos, void* valuep)
+Channel<T>::Impl::enqueue_read(Task::Handle task, Channel_size pos, void* valuep)
 {
-    enqueue_read(task, selpos, static_cast<T*>(valuep));
+    enqueue_read(task, pos, static_cast<T*>(valuep));
 }
 
 
 template<class T>
 inline void
-Channel<T>::Impl::enqueue_read(Task::Handle task, Channel_size selpos, T* valuep)
+Channel<T>::Impl::enqueue_read(Task::Handle task, Channel_size pos, T* valuep)
 {
-    const Receiver r{task, selpos, valuep};
+    const Receiver r{task, pos, valuep};
     receivers.push(r);
 }
 
@@ -1285,26 +1281,26 @@ Channel<T>::Impl::enqueue_readable_wait(Task::Handle task, Channel_size pos)
 
 template<class T>
 void
-Channel<T>::Impl::enqueue_write(Task::Handle task, Channel_size selpos, const void* rvaluep)
+Channel<T>::Impl::enqueue_write(Task::Handle task, Channel_size pos, const void* rvaluep)
 {
-    enqueue_write(task, selpos, static_cast<const T*>(rvaluep));
+    enqueue_write(task, pos, static_cast<const T*>(rvaluep));
 }
 
 
 template<class T>
 void
-Channel<T>::Impl::enqueue_write(Task::Handle task, Channel_size selpos, void* lvaluep)
+Channel<T>::Impl::enqueue_write(Task::Handle task, Channel_size pos, void* lvaluep)
 {
-    enqueue_write(task, selpos, static_cast<T*>(lvaluep));
+    enqueue_write(task, pos, static_cast<T*>(lvaluep));
 }
 
 
 template<class T>
 template<class U>
 inline void
-Channel<T>::Impl::enqueue_write(Task::Handle task, Channel_size selpos, U* valuep)
+Channel<T>::Impl::enqueue_write(Task::Handle task, Channel_size pos, U* valuep)
 {
-    const Sender s{task, selpos, valuep};
+    const Sender s{task, pos, valuep};
     senders.push(s);
 }
 
@@ -1322,7 +1318,7 @@ template<class T>
 bool
 Channel<T>::Impl::is_readable() const
 {
-    return !(buffer.is_empty() && receivers.is_empty());
+    return !(buffer.is_empty() && senders.is_empty());
 }
 
 
@@ -1330,7 +1326,7 @@ template<class T>
 bool
 Channel<T>::Impl::is_writable() const
 {
-    return !(buffer.is_full() && receivers.is_empty());
+    return !(receivers.is_empty() && buffer.is_full());
 }
 
 
@@ -1370,16 +1366,16 @@ template<class T>
 void
 Channel<T>::Impl::read(void* valuep)
 {
-    read(static_cast<T*>(valuep));
+    read_element(static_cast<T*>(valuep), &buffer, &senders, &mutex);
 }
 
 
 template<class T>
-inline void
-Channel<T>::Impl::read(T* valuep)
+template<class U>
+inline bool
+Channel<T>::Impl::read_element(U* valuep, Buffer* bufp, Sender_queue* sendqp, Mutex* mtxp)
 {
-    if (!dequeue(&senders, valuep, &mutex))
-        buffer.pop(valuep);
+    return bufp->pop(valuep) || dequeue(sendqp, valuep, mtxp);
 }
 
 
@@ -1399,11 +1395,7 @@ Channel<T>::Impl::try_receive()
     optional<T> value;
     Lock        lock{mutex};
 
-    if (!buffer.is_empty())
-        buffer.pop(&value);
-    else
-        dequeue(&senders, &value, &mutex);
-
+    read_element(&value, &buffer, &senders, &mutex);
     return value;
 }
 
@@ -1412,17 +1404,8 @@ template<class T>
 bool
 Channel<T>::Impl::try_send(const T& value)
 {
-    bool is_sent{false};
     Lock lock{mutex};
-
-    if (dequeue(&receivers, &value, &mutex))
-        is_sent = true;
-    else if (!buffer.is_full()) {
-        buffer.push(value, &mutex);
-        is_sent = true;
-    }
-
-    return is_sent;
+    return write_element(&value, &buffer, &receivers, &mutex);
 }
 
 
@@ -1465,7 +1448,7 @@ template<class T>
 void
 Channel<T>::Impl::write(const void* rvaluep)
 {
-    write(static_cast<const T*>(rvaluep));
+    write_element(static_cast<const T*>(rvaluep), &buffer, &receivers, &mutex);
 }
 
 
@@ -1473,17 +1456,17 @@ template<class T>
 void
 Channel<T>::Impl::write(void* lvaluep)
 {
-    write(static_cast<T*>(lvaluep));
+    write_element(static_cast<T*>(lvaluep), &buffer, &receivers, &mutex);
 }
 
 
 template<class T>
 template<class U>
-inline void
-Channel<T>::Impl::write(U* valuep)
+inline bool
+Channel<T>::Impl::write_element(U* valuep, Buffer* bufp, Receiver_queue* recvqp, Mutex* mtxp)
 {
-    if (!dequeue(&receivers, valuep, &mutex))
-        buffer.push(move(*valuep), &mutex);
+    using std::move;
+    return dequeue(recvqp, valuep, mtxp) || bufp->push(move(*valuep), mtxp);
 }
 
 
@@ -2037,15 +2020,6 @@ Future<T>::value() const
 */
 template<class T>
 inline
-Future_all_awaitable<T>::Future_all_awaitable(const Vector* vp)
-    : first{vp->data()}
-    , last{first + vp->size()}
-{
-}
-
-
-template<class T>
-inline
 Future_all_awaitable<T>::Future_all_awaitable(const Future<T>* begin, const Future<T>* end)
     : first{begin}
     , last{end}
@@ -2079,24 +2053,34 @@ Future_all_awaitable<T>::await_suspend(Task::Handle task)
 
 template<class T>
 inline Future_all_awaitable<T>
-wait_all(const std::vector<Future<T>>& fs)
+wait_all(const Future<T>* first, const Future<T>* last)
 {
-    return Future_all_awaitable<T>(&fs);
+    return Future_all_awaitable<T>(first, last);
+}
+
+
+template<class T>
+inline Future_all_awaitable<T>
+wait_all(const vector<Future<T>>& fs)
+{
+    const Future<T>* first;
+    const Future<T>* last;
+
+    if (!fs.empty()) {
+        first = fs.data();
+        last = first + fs.size();
+    } else {
+        first = nullptr;
+        last = nullptr;
+    }
+
+    return wait_all(first, last);
 }
 
 
 /*
     Future Any Awaitable
 */
-template<class T>
-inline
-Future_any_awaitable<T>::Future_any_awaitable(const Vector* vp)
-    : first{vp->data()}
-    , last{first + vp->size()}
-{
-}
-
-
 template<class T>
 inline
 Future_any_awaitable<T>::Future_any_awaitable(const Future<T>* begin, const Future<T>* end)
@@ -2115,7 +2099,7 @@ Future_any_awaitable<T>::await_ready()
 
 
 template<class T>
-inline typename std::vector<Future<T>>::size_type
+inline Channel_size
 Future_any_awaitable<T>::await_resume()
 {
     return task.promise().selected_future();
@@ -2134,9 +2118,28 @@ Future_any_awaitable<T>::await_suspend(Task::Handle h)
 
 template<class T>
 inline Future_any_awaitable<T>
-wait_any(const std::vector<Future<T>>& fs)
+wait_any(const Future<T>* first, const Future<T>* last)
 {
-    return Future_any_awaitable<T>(&fs);
+    return Future_any_awaitable<T>(first, last);
+}
+
+
+template<class T>
+inline Future_any_awaitable<T>
+wait_any(const vector<Future<T>>& fs)
+{
+    const Future<T>* first;
+    const Future<T>* last;
+
+    if (!fs.empty()) {
+        first = fs.data();
+        last = first + fs.size();
+    } else {
+        first = nullptr;
+        last = nullptr;
+    }
+
+    return wait_any(first, last);
 }
 
 
