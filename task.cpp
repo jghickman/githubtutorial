@@ -102,16 +102,15 @@ Task::Channel_selection::Sort_guard::~Sort_guard()
 }
 
 
-inline void
-Task::Channel_selection::Sort_guard::dismiss()
-{
-    first = last;
-}
-
-
 /*
     Task Channel Selection
 */
+inline
+Task::Channel_selection::Channel_selection()
+{
+}
+
+
 Channel_size
 Task::Channel_selection::count_ready(const Channel_operation* first, const Channel_operation* last)
 {
@@ -205,11 +204,9 @@ Task::Channel_selection::select(Task::Handle task, Channel_operation* first, Cha
     nenqueued   = 0;
     winner      = select_ready(first, last);
 
-    // If nothing is ready, enqueue the operations on their channels and
-    // keep them in lock order until we awake.
+    // If nothing is ready, enqueue the operations.
     if (!winner) {
         nenqueued = enqueue(task, first, last);
-        chansort.dismiss();
         begin = first;
         end = last;
     }
@@ -285,6 +282,12 @@ Task::Future_selection::Channel_locks::~Channel_locks()
 /*
     Task Future Selection
 */
+inline
+Task::Future_selection::Future_selection()
+{
+}
+
+
 Channel_size
 Task::Future_selection::complete(Task::Handle task, const Future_wait_vector& futures, const Channel_wait_vector& chans, Channel_size pos)
 {
@@ -396,6 +399,12 @@ Task::Future_selection::sort_channels(Channel_wait_vector* waitsp)
 /*
     Task Promise
 */
+Task::Promise::Promise()
+    : taskstat{Status::ready}
+{
+}
+
+
 inline void
 Task::Promise::make_ready()
 {
