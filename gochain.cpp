@@ -9,8 +9,11 @@
 #include <windows.h>
 
 
+
 using namespace Isptech::Concurrency;
 using namespace std;
+
+
 
 
 #if 0
@@ -147,39 +150,94 @@ add_one(int n)
 }
 
 
+int
+two()
+{
+    return 2;
+}
+
+int
+four()
+{
+    return 4;
+}
+
+
+const int done = 0;
+const int error = -1;
+
+
 Task
-add_one_task(int n, Send_channel<int> results)
+wait_all_task(int n, Send_channel<int> results)
 {
     using Future_vector = std::vector<Future<int>>;
     Future_vector fs;
 
-    fs.push_back(async(add_one, n));
-    fs.push_back(async(add_one, n + 1));
+    fs.push_back(async(two));
+    fs.push_back(async(four));
 
     co_await wait_all(fs);
 
-    for (int i = 0; i < fs.size(); ++i) {
-        int r;
+    int r = done;
+
+    for (int i = 0; i < fs.size() && r != error; ++i) {
         try {
             r = co_await fs[i].get();
         }
         catch (...) {
-            r = -1;
+            r = error;
         }
 
         co_await results.send(r);
     }
+
+    co_await results.send(done);
+}
+
+
+Task
+wait_any_task(int n, Send_channel<int> results)
+{
+    using Future_vector = std::vector<Future<int>>;
+    Future_vector fs;
+
+    fs.push_back(async(two));
+    fs.push_back(async(four));
+
+    std::size_t i = co_await wait_any(fs);
+
+    int r;
+
+    try {
+        r = co_await fs[i].get();
+    }
+    catch (...) {
+        r = -1;
+    }
+
+    co_await results.send(r);
+    co_await results.send(done);
 }
 
 
 void
 main(int argc, char* argv[])
 {
-
+    
     Channel<int> results = make_channel<int>(1);
 
-    start(add_one_task, 0, results);
-    cout << "result = " << blocking_receive(results) << endl;
+    start(wait_all_task, 0, results);
+
+    cout << "results = {" << blocking_receive(results);
+
+    int n = blocking_receive(results);
+    while (n != done && n != error) {
+        cout << ", " << n;
+        n = blocking_receive(results);
+    }
+
+    cout << '}' << endl;
+
     char c;
     cin >> c;
 }
