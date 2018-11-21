@@ -93,6 +93,13 @@ Task::Future_selection::Channel_wait::dequeue(Task::Handle task, Channel_size po
 
 
 inline void
+Task::Future_selection::Channel_wait::dequeue_locked(Task::Handle task, Channel_size pos) const
+{
+    chanp->dequeue_readable_wait(task, pos);
+}
+
+
+inline void
 Task::Future_selection::Channel_wait::enqueue(Task::Handle task, Channel_size pos) const
 {
     chanp->enqueue_readable_wait(task, pos);
@@ -175,6 +182,14 @@ Task::Future_selection::Future_wait::dequeue(Task::Handle task, const Channel_wa
 }
 
 
+inline void
+Task::Future_selection::Future_wait::dequeue_locked(Task::Handle task, const Channel_wait_vector& chans) const
+{
+    chans[vchan].dequeue_locked(task, vchan);
+    chans[echan].dequeue_locked(task, echan);
+}
+
+
 inline Channel_size
 Task::Future_selection::Future_wait::error() const
 {
@@ -235,10 +250,10 @@ Task::Future_selection::Future_transform::Future_transform(const Future<T>* firs
 
 
 /*
-    Task Future Selection Wait Transformation
+    Task Future Selection Locked Channel Wait Transformation
 */
 template<class T>
-Task::Future_selection::Wait_transform::Wait_transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
+Task::Future_selection::Transform_and_lock::Transform_and_lock(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
     : transform(first, last, fwaitsp, cwaitsp)
     , sort(cwaitsp)
     , lock(cwaitsp)
@@ -258,13 +273,23 @@ Task::Future_selection::selected() const
 
 template<class T>
 bool
-Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Future<T>* last)
+Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtimep)
 {
-    Wait_transform transform{first, last, &futures, &channels};
+    Transform_and_lock transform{first, last, &futures, &channels};
 
     type = Type::all;
     winner.reset();
     nenqueued = enqueue_not_ready(task, futures, channels);
+
+    if (maxtimep && nenqueued > 0) {
+        if (*maxtimep > 0ns)
+            start_timer(task, *maxtimep);
+        else {
+            dequeue_all(task, futures, channels);
+            nenqueued   = 0;
+            winner      = no_selection;
+        }
+    }
 
     return nenqueued == 0;
 }
@@ -272,9 +297,9 @@ Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Futu
 
 template<class T>
 bool
-Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Future<T>* last)
+Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
 {
-    Wait_transform transform{first, last, &futures, &channels};
+    Transform_and_lock transform{first, last, &futures, &channels};
 
     type        = Type::any;
     nenqueued   = 0;
@@ -384,24 +409,24 @@ Task::Promise::try_select(Channel_operation* first, Channel_operation* last)
 
 template<class T>
 void
-Task::Promise::wait_all(const Future<T>* first, const Future<T>* last)
+Task::Promise::wait_all(const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
 {
     const Handle    task{Handle::from_promise(*this)};
     Lock            lock{mutex};
 
-    if (!futures.wait_all(task, first, last))
+    if (!futures.wait_all(task, first, last, maxtime))
         suspend(&lock);
 }
 
 
 template<class T>
 void
-Task::Promise::wait_any(const Future<T>* first, const Future<T>* last)
+Task::Promise::wait_any(const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
 {
     const Handle    task{Handle::from_promise(*this)};
     Lock            lock{mutex};
 
-    if (!futures.wait_any(task, first, last))
+    if (!futures.wait_any(task, first, last, maxtime))
         suspend(&lock);
 }
 
@@ -497,6 +522,11 @@ template<class T>
 inline void
 Channel<T>::Readable_wait::notify(Mutex* mtxp) const
 {
+    /*
+        The waiting task could now be awake and simultaneously trying to
+        dequeue this wait, so temporarily unlock the channel to void a
+        deadly embrace between reader and writer.
+    */
     mtxp->unlock();
     select(taskh, waitpos);
     mtxp->lock();
@@ -2016,9 +2046,10 @@ Future<T>::value() const
 */
 template<class T>
 inline
-Future_all_awaitable<T>::Future_all_awaitable(const Future<T>* begin, const Future<T>* end)
+Future_all_awaitable<T>::Future_all_awaitable(const Future<T>* begin, const Future<T>* end, const optional<nanoseconds>& maxtime)
     : first{begin}
     , last{end}
+    , time{maxtime}
 {
 }
 
@@ -2042,22 +2073,22 @@ template<class T>
 inline bool
 Future_all_awaitable<T>::await_suspend(Task::Handle task)
 {
-    task.promise().wait_all(first, last);
+    task.promise().wait_all(first, last, time);
     return true;
 }
 
 
 template<class T>
 inline Future_all_awaitable<T>
-wait_all(const Future<T>* first, const Future<T>* last, const optional<nanoseconds>&)
+wait_all(const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
 {
-    return Future_all_awaitable<T>(first, last);
+    return Future_all_awaitable<T>(first, last, maxtime);
 }
 
 
 template<class T>
 inline Future_all_awaitable<T>
-wait_all(const vector<Future<T>>& fs, const optional<nanoseconds>&)
+wait_all(const vector<Future<T>>& fs, const optional<nanoseconds>& maxtime)
 {
     const Future<T>* first;
     const Future<T>* last;
@@ -2070,7 +2101,7 @@ wait_all(const vector<Future<T>>& fs, const optional<nanoseconds>&)
         last = nullptr;
     }
 
-    return wait_all(first, last);
+    return wait_all(first, last, maxtime);
 }
 
 
@@ -2079,9 +2110,10 @@ wait_all(const vector<Future<T>>& fs, const optional<nanoseconds>&)
 */
 template<class T>
 inline
-Future_any_awaitable<T>::Future_any_awaitable(const Future<T>* begin, const Future<T>* end)
+Future_any_awaitable<T>::Future_any_awaitable(const Future<T>* begin, const Future<T>* end, const optional<nanoseconds>& maxtime)
     : first{begin}
     , last{end}
+    , time{maxtime}
 {
 }
 
@@ -2107,22 +2139,22 @@ inline bool
 Future_any_awaitable<T>::await_suspend(Task::Handle h)
 {
     task = h;
-    task.promise().wait_any(first, last);
+    task.promise().wait_any(first, last, time);
     return true;
 }
 
 
 template<class T>
 inline Future_any_awaitable<T>
-wait_any(const Future<T>* first, const Future<T>* last, const optional<nanoseconds>&)
+wait_any(const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
 {
-    return Future_any_awaitable<T>(first, last);
+    return Future_any_awaitable<T>(first, last, maxtime);
 }
 
 
 template<class T>
 inline Future_any_awaitable<T>
-wait_any(const vector<Future<T>>& fs, const optional<nanoseconds>&)
+wait_any(const vector<Future<T>>& fs, const optional<nanoseconds>& maxtime)
 {
     const Future<T>* first;
     const Future<T>* last;
@@ -2135,7 +2167,7 @@ wait_any(const vector<Future<T>>& fs, const optional<nanoseconds>&)
         last = nullptr;
     }
 
-    return wait_any(first, last);
+    return wait_any(first, last, maxtime);
 }
 
 

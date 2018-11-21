@@ -284,12 +284,26 @@ Task::Future_selection::complete(Task::Handle task, const Future_wait_vector& fu
 }
 
 
+void
+Task::Future_selection::complete_timer(Time_point)
+{
+}
+
+
 Channel_size
 Task::Future_selection::count_ready(const Future_wait_vector& fs, const Channel_wait_vector& chans)
 {
     return count_if(fs.begin(), fs.end(), [&](const auto& future) {
         return future.is_ready(chans);
     });
+}
+
+
+void
+Task::Future_selection::dequeue_all(Task::Handle task, const Future_wait_vector& fs, const Channel_wait_vector& chans)
+{
+    for (const auto& future : fs)
+        future.dequeue_locked(task, chans);
 }
 
 

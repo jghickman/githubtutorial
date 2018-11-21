@@ -59,9 +59,12 @@ template<class T> class Future;
 class Channel_base;
 class Channel_operation;
 using Channel_size = std::ptrdiff_t;
+using Time_point = std::chrono::high_resolution_clock::time_point;
 using boost::optional;
 using std::exception_ptr;
 using std::chrono::nanoseconds;
+#pragma warning(disable: 4455)
+using std::chrono::operator""ns;
 using std::vector;
 
 
@@ -151,9 +154,9 @@ private:
         Channel_selection(const Channel_selection&) = delete;
         Channel_selection& operator=(const Channel_selection&) = delete;
 
-        // Selection
+        // Selection Operations
         bool                            select(Task::Handle, Channel_operation*, Channel_operation*);
-        Select_status                   select(Task::Handle, Channel_size op);
+        Select_status                   select(Task::Handle, Channel_size pos);
         Channel_size                    selected() const;
         static optional<Channel_size>   try_select(Channel_operation*, Channel_operation*);
 
@@ -211,9 +214,10 @@ private:
         Future_selection(const Future_selection&) = delete;
         Future_selection& operator=(const Future_selection&) = delete;
 
-        // Selection
-        template<class T> bool  wait_any(Task::Handle, const Future<T>*, const Future<T>*);
-        template<class T> bool  wait_all(Task::Handle, const Future<T>*, const Future<T>*);
+        // Selection Operations
+        template<class T> bool  wait_any(Task::Handle, const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
+        template<class T> bool  wait_all(Task::Handle, const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
+        void                    complete_timer(Time_point);
         Select_status           select_channel(Task::Handle, Channel_size pos);
         Channel_size            selected() const;
 
@@ -230,9 +234,10 @@ private:
             Channel_wait() = default;
             Channel_wait(Channel_base*, Channel_size fpos);
 
-            // Channel_waiting
+            // Enqueue/Dequeue
             void enqueue(Task::Handle, Channel_size pos) const;
             bool dequeue(Task::Handle, Channel_size pos) const;
+            void dequeue_locked(Task::Handle, Channel_size pos) const;
 
             // Observers
             bool            is_ready() const;
@@ -264,6 +269,7 @@ private:
             // Enqueue/Dequeue
             void enqueue(Task::Handle, const Channel_wait_vector&) const;
             bool dequeue(Task::Handle, const Channel_wait_vector&) const;
+            void dequeue_locked(Task::Handle, const Channel_wait_vector&) const;
 
             // Completion
             void complete(Task::Handle, const Channel_wait_vector&, Channel_size pos) const;
@@ -309,10 +315,10 @@ private:
             template<class T> Future_transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
         };
 
-        class Wait_transform {
+        class Transform_and_lock {
         public:
             // Construct
-            template<class T> Wait_transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
+            template<class T> Transform_and_lock(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
 
         private:
             // Data
@@ -321,15 +327,19 @@ private:
             Channel_locks       lock;
         };
 
+        static const Channel_size no_selection{-1};
+
         // Selection
         static Channel_size             complete(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&, Channel_size chanpos);
         static Channel_size             count_ready(const Future_wait_vector&, const Channel_wait_vector&);
+        static void                     dequeue_all(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
         static Channel_size             dequeue_not_ready(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
         static void                     enqueue_all(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
         static Channel_size             enqueue_not_ready(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
         static optional<Channel_size>   pick_ready(const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
         static optional<Channel_size>   select_ready(const Future_wait_vector&, const Channel_wait_vector&);
         static void                     sort_channels(Channel_wait_vector*);
+        static void                     start_timer(Task::Handle, nanoseconds wait);
 
         // Data
         Type                    type;
@@ -367,9 +377,10 @@ public:
         Select_status select_readable(Channel_size pos);
 
         // Future Selection
-        template<class T> void  wait_all(const Future<T>*, const Future<T>*);
-        template<class T> void  wait_any(const Future<T>*, const Future<T>*);
+        template<class T> void  wait_all(const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
+        template<class T> void  wait_any(const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
         Channel_size            selected_future() const;
+        void                    complete_timer(Time_point);
 
         // Execution
         void    make_ready();
@@ -1069,7 +1080,7 @@ template<class T>
 class Future_all_awaitable {
 public:
     // Construct
-    Future_all_awaitable(const Future<T>*, const Future<T>*);
+    Future_all_awaitable(const Future<T>*, const Future<T>*, const optional<nanoseconds>& maxtime);
 
     // Awaitable Operations
     bool await_ready();
@@ -1078,8 +1089,9 @@ public:
 
 private:
     // Data
-    const Future<T>* first;
-    const Future<T>* last;
+    const Future<T>*        first;
+    const Future<T>*        last;
+    optional<nanoseconds>   time;
 };
 
 
@@ -1090,7 +1102,7 @@ template<class T>
 class Future_any_awaitable {
 public:
     // Construct
-    Future_any_awaitable(const Future<T>*, const Future<T>*);
+    Future_any_awaitable(const Future<T>*, const Future<T>*, const optional<nanoseconds>& maxtime);
 
     // Awaitable Operations
     bool            await_ready();
@@ -1099,9 +1111,10 @@ public:
 
 private:
     // Data
-    const Future<T>*    first;
-    const Future<T>*    last;
-    Task::Handle        task;
+    const Future<T>*        first;
+    const Future<T>*        last;
+    optional<nanoseconds>   time;
+    Task::Handle            task;
 };
 
 
