@@ -42,16 +42,10 @@ Task::Channel_lock::~Channel_lock()
 
 
 /*
-    Task Selection Status
+    Task Select Status
 */
 inline
-Task::Selection_status::Selection_status()
-{
-}
-
-
-inline
-Task::Selection_status::Selection_status(Channel_size pos, bool complet)
+Task::Select_status::Select_status(Channel_size pos, bool complet)
     : selpos{pos}
     , iscomp{complet}
 {
@@ -59,14 +53,14 @@ Task::Selection_status::Selection_status(Channel_size pos, bool complet)
 
 
 inline bool
-Task::Selection_status::is_complete() const
+Task::Select_status::is_complete() const
 {
     return iscomp;
 }
 
 
 inline Channel_size
-Task::Selection_status::position() const
+Task::Select_status::position() const
 {
     return selpos;
 }
@@ -75,12 +69,6 @@ Task::Selection_status::position() const
 /*
     Task Future Selection Channel Wait
 */
-inline
-Task::Future_selection::Channel_wait::Channel_wait()
-{
-}
-
-
 inline
 Task::Future_selection::Channel_wait::Channel_wait(Channel_base* chp, Channel_size fpos)
     : chanp{chp}
@@ -154,12 +142,6 @@ Task::Future_selection::Channel_sort::Channel_sort(Channel_wait_vector* wsp)
     Task Future Selection Future Wait
 */
 inline
-Task::Future_selection::Future_wait::Future_wait()
-{
-}
-
-
-inline
 Task::Future_selection::Future_wait::Future_wait(bool* readyp, Channel_size vpos, Channel_size epos)
     : vchan{vpos}
     , echan{epos}
@@ -226,7 +208,7 @@ Task::Future_selection::Future_wait::value() const
 
 
 /*
-    Task Future Selection Wait Transform
+    Task Future Selection Wait Future Transformation
 */
 template<class T>
 Task::Future_selection::Future_transform::Future_transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
@@ -253,6 +235,18 @@ Task::Future_selection::Future_transform::Future_transform(const Future<T>* firs
 
 
 /*
+    Task Future Selection Wait Transformation
+*/
+template<class T>
+Task::Future_selection::Wait_transform::Wait_transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
+    : transform(first, last, fwaitsp, cwaitsp)
+    , sort(cwaitsp)
+    , lock(cwaitsp)
+{
+}
+
+
+/*
     Task Future Selection
 */
 inline Channel_size
@@ -266,12 +260,12 @@ template<class T>
 bool
 Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Future<T>* last)
 {
-    Future_transform    transform{first, last, &futures, &channels};
-    Channel_sort        sort{&channels};
-    Channel_locks       lock{&channels};
+    Wait_transform transform{first, last, &futures, &channels};
 
-    type        = Type::all;
-    nenqueued   = enqueue_not_ready(task, futures, channels);
+    type = Type::all;
+    winner.reset();
+    nenqueued = enqueue_not_ready(task, futures, channels);
+
     return nenqueued == 0;
 }
 
@@ -280,8 +274,7 @@ template<class T>
 bool
 Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Future<T>* last)
 {
-    Future_transform    transform{first, last, &futures, &channels};
-    Channel_locks       lock{&channels};
+    Wait_transform transform{first, last, &futures, &channels};
 
     type        = Type::any;
     nenqueued   = 0;
@@ -340,8 +333,8 @@ Task::Promise::select(Channel_operation* first, Channel_operation* last)
 }
 
 
-inline Task::Selection_status
-Task::Promise::select_channel(Channel_size pos)
+inline Task::Select_status
+Task::Promise::select_operation(Channel_size pos)
 {
     const Handle    task{Handle::from_promise(*this)};
     const Lock      lock{mutex};
@@ -350,10 +343,13 @@ Task::Promise::select_channel(Channel_size pos)
 }
 
 
-inline Channel_size
-Task::Promise::selected_channel() const
+inline Task::Select_status
+Task::Promise::select_readable(Channel_size pos)
 {
-    return channels.selected();
+    const Handle    task{Handle::from_promise(*this)};
+    const Lock      lock{mutex};
+
+    return futures.select_channel(task, pos);
 }
 
 
@@ -364,13 +360,10 @@ Task::Promise::selected_future() const
 }
 
 
-inline Task::Selection_status
-Task::Promise::select_readable(Channel_size chan)
+inline Channel_size
+Task::Promise::selected_operation() const
 {
-    const Handle    task{Handle::from_promise(*this)};
-    const Lock      lock{mutex};
-
-    return futures.select_channel(task, chan);
+    return channels.selected();
 }
 
 
@@ -382,11 +375,10 @@ Task::Promise::suspend(Lock* lockp)
 }
 
 
-template<Channel_size N>
 inline optional<Channel_size>
-Task::Promise::try_select(Channel_operation(&ops)[N])
+Task::Promise::try_select(Channel_operation* first, Channel_operation* last)
 {
-    return channels.try_select(ops);
+    return Channel_selection::try_select(first, last);
 }
 
 
@@ -494,25 +486,10 @@ swap(Task& x, Task& y)
 */
 template<class T>
 inline
-Channel<T>::Readable_wait::Readable_wait()
-{
-}
-
-
-template<class T>
-inline
-Channel<T>::Readable_wait::Readable_wait(Task::Handle task, Channel_size chanpos)
+Channel<T>::Readable_wait::Readable_wait(Task::Handle task, Channel_size pos)
     : taskh{task}
-    , chan{chanpos}
+    , waitpos{pos}
 {
-}
-
-
-template<class T>
-inline Channel_size
-Channel<T>::Readable_wait::channel() const
-{
-    return chan;
 }
 
 
@@ -521,16 +498,24 @@ inline void
 Channel<T>::Readable_wait::notify(Mutex* mtxp) const
 {
     mtxp->unlock();
-    select(taskh, chan);
+    select(taskh, waitpos);
     mtxp->lock();
 }
 
 
 template<class T>
-void
-Channel<T>::Readable_wait::select(Task::Handle task, Channel_size chan)
+inline Channel_size
+Channel<T>::Readable_wait::position() const
 {
-    const Task::Selection_status select = task.promise().select_readable(chan);
+    return waitpos;
+}
+
+
+template<class T>
+void
+Channel<T>::Readable_wait::select(Task::Handle task, Channel_size pos)
+{
+    const Task::Select_status select = task.promise().select_readable(pos);
 
     if (select.is_complete())
         scheduler.resume(task);
@@ -559,23 +544,23 @@ Channel<T>::Buffer::Buffer(Channel_size maxsize)
 
 template<class T>
 inline void
-Channel<T>::Buffer::enqueue(const Readable_wait& w)
+Channel<T>::Buffer::enqueue(const Readable_wait& r)
 {
-    readers.push_back(w);
+    readers.push_back(r);
 }
 
 
 template<class T>
 inline bool
-Channel<T>::Buffer::dequeue(const Readable_wait& w)
+Channel<T>::Buffer::dequeue(const Readable_wait& r)
 {
     using std::find;
 
-    const auto wp       = find(readers.begin(), readers.end(), w);
-    const bool is_found = wp != readers.end();
+    const auto rp       = find(readers.begin(), readers.end(), r);
+    const bool is_found = rp != readers.end();
 
     if (is_found)
-        readers.erase(wp);
+        readers.erase(rp);
 
     return is_found;
 }
@@ -674,7 +659,7 @@ template<class U>
 inline typename Channel<T>::Io_queue<U>::Iterator
 Channel<T>::Io_queue<U>::end()
 {
-    return ws.end();
+    return waiters.end();
 }
 
 
@@ -683,7 +668,7 @@ template<class U>
 inline void
 Channel<T>::Io_queue<U>::erase(Iterator p)
 {
-    ws.erase(p);
+    waiters.erase(p);
 }
 
 
@@ -692,7 +677,9 @@ template<class U>
 inline typename Channel<T>::Io_queue<U>::Iterator
 Channel<T>::Io_queue<U>::find(Task::Handle task, Channel_size pos)
 {
-    return std::find_if(ws.begin(), ws.end(), operation_eq(task, pos));
+    using std::find_if;
+
+    return find_if(waiters.begin(), waiters.end(), waiter_eq(task, pos));
 }
 
 
@@ -703,8 +690,8 @@ Channel<T>::Io_queue<U>::is_found(const Waiter& w) const
 {
     using std::find;
 
-    const auto p = find(ws.begin(), ws.end(), w);
-    return p != ws.end();
+    const auto p = find(waiters.begin(), waiters.end(), w);
+    return p != waiters.end();
 }
 
 
@@ -713,7 +700,7 @@ template<class U>
 inline bool
 Channel<T>::Io_queue<U>::is_empty() const
 {
-    return ws.empty();
+    return waiters.empty();
 }
 
 
@@ -722,9 +709,9 @@ template<class U>
 inline U
 Channel<T>::Io_queue<U>::pop()
 {
-    const U w = ws.front();
+    const U w = waiters.front();
 
-    ws.pop_front();
+    waiters.pop_front();
     return w;
 }
 
@@ -734,7 +721,7 @@ template<class U>
 inline void
 Channel<T>::Io_queue<U>::push(const Waiter& w)
 {
-    ws.push_back(w);
+    waiters.push_back(w);
 }
 
 
@@ -747,7 +734,7 @@ Channel<T>::Receiver::Receiver(Task::Handle tsk, Channel_size pos, T* valuep)
     : taskh{tsk}
     , oper{pos}
     , valp{valuep}
-    , threadcondp{nullptr}
+    , readyp{nullptr}
 {
     assert(tsk);
     assert(valuep);
@@ -756,11 +743,11 @@ Channel<T>::Receiver::Receiver(Task::Handle tsk, Channel_size pos, T* valuep)
 
 template<class T>
 inline
-Channel<T>::Receiver::Receiver(Condition_variable* waiterp, T* valuep)
+Channel<T>::Receiver::Receiver(Condition* waitp, T* valuep)
     : valp{valuep}
-    , threadcondp{waiterp}
+    , readyp{waitp}
 {
-    assert(waiterp);
+    assert(waitp);
     assert(valuep);
 }
 
@@ -786,7 +773,7 @@ Channel<T>::Receiver::dequeue(U* sendbufp, Mutex* mtxp) const
         mtxp->lock();
     } else {
         *valp = move(*sendbufp);
-        threadcondp->notify_one();
+        readyp->notify_one();
     }
 
     return is_dequeued;
@@ -804,14 +791,14 @@ Channel<T>::Receiver::operation() const
 template<class T>
 template<class U>
 bool
-Channel<T>::Receiver::select(Task::Handle task, Channel_size oper, T* valp, U* sendbufp)
+Channel<T>::Receiver::select(Task::Handle task, Channel_size pos, T* valp, U* sendbufp)
 {
     using std::move;
 
-    const Task::Selection_status    select      = task.promise().select_channel(oper);
+    const Task::Select_status    select      = task.promise().select_operation(pos);
     bool                            is_selected = false;
 
-    if (select.position() == oper) {
+    if (select.position() == pos) {
         *valp = move(*sendbufp);
         is_selected = true;
     }
@@ -841,7 +828,7 @@ Channel<T>::Sender::Sender(Task::Handle tsk, Channel_size pos, const T* rvaluep)
     , oper{pos}
     , rvalp{rvaluep}
     , lvalp{nullptr}
-    , threadcondp{nullptr}
+    , readyp{nullptr}
 {
     assert(tsk);
     assert(rvaluep);
@@ -855,7 +842,7 @@ Channel<T>::Sender::Sender(Task::Handle tsk, Channel_size pos, T* lvaluep)
     , oper{pos}
     , rvalp{nullptr}
     , lvalp{lvaluep}
-    , threadcondp{nullptr}
+    , readyp{nullptr}
 {
     assert(tsk);
     assert(lvaluep);
@@ -864,24 +851,24 @@ Channel<T>::Sender::Sender(Task::Handle tsk, Channel_size pos, T* lvaluep)
 
 template<class T>
 inline
-Channel<T>::Sender::Sender(Condition_variable* waiterp, const T* rvaluep)
+Channel<T>::Sender::Sender(Condition* waitp, const T* rvaluep)
     : rvalp{rvaluep}
     , lvalp{nullptr}
-    , threadcondp{waiterp}
+    , readyp{waitp}
 {
-    assert(waiterp);
+    assert(waitp);
     assert(rvaluep);
 }
 
 
 template<class T>
 inline
-Channel<T>::Sender::Sender(Condition_variable* waiterp, T* lvaluep)
+Channel<T>::Sender::Sender(Condition* waitp, T* lvaluep)
     : rvalp{nullptr}    
     , lvalp{lvaluep}
-    , threadcondp{waiterp}
+    , readyp{waitp}
 {
-    assert(waiterp);
+    assert(waitp);
     assert(lvaluep);
 }
 
@@ -905,7 +892,7 @@ Channel<T>::Sender::dequeue(U* recvbufp, Mutex* mtxp) const
         mtxp->lock();
     } else {
         move(lvalp, rvalp, recvbufp);
-        threadcondp->notify_one();
+        readyp->notify_one();
     }
 
     return is_dequeued;
@@ -947,12 +934,12 @@ Channel<T>::Sender::operation() const
 template<class T>
 template<class U>
 bool
-Channel<T>::Sender::select(Task::Handle task, Channel_size oper, T* lvalp, const T* rvalp, U* recvbufp)
+Channel<T>::Sender::select(Task::Handle task, Channel_size pos, T* lvalp, const T* rvalp, U* recvbufp)
 {
-    const Task::Selection_status    select      = task.promise().select_channel(oper);
+    const Task::Select_status    select      = task.promise().select_operation(pos);
     bool                            is_selected = false;
 
-    if (select.position() == oper) {
+    if (select.position() == pos) {
         move(lvalp, rvalp, recvbufp);
         is_selected = true;
     }
@@ -977,15 +964,16 @@ Channel<T>::Sender::task() const
 */
 template<class T>
 inline
-Channel<T>::Channel()
+Channel<T>::Channel(Impl_ptr p)
+    : pimpl{std::move(p)}
 {
 }
 
 
 template<class T>
 inline
-Channel<T>::Channel(Impl_ptr p)
-    : pimpl{std::move(p)}
+Channel<T>::Channel(Channel&& other)
+    : pimpl{std::move(other.pimpl)}
 {
 }
 
@@ -1032,7 +1020,7 @@ Channel<T>::make_send(T&& value) const
 
 template<class T>
 inline Channel<T>&
-Channel<T>::operator=(Channel other)
+Channel<T>::operator=(Channel&& other)
 {
     pimpl = std::move(other.pimpl);
     return *this;
@@ -1422,7 +1410,7 @@ template<class U>
 void
 Channel<T>::Impl::wait_for_receiver(Sender_queue* waitqp, U* sendbufp, Lock* lockp)
 {
-    Condition_variable  ready;
+    Condition  ready;
     const Sender        ownsend{&ready, sendbufp};
 
     // Enqueue our send and wait for a receiver to remove it.
@@ -1435,7 +1423,7 @@ template<class T>
 void
 Channel<T>::Impl::wait_for_sender(Receiver_queue* waitqp, T* recvbufp, Lock* lockp)
 {
-    Condition_variable  ready;
+    Condition  ready;
     const Receiver      ownrecv{&ready, recvbufp};
 
     // Enqueue our receive and wait for a sender to remove it.
@@ -1797,7 +1785,7 @@ Channel_select_awaitable::await_ready()
 inline Channel_size
 Channel_select_awaitable::await_resume()
 {
-    return task.promise().selected_channel();
+    return task.promise().selected_operation();
 }
 
 
@@ -1826,9 +1814,17 @@ select(Channel_operation (&ops)[N])
 */
 template<Channel_size N>
 inline optional<Channel_size>
+try_select(Channel_operation* first, Channel_operation* last)
+{
+    return Task::Promise::try_select(first, last);
+}
+
+
+template<Channel_size N>
+inline optional<Channel_size>
 try_select(Channel_operation (&ops)[N])
 {
-    return Task::Promise::try_select(ops);
+    return try_select(begin(ops), end(ops));
 }
 
 
@@ -2053,7 +2049,7 @@ Future_all_awaitable<T>::await_suspend(Task::Handle task)
 
 template<class T>
 inline Future_all_awaitable<T>
-wait_all(const Future<T>* first, const Future<T>* last)
+wait_all(const Future<T>* first, const Future<T>* last, const optional<nanoseconds>&)
 {
     return Future_all_awaitable<T>(first, last);
 }
@@ -2061,7 +2057,7 @@ wait_all(const Future<T>* first, const Future<T>* last)
 
 template<class T>
 inline Future_all_awaitable<T>
-wait_all(const vector<Future<T>>& fs)
+wait_all(const vector<Future<T>>& fs, const optional<nanoseconds>&)
 {
     const Future<T>* first;
     const Future<T>* last;
@@ -2118,7 +2114,7 @@ Future_any_awaitable<T>::await_suspend(Task::Handle h)
 
 template<class T>
 inline Future_any_awaitable<T>
-wait_any(const Future<T>* first, const Future<T>* last)
+wait_any(const Future<T>* first, const Future<T>* last, const optional<nanoseconds>&)
 {
     return Future_any_awaitable<T>(first, last);
 }
@@ -2126,7 +2122,7 @@ wait_any(const Future<T>* first, const Future<T>* last)
 
 template<class T>
 inline Future_any_awaitable<T>
-wait_any(const vector<Future<T>>& fs)
+wait_any(const vector<Future<T>>& fs, const optional<nanoseconds>&)
 {
     const Future<T>* first;
     const Future<T>* last;

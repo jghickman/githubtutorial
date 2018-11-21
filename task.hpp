@@ -60,8 +60,8 @@ class Channel_base;
 class Channel_operation;
 using Channel_size = std::ptrdiff_t;
 using boost::optional;
-using std::chrono::nanoseconds;
 using std::exception_ptr;
+using std::chrono::nanoseconds;
 using std::vector;
 
 
@@ -85,11 +85,11 @@ public:
 
     enum class Status { ready, suspended, done };
 
-    class Selection_status {
+    class Select_status {
     public:
         // Construct
-        Selection_status();
-        Selection_status(Channel_size pos, bool comp);
+        Select_status() = default;
+        Select_status(Channel_size pos, bool comp);
 
         // Observers
         Channel_size    position() const;
@@ -147,15 +147,15 @@ private:
     class Channel_selection {
     public:
         // Construct/Copy 
-        Channel_selection();
+        Channel_selection() = default;
         Channel_selection(const Channel_selection&) = delete;
         Channel_selection& operator=(const Channel_selection&) = delete;
 
         // Selection
-        bool                                                    select(Task::Handle, Channel_operation*, Channel_operation*);
-        Selection_status                                        select(Task::Handle, Channel_size op);
-        Channel_size                                            selected() const;
-        template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
+        bool                            select(Task::Handle, Channel_operation*, Channel_operation*);
+        Select_status                   select(Task::Handle, Channel_size op);
+        Channel_size                    selected() const;
+        static optional<Channel_size>   try_select(Channel_operation*, Channel_operation*);
 
     private:
         // Names/Types
@@ -207,14 +207,14 @@ private:
     class Future_selection {
     public:
         // Construct/Copy
-        Future_selection();
+        Future_selection() = default;
         Future_selection(const Future_selection&) = delete;
         Future_selection& operator=(const Future_selection&) = delete;
 
         // Selection
         template<class T> bool  wait_any(Task::Handle, const Future<T>*, const Future<T>*);
         template<class T> bool  wait_all(Task::Handle, const Future<T>*, const Future<T>*);
-        Selection_status        select_channel(Task::Handle, Channel_size pos);
+        Select_status           select_channel(Task::Handle, Channel_size pos);
         Channel_size            selected() const;
 
         // Friends
@@ -227,7 +227,7 @@ private:
         class Channel_wait {
         public:
             // Construct
-            Channel_wait();
+            Channel_wait() = default;
             Channel_wait(Channel_base*, Channel_size fpos);
 
             // Channel_waiting
@@ -254,7 +254,7 @@ private:
         class Future_wait {
         public:
             // Construct
-            Future_wait();
+            Future_wait() = default;
             Future_wait(bool* readyp, Channel_size vpos, Channel_size epos);
 
             // Channels
@@ -278,12 +278,6 @@ private:
 
         using Future_wait_vector = std::vector<Future_wait>;
 
-        class Future_transform {
-        public:
-            // Construct
-            template<class T> Future_transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
-        };
-
         class Channel_locks {
         public:
             // Construct/Copy/Destroy
@@ -301,10 +295,30 @@ private:
         public:
             // Construct
             explicit Channel_sort(Channel_wait_vector*);
+            Channel_sort(const Channel_sort&) = delete;
+            Channel_sort& operator=(const Channel_sort&) = delete;
 
         private:
             // Data
             Channel_wait_vector* waitsp;
+        };
+
+        class Future_transform {
+        public:
+            // Construct
+            template<class T> Future_transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
+        };
+
+        class Wait_transform {
+        public:
+            // Construct
+            template<class T> Wait_transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
+
+        private:
+            // Data
+            Future_transform    transform;
+            Channel_sort        sort;
+            Channel_locks       lock;
         };
 
         // Selection
@@ -343,14 +357,14 @@ public:
         Final_suspend   final_suspend();
     
         // Channel Operation Selection
-        template<Channel_size N> void                           select(Channel_operation (&ops)[N]);
-        void                                                    select(Channel_operation*, Channel_operation*);
-        Selection_status                                        select_channel(Channel_size);
-        Channel_size                                            selected_channel() const;
-        template<Channel_size N> static optional<Channel_size>  try_select(Channel_operation (&ops)[N]);
+        template<Channel_size N> void   select(Channel_operation (&ops)[N]);
+        void                            select(Channel_operation*, Channel_operation*);
+        Select_status                   select_operation(Channel_size);
+        Channel_size                    selected_operation() const;
+        static optional<Channel_size>   try_select(Channel_operation*, Channel_operation*);
 
         // Channel Event Selection
-        Selection_status select_readable(Channel_size chan);
+        Select_status select_readable(Channel_size pos);
 
         // Future Selection
         template<class T> void  wait_all(const Future<T>*, const Future<T>*);
@@ -385,8 +399,8 @@ private:
     Task Launch
 */
 template<class TaskFun, class... Args> void                                 start(TaskFun, Args&&...);
-//template<class Fun> Future<std::result_of_t<Fun()>>                         async(Fun);
 template<class Fun, class... Args> Future<std::result_of_t<Fun(Args&&...)>> async(Fun, Args&&...);
+//template<class Fun> Future<std::result_of_t<Fun()>>                         async(Fun);
 
 
 /*
@@ -442,9 +456,10 @@ public:
     using Value = T;
 
     // Construct/Move
-    Channel();
+    Channel() = default;
+    Channel(Channel&&);
+    Channel& operator=(Channel&&);
     friend Channel make_channel<T>(Channel_size capacity);
-    Channel& operator=(Channel);
     inline friend void swap(Channel& x, Channel& y) { swap(x.pimpl, y.pimpl;); }
 
     // Size and Capacity
@@ -459,7 +474,7 @@ public:
     bool                try_send(const T&) const;
     optional<T>         try_receive() const;
 
-    // Blocking Send/Receive (can move outside class body in VS 2017)
+    // Blocking Send/Receive (move definitions outside class body in VS 2017)
     inline friend void  blocking_send(const Channel& c, const T& x) { c.pimpl->blocking_send(&x); }
     inline friend void  blocking_send(const Channel& c, T&& x)      { c.pimpl->blocking_send(&x); }
     inline friend T     blocking_receive(const Channel& c)          { return c.pimpl->blocking_receive(); }
@@ -482,19 +497,19 @@ public:
 
 private:
     // Names/Types
-    using Mutex                 = std::mutex;
-    using Lock                  = std::unique_lock<Mutex>;
-    using Condition_variable    = std::condition_variable;
+    using Mutex     = std::mutex;
+    using Lock      = std::unique_lock<Mutex>;
+    using Condition = std::condition_variable;
 
     class Readable_wait : boost::equality_comparable<Readable_wait> {
     public:
         // Construct
-        Readable_wait();
-        Readable_wait(Task::Handle, Channel_size chanpos);
+        Readable_wait() = default;
+        Readable_wait(Task::Handle, Channel_size pos);
 
         // Identity
         Task::Handle task() const;
-        Channel_size channel() const;
+        Channel_size position() const;
 
         // Selection
         void notify(Mutex*) const;
@@ -502,7 +517,7 @@ private:
         // Comparisons
         friend bool operator==(const Readable_wait& x, const Readable_wait& y) {
             if (x.task() != y.task()) return false;
-            if (x.channel() != y.channel()) return false;
+            if (x.position() != y.position()) return false;
             return true;
         }
 
@@ -512,7 +527,7 @@ private:
 
         // Data
         mutable Task::Handle    taskh;
-        Channel_size            chan;
+        Channel_size            waitpos;
     };
 
     class Buffer {
@@ -547,8 +562,8 @@ private:
         // Construct
         Sender(Task::Handle, Channel_size pos, const T* rvaluep);
         Sender(Task::Handle, Channel_size pos, T* lvaluep);
-        Sender(Condition_variable*, const T* rvaluep);
-        Sender(Condition_variable*, T* lvaluep);
+        Sender(Condition* waitp, const T* rvaluep);
+        Sender(Condition* waitp, T* lvaluep);
     
         // Observers
         Task::Handle task() const;
@@ -559,7 +574,7 @@ private:
 
         // Comparisons
         inline friend bool operator==(const Sender& x, const Sender& y) {
-            if (x.threadcondp != y.threadcondp) return false;
+            if (x.condp != y.condp) return false;
             if (x.rvalp != y.rvalp) return false;
             if (x.lvalp != y.lvalp) return false;
             if (x.taskh != y.taskh) return false;
@@ -569,7 +584,7 @@ private:
     
     private:
         // Selection
-        template<class U> static bool select(Task::Handle, Channel_size oper, T* lvalp, const T* rvalp, U* recvbufp);
+        template<class U> static bool select(Task::Handle, Channel_size pos, T* lvalp, const T* rvalp, U* recvbufp);
 
         // Data Transefer
         template<class U> static void   move(T* lvalp, const T* rvalp, U* destp);
@@ -580,14 +595,14 @@ private:
         Channel_size            oper;
         const T*                rvalp;
         T*                      lvalp;
-        Condition_variable*     threadcondp;
+        Condition*              readyp;
     };
     
     class Receiver : boost::equality_comparable<Receiver> {
     public:
         // Construct
         Receiver(Task::Handle, Channel_size pos, T* valuep);
-        Receiver(Condition_variable*, T* valuep);
+        Receiver(Condition* waitp, T* valuep);
 
         // Observers
         Task::Handle task() const;
@@ -598,7 +613,7 @@ private:
     
         // Comparisons
         inline friend bool operator==(const Receiver& x, const Receiver& y) {
-            if (x.threadcondp != y.threadcondp) return false;
+            if (x.readyp != y.readyp) return false;
             if (x.valp != y.valp) return false;
             if (x.taskh != y.taskh) return false;
             if (x.oper != y.oper) return false;
@@ -607,35 +622,37 @@ private:
     
     private:
         // Selection
-        template<class U> static bool select(Task::Handle, Channel_size oper, T* valp, U* sendbufp);
+        template<class U> static bool select(Task::Handle, Channel_size pos, T* valp, U* sendbufp);
 
         // Data
         mutable Task::Handle    taskh; // poor Handle const usage forces mutable
         Channel_size            oper;
         T*                      valp;
-        Condition_variable*     threadcondp;
+        Condition*              readyp;
     };
 
     template<class U> 
     class Io_queue {
     private:
         // Names/Types
-        struct operation_eq {
-            operation_eq(Task::Handle h, Channel_size pos) : task{h}, oper{pos} {}
-            bool operator()(const U& w) const {
-                return w.task() == task && w.operation() == oper;
+        using Waiter_deque = std::deque<U>;
+
+        struct waiter_eq {
+            waiter_eq(Task::Handle h, Channel_size pos) : task{h}, oper{pos} {}
+            bool operator()(const U& waiter) const {
+                return waiter.task() == task && waiter.operation() == oper;
             }
             Task::Handle task;
             Channel_size oper;
         };
 
         // Data
-        std::deque<U> ws;
+        Waiter_deque waiters;
 
     public:
         // Names/Types
         using Waiter    = U;
-        using Iterator  = typename std::deque<U>::iterator;
+        using Iterator  = typename Waiter_deque::iterator;
 
         // Iterators
         Iterator end();
@@ -926,7 +943,7 @@ private:
 
 
 /*
-    Channel Selection Awaitable
+    Channel Select Awaitable
 */
 class Channel_select_awaitable {
 public:
@@ -1091,10 +1108,10 @@ private:
 /*
     Future Waiting
 */
-template<class T> Future_any_awaitable<T> wait_any(const vector<Future<T>>&);
-template<class T> Future_any_awaitable<T> wait_any(const Future<T>*, const Future<T>*);
-template<class T> Future_all_awaitable<T> wait_all(const vector<Future<T>>&);
-template<class T> Future_all_awaitable<T> wait_all(const Future<T>*, const Future<T>*);
+template<class T> Future_any_awaitable<T> wait_any(const vector<Future<T>>&, const optional<nanoseconds>& maxtime = optional<nanoseconds>());
+template<class T> Future_any_awaitable<T> wait_any(const Future<T>*, const Future<T>*, const optional<nanoseconds>& maxtime = optional<nanoseconds>());
+template<class T> Future_all_awaitable<T> wait_all(const vector<Future<T>>&, const optional<nanoseconds>& maxtime = optional<nanoseconds>());
+template<class T> Future_all_awaitable<T> wait_all(const Future<T>*, const Future<T>*, const optional<nanoseconds>& maxtime = optional<nanoseconds>());
 
 
 /*
@@ -1119,10 +1136,10 @@ public:
 
 private:
     // Names/Types
-    using Thread                = std::thread;
-    using Mutex                 = std::mutex;
-    using Lock                  = std::unique_lock<Mutex>;
-    using Condition_variable    = std::condition_variable;
+    using Thread    = std::thread;
+    using Mutex     = std::mutex;
+    using Lock      = std::unique_lock<Mutex>;
+    using Condition = std::condition_variable;
 
     class Task_queue {
     public:
@@ -1141,7 +1158,7 @@ private:
         std::deque<Task>    tasks;
         bool                is_interrupt{false};
         mutable Mutex       mutex;
-        Condition_variable  ready;
+        Condition           ready;
     };
 
     class Task_queue_array {
@@ -1182,9 +1199,6 @@ private:
     
     private:
         // Names/Types
-        using Mutex = std::mutex;
-        using Lock  = std::unique_lock<Mutex>;
-    
         struct handle_equal {
             // Construct
             explicit handle_equal(Task::Handle);

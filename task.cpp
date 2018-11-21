@@ -105,12 +105,6 @@ Task::Channel_selection::Sort_guard::~Sort_guard()
 /*
     Task Channel Selection
 */
-inline
-Task::Channel_selection::Channel_selection()
-{
-}
-
-
 Channel_size
 Task::Channel_selection::count_ready(const Channel_operation* first, const Channel_operation* last)
 {
@@ -182,7 +176,7 @@ Task::Channel_selection::save_positions(Channel_operation* first, Channel_operat
 }
 
 
-Task::Selection_status
+Task::Select_status
 Task::Channel_selection::select(Task::Handle task, Channel_size pos)
 {
     --nenqueued;
@@ -191,7 +185,7 @@ Task::Channel_selection::select(Task::Handle task, Channel_size pos)
         nenqueued -= dequeue(task, begin, end, pos);
     }
 
-    return Selection_status(*winner, nenqueued == 0);
+    return Select_status(*winner, nenqueued == 0);
 }
 
 
@@ -248,14 +242,11 @@ Task::Channel_selection::sort_channels(Channel_operation* first, Channel_operati
 }
 
 
-template<Channel_size N>
 optional<Channel_size>
-Task::Channel_selection::try_select(Channel_operation (&ops)[N])
+Task::Channel_selection::try_select(Channel_operation* first, Channel_operation* last)
 {
-    Channel_operation*  first = begin(ops);
-    Channel_operation*  last = end(ops);
-    Sort_guard          chansort{first, last};
-    Lock_guard          chanlocks{first, last};
+    Sort_guard chansort{first, last};
+    Lock_guard chanlocks{first, last};
 
     return select_ready(first, last);
 }
@@ -282,12 +273,6 @@ Task::Future_selection::Channel_locks::~Channel_locks()
 /*
     Task Future Selection
 */
-inline
-Task::Future_selection::Future_selection()
-{
-}
-
-
 Channel_size
 Task::Future_selection::complete(Task::Handle task, const Future_wait_vector& futures, const Channel_wait_vector& chans, Channel_size pos)
 {
@@ -363,7 +348,7 @@ Task::Future_selection::pick_ready(const Future_wait_vector& futures, const Chan
 }
 
 
-Task::Selection_status
+Task::Select_status
 Task::Future_selection::select_channel(Task::Handle task, Channel_size pos)
 {
     const Channel_size futpos = complete(task, futures, channels, pos);
@@ -375,7 +360,7 @@ Task::Future_selection::select_channel(Task::Handle task, Channel_size pos)
             nenqueued -= dequeue_not_ready(task, futures, channels);
     }
 
-    return Selection_status(*winner, nenqueued == 0);
+    return Select_status(*winner, nenqueued == 0);
 }
 
 
