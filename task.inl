@@ -252,6 +252,17 @@ Task::Future_selection::Future_transform::Future_transform(const Future<T>* firs
 /*
     Task Future Selection Locked Channel Wait Transformation
 */
+inline void
+Task::Future_selection::Timer::start(Task::Handle task, nanoseconds duration) const
+{
+    scheduler.start_timer(task, duration);
+
+}
+
+
+/*
+    Task Future Selection Locked Channel Wait Transformation
+*/
 template<class T>
 Task::Future_selection::Transform_and_lock::Transform_and_lock(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
     : transform(first, last, fwaitsp, cwaitsp)
@@ -273,7 +284,7 @@ Task::Future_selection::selected() const
 
 template<class T>
 bool
-Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtimep)
+Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
 {
     Transform_and_lock transform{first, last, &futures, &channels};
 
@@ -281,9 +292,10 @@ Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Futu
     winner.reset();
     nenqueued = enqueue_not_ready(task, futures, channels);
 
-    if (maxtimep && nenqueued > 0) {
-        if (*maxtimep > 0ns)
-            start_timer(task, *maxtimep);
+    if (maxtime && nenqueued > 0) {
+        const nanoseconds maxwait = *maxtime;
+        if (maxwait > 0ns)
+            timer.start(task, maxwait);
         else {
             dequeue_all(task, futures, channels);
             nenqueued   = 0;
@@ -317,6 +329,16 @@ Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Futu
 /*
     Task Promise
 */
+inline void
+Task::Promise::complete_timer(Time_point time)
+{
+    const Handle    task{Handle::from_promise(*this)};
+    const Lock      lock{mutex};
+
+    futures.complete_timer(task, time);
+}
+
+
 inline Task::Final_suspend
 Task::Promise::final_suspend()
 {
@@ -1440,8 +1462,8 @@ template<class U>
 void
 Channel<T>::Impl::wait_for_receiver(Sender_queue* waitqp, U* sendbufp, Lock* lockp)
 {
-    Condition  ready;
-    const Sender        ownsend{&ready, sendbufp};
+    Condition       ready;
+    const Sender    ownsend{&ready, sendbufp};
 
     // Enqueue our send and wait for a receiver to remove it.
     waitqp->push(ownsend);
@@ -1453,8 +1475,8 @@ template<class T>
 void
 Channel<T>::Impl::wait_for_sender(Receiver_queue* waitqp, T* recvbufp, Lock* lockp)
 {
-    Condition  ready;
-    const Receiver      ownrecv{&ready, recvbufp};
+    Condition       ready;
+    const Receiver  ownrecv{&ready, recvbufp};
 
     // Enqueue our receive and wait for a sender to remove it.
     waitqp->push(ownrecv);

@@ -217,7 +217,7 @@ private:
         // Selection Operations
         template<class T> bool  wait_any(Task::Handle, const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
         template<class T> bool  wait_all(Task::Handle, const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
-        void                    complete_timer(Time_point);
+        void                    complete_timer(Task::Handle, Time_point);
         Select_status           select_channel(Task::Handle, Channel_size pos);
         Channel_size            selected() const;
 
@@ -327,6 +327,22 @@ private:
             Channel_locks       lock;
         };
 
+        class Timer {
+        public:
+            // Construct
+            Timer() = default;
+            Timer(const Timer&) = delete;
+            Timer& operator=(const Timer&) = delete;
+
+            void start(Task::Handle, nanoseconds duration) const;
+            void complete(Time_point) const;
+            void cancel() const;
+
+            bool is_pending() const;
+            bool is_cancelled() const;
+            bool is_running() const;
+        };
+
         static const Channel_size no_selection{-1};
 
         // Selection
@@ -339,13 +355,13 @@ private:
         static optional<Channel_size>   pick_ready(const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
         static optional<Channel_size>   select_ready(const Future_wait_vector&, const Channel_wait_vector&);
         static void                     sort_channels(Channel_wait_vector*);
-        static void                     start_timer(Task::Handle, nanoseconds wait);
 
         // Data
         Type                    type;
         Future_wait_vector      futures;
         Channel_wait_vector     channels;
         Channel_size            nenqueued;
+        Timer                   timer;
         optional<Channel_size>  winner;
     };
 
@@ -1147,6 +1163,10 @@ public:
     void submit(Task&&);
     void resume(Task::Handle);
 
+    // Timers
+    void start_timer(Task::Handle, nanoseconds);
+    void cancel_timer(Task::Handle);
+
 private:
     // Names/Types
     using Thread    = std::thread;
@@ -1156,6 +1176,11 @@ private:
 
     class Task_queue {
     public:
+        // Construct/Copy
+        Task_queue() = default;
+        Task_queue(const Task_queue&) = delete;
+        Task_queue& operator=(const Task_queue&) = delete;
+
         // Queue Operations
         void            push(Task&&);
         optional<Task>  pop();
@@ -1183,8 +1208,10 @@ private:
         // Names/Types
         using Size = Queue_vector::size_type;
     
-        // Construct
+        // Construct/Copy
         explicit Task_queue_array(Size n);
+        Task_queue_array(const Task_queue_array&) = delete;
+        Task_queue_array& operator=(const Task_queue_array&) = delete;
     
         // Size
         Size size() const;
@@ -1206,7 +1233,12 @@ private:
 
     class Suspended_tasks {
     public:
-        // Construct
+        // Construct/Copy
+        Suspended_tasks() = default;
+        Suspended_tasks(const Suspended_tasks&) = delete;
+        Suspended_tasks& operator=(const Suspended_tasks&) = delete;
+
+        // Task Operations
         void insert(Task&&);
         Task release(Task::Handle);
     
@@ -1223,6 +1255,51 @@ private:
         std::vector<Task>   tasks;
         mutable Mutex       mutex;
     };
+
+    class Timers {
+    public:
+        // Construct
+        Timers();
+        Timers(const Timers&) = delete;
+        Timers& operator=(const Timers&) = delete;
+
+        // Timer Operations
+        void start(Task::Handle, nanoseconds duration);
+        bool cancel(Task::Handle);
+
+    private:
+        // Names/Types
+        struct Timer : boost::totally_ordered<Timer> {
+            // Comparisons
+            inline friend bool operator==(const Timer& x, const Timer& y) {
+                if (x.task != y.task) return false;
+                if (x.deadline != y.deadline) return false;
+                return true;
+            }
+
+            inline friend bool operator< (const Timer& x, const Timer& y) {
+                if (x.deadline < y.deadline) return true;
+                if (y.deadline < x.deadline) return false;
+                if (x.task < y.task) return true;
+                return false;
+            }
+
+            // Data
+            Time_point      deadline;
+            Task::Handle    task;
+        };
+
+        using Timer_queue = std::priority_queue<Timer>;
+
+        // Execution
+        void run();
+        
+        // Data
+        Timer_queue timerq;
+        Mutex       mutex;
+        Condition   ready;
+        Thread      thread;
+    };
     
     // Execution
     void run_tasks(unsigned qpos);
@@ -1231,6 +1308,7 @@ private:
     Task_queue_array    workqueues;
     std::vector<Thread> threads;
     Suspended_tasks     waiters;
+    Timers              timers;
 };
 
 

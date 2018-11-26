@@ -285,8 +285,11 @@ Task::Future_selection::complete(Task::Handle task, const Future_wait_vector& fu
 
 
 void
-Task::Future_selection::complete_timer(Time_point)
+Task::Future_selection::complete_timer(Task::Handle task, Time_point time)
 {
+    timer.complete(time);
+    if (nenqueued > 0)
+        nenqueued -= dequeue_not_ready(task, futures, channels);
 }
 
 
@@ -367,14 +370,16 @@ Task::Future_selection::select_channel(Task::Handle task, Channel_size pos)
 {
     const Channel_size futpos = complete(task, futures, channels, pos);
 
-    --nenqueued;
+    if (--nenqueued == 0 && timer.is_pending())
+        timer.cancel();
+
     if (!winner) {
         winner = futpos;
         if (type == Type::any)
             nenqueued -= dequeue_not_ready(task, futures, channels);
     }
 
-    return Select_status(*winner, nenqueued == 0);
+    return Select_status(*winner, nenqueued == 0 && !timer.is_running());
 }
 
 
@@ -784,6 +789,15 @@ Scheduler::Task_queue_array::size() const
 
 
 /*
+    Scheduler Timers
+*/
+Scheduler::Timers::Timers()
+    : thread{[&](){ run(); }}
+{
+}
+
+
+/*
     Scheduler
 */
 Scheduler::Scheduler(int nthreads)
@@ -798,8 +812,8 @@ Scheduler::Scheduler(int nthreads)
 
 
 /*
-    TODO:  Could this destructor should be rendered unnecessary because
-    by arranging for (a) workqueues to shutdown implicitly (in their
+    TODO:  Could this destructor should be rendered unnecessary by
+    arranging for (a) workqueues to shutdown implicitly (in their
     destructors) and (b) workqueues to be joined implicitly (in their
     destructors)?
 */
@@ -818,11 +832,6 @@ Scheduler::resume(Task::Handle task)
 }
 
 
-/*
-    TODO: The coroutine mechanism can automatically detect and store
-    exceptions in the promise, so is a try-block even necessary?  Need
-    to think through how exceptions thrown by tasks should be handled.
-*/
 void
 Scheduler::run_tasks(unsigned qpos)
 {
