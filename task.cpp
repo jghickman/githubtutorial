@@ -19,7 +19,6 @@
 #include "isptech/concurrency/task.hpp"
 #include <algorithm>
 #include <numeric>
-#include <windows.h>
 
 #pragma warning(disable: 4073)
 #pragma init_seg(lib)
@@ -41,6 +40,7 @@ using std::find_if;
 using std::move;
 using std::sort;
 using std::try_to_lock;
+using std::upper_bound;
 
 
 /*
@@ -789,10 +789,183 @@ Scheduler::Task_queue_array::size() const
 
 
 /*
-    Scheduler Timers
+    Scheduler Alarm Set Alarm Queue
 */
-Scheduler::Timers::Timers()
-    : thread{[&](){ run(); }}
+inline const Scheduler::Alarm_set::Alarm&
+Scheduler::Alarm_set::Alarm_queue::front() const
+{
+    return alarms.front();
+}
+
+
+inline bool
+Scheduler::Alarm_set::Alarm_queue::is_empty() const
+{
+    return alarms.empty();
+}
+
+
+inline Scheduler::Alarm_set::Alarm
+Scheduler::Alarm_set::Alarm_queue::pop()
+{
+    Alarm a = alarms.back();
+
+    alarms.pop_back();
+    return a;
+}
+
+
+void
+Scheduler::Alarm_set::Alarm_queue::push(const Alarm& a)
+{
+    const auto ap = lower_bound(alarms.begin(), alarms.end(), a);
+    alarms.insert(ap, a);
+}
+
+
+int
+Scheduler::Alarm_set::Alarm_queue::size() const
+{
+    return static_cast<int>(alarms.size());
+}
+
+
+/*
+    Scheduler Alarm Set Windows Handles
+*/
+Scheduler::Alarm_set::Windows_handles::Windows_handles()
+{
+    int n = 0;
+
+    try {
+        assert(request_pos == n);
+        hs[request_pos] = CreateEvent(NULL, FALSE, FALSE, NULL);
+        ++n;
+
+        assert(timer_pos == n);
+        hs[timer_pos] = CreateWaitableTimer(NULL, FALSE, NULL);
+        ++n;
+
+        assert(interrupt_pos == n);
+        hs[interrupt_pos] = CreateEvent(NULL, FALSE, FALSE, NULL);
+        ++n;
+    }
+    catch (...) {
+        close(hs, n);
+    }
+}
+
+
+inline
+Scheduler::Alarm_set::Windows_handles::~Windows_handles()
+{
+    close(hs);
+}
+
+
+void
+Scheduler::Alarm_set::Windows_handles::close(Windows_handle* hs, int n)
+{
+    for (int i = 0; i < n; ++i)
+        CloseHandle(hs[n - i - 1]);
+}
+
+
+inline void
+Scheduler::Alarm_set::Windows_handles::signal_interrupt() const
+{
+    SetEvent(hs[interrupt_pos]);
+}
+
+
+inline void
+Scheduler::Alarm_set::Windows_handles::signal_request() const
+{
+    SetEvent(hs[request_pos]);
+}
+
+
+inline Scheduler::Alarm_set::Windows_handle
+Scheduler::Alarm_set::Windows_handles::timer() const
+{
+    return hs[timer_pos];
+}
+
+
+inline int
+Scheduler::Alarm_set::Windows_handles::wait_any(Lock* lockp) const 
+{
+    DWORD n;
+
+    lockp->unlock();
+    n = WaitForMultipleObjects(size, hs, FALSE, INFINITE);
+    lockp->lock();
+    return static_cast<int>(n - WAIT_OBJECT_0);
+}
+
+
+/*
+    Scheduler Alarm Set
+*/
+Scheduler::Alarm_set::Alarm_set()
+    : thread{[&]() { run_thread(); }}
+{
+}
+
+
+Scheduler::Alarm_set::~Alarm_set()
+{
+    handles.signal_interrupt();
+    thread.join();
+}
+
+
+void
+Scheduler::Alarm_set::process_requests(Windows_handle timer, Request_queue* requestsp, Alarm_queue* alarmsp)
+{
+    if (!requestsp->empty()) {
+        const Request& request = requestsp->front();
+        if (request.is_start()) {
+            alarmsp->push(make_alarm(request));
+            if (alarmsp->size() == 1)
+                set_alarm(timer, alarmsp->front());
+        }
+    }
+}
+
+
+void
+Scheduler::Alarm_set::run_thread()
+{
+    bool done{false};
+    Lock lock{mutex};
+
+    while (!done) {
+        switch(handles.wait_any(&lock)) {
+        case Windows_handles::request_pos:
+            process_requests(handles.timer(), &requestq, &alarms);
+            break;
+
+        case Windows_handles::timer_pos:
+            process_alarm(handles.timer(), &alarms);
+            break;
+
+        default:
+            done = true;
+            break;
+        }
+    }
+}
+
+
+void
+Scheduler::Alarm_set::start(Task::Handle task, nanoseconds duration)
+{
+}
+
+
+void
+Scheduler::Alarm_set::set_alarm(Windows_handle timer, const Alarm& a)
 {
 }
 

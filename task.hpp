@@ -40,6 +40,8 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#define NOMINMAX
+#include <windows.h>
 
 
 /*
@@ -1256,12 +1258,13 @@ private:
         mutable Mutex       mutex;
     };
 
-    class Timers {
+    class Alarm_set {
     public:
-        // Construct
-        Timers();
-        Timers(const Timers&) = delete;
-        Timers& operator=(const Timers&) = delete;
+        // Construct/Copy/Destroy
+        Alarm_set();
+        Alarm_set(const Alarm_set&) = delete;
+        Alarm_set& operator=(const Alarm_set&) = delete;
+        ~Alarm_set();
 
         // Timer Operations
         void start(Task::Handle, nanoseconds duration);
@@ -1269,36 +1272,109 @@ private:
 
     private:
         // Names/Types
-        struct Timer : boost::totally_ordered<Timer> {
+        using Clock             = std::chrono::high_resolution_clock;
+        using Windows_handle    = HANDLE;
+
+        class Windows_handles {
+        public:
+            // Constants
+            enum : int { request_pos, timer_pos, interrupt_pos, size };
+
+            // Construct/Copy/Destroy
+            Windows_handles();
+            Windows_handles(const Windows_handles&) = delete;
+            Windows_handles& operator=(const Windows_handles&) = delete;
+            ~Windows_handles();
+
+            // Waiting
+            int     wait_any(Lock*) const;
+            void    signal_request() const;
+            void    signal_interrupt() const;
+
+            // Observers
+            Windows_handle timer() const;
+
+        private:
+            // Destroy
+            static void close(Windows_handle* hs, int n = size);
+
+            // Data
+            Windows_handle hs[size];
+        };
+
+        class Request {
+        public:
+            // Construct
+            explicit Request(Task::Handle);
+
+            // Observers
+            Task::Handle    task() const;
+            nanoseconds     time() const;
+
+            // Types
+            bool is_start() const;
+            bool is_cancel() const;
+
+        private:
+            // Data
+            Task::Handle    taskh;
+            nanoseconds     duration;
+        };
+
+        using Request_queue = std::queue<Request>;
+
+        struct Alarm : boost::totally_ordered<Alarm> {
+            // Construct
+            Alarm() = default;
+            Alarm(Task::Handle h, Time_point t) : task{h}, time{t} {}
+
             // Comparisons
-            inline friend bool operator==(const Timer& x, const Timer& y) {
+            inline friend bool operator==(const Alarm& x, const Alarm& y) {
                 if (x.task != y.task) return false;
-                if (x.deadline != y.deadline) return false;
+                if (x.time != y.time) return false;
                 return true;
             }
 
-            inline friend bool operator< (const Timer& x, const Timer& y) {
-                if (x.deadline < y.deadline) return true;
-                if (y.deadline < x.deadline) return false;
-                if (x.task < y.task) return true;
-                return false;
+            inline friend bool operator< (const Alarm& x, const Alarm& y) {
+                return x.time < y.time;
             }
 
             // Data
-            Time_point      deadline;
             Task::Handle    task;
+            Time_point      time;
         };
 
-        using Timer_queue = std::priority_queue<Timer>;
+        class Alarm_queue {
+        public:
+            // Queue Functions
+            void    push(const Alarm&);
+            Alarm   pop();
+
+            // Element Access
+            const Alarm& front() const;
+
+            // Size
+            int     size() const;
+            bool    is_empty() const;
+
+        private:
+            // Data
+            std::vector<Alarm> alarms;
+        };
 
         // Execution
-        void run();
+        void            run_thread();
+        static void     process_requests(Windows_handle timer, Request_queue*, Alarm_queue*);
+        static void     process_alarm(Windows_handle timer, Alarm_queue*);
+        static void     set_alarm(Windows_handle timer, const Alarm&);
+        static Alarm    make_alarm(const Request&);
         
         // Data
-        Timer_queue timerq;
-        Mutex       mutex;
-        Condition   ready;
-        Thread      thread;
+        Windows_handles handles;
+        Request_queue   requestq;
+        Alarm_queue     alarms;
+        Thread          thread;
+        mutable Mutex   mutex;
     };
     
     // Execution
@@ -1308,7 +1384,7 @@ private:
     Task_queue_array    workqueues;
     std::vector<Thread> threads;
     Suspended_tasks     waiters;
-    Timers              timers;
+    Alarm_set           alarms;
 };
 
 
