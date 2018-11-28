@@ -219,7 +219,8 @@ private:
         // Selection Operations
         template<class T> bool  wait_any(Task::Handle, const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
         template<class T> bool  wait_all(Task::Handle, const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
-        void                    complete_timer(Task::Handle, Time_point);
+        bool                    complete_timer(Task::Handle, Time_point);
+        bool                    cancel_timer();
         Select_status           select_channel(Task::Handle, Channel_size pos);
         Channel_size            selected() const;
 
@@ -332,17 +333,25 @@ private:
         class Timer {
         public:
             // Construct
-            Timer() = default;
+            Timer();
             Timer(const Timer&) = delete;
             Timer& operator=(const Timer&) = delete;
 
+            // Execution
             void start(Task::Handle, nanoseconds duration) const;
             void complete(Time_point) const;
-            void cancel() const;
-
-            bool is_pending() const;
-            bool is_cancelled() const;
+            void cancel(Task::Handle) const;
+            void complete_cancel() const;
             bool is_running() const;
+            bool is_cancel_pending() const;
+            bool is_active() const;
+
+        private:
+            // Constants
+            enum class Execution { inactive, running, cancel_pending };
+
+            // Data
+            mutable Execution exec;
         };
 
         static const Channel_size no_selection{-1};
@@ -398,7 +407,8 @@ public:
         template<class T> void  wait_all(const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
         template<class T> void  wait_any(const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
         Channel_size            selected_future() const;
-        void                    complete_timer(Time_point);
+        bool                    complete_timer(Time_point);
+        bool                    cancel_timer();
 
         // Execution
         void    make_ready();
@@ -1258,17 +1268,17 @@ private:
         mutable Mutex       mutex;
     };
 
-    class Alarm_set {
+    class Timers {
     public:
         // Construct/Copy/Destroy
-        Alarm_set();
-        Alarm_set(const Alarm_set&) = delete;
-        Alarm_set& operator=(const Alarm_set&) = delete;
-        ~Alarm_set();
+        Timers();
+        Timers(const Timers&) = delete;
+        Timers& operator=(const Timers&) = delete;
+        ~Timers();
 
         // Timer Operations
         void start(Task::Handle, nanoseconds duration);
-        bool cancel(Task::Handle);
+        void cancel(Task::Handle);
 
     private:
         // Names/Types
@@ -1305,7 +1315,8 @@ private:
         class Request {
         public:
             // Construct
-            explicit Request(Task::Handle);
+            Request(Task::Handle, nanoseconds); // start
+            explicit Request(Task::Handle);     // cancel
 
             // Observers
             Task::Handle    task() const;
@@ -1326,55 +1337,75 @@ private:
         struct Alarm : boost::totally_ordered<Alarm> {
             // Construct
             Alarm() = default;
-            Alarm(Task::Handle h, Time_point t) : task{h}, time{t} {}
+            Alarm(Task::Handle h, Time_point t) : task{h}, expiry{t} {}
 
             // Comparisons
             inline friend bool operator==(const Alarm& x, const Alarm& y) {
                 if (x.task != y.task) return false;
-                if (x.time != y.time) return false;
+                if (x.expiry != y.expiry) return false;
                 return true;
             }
 
             inline friend bool operator< (const Alarm& x, const Alarm& y) {
-                return x.time < y.time;
+                return x.expiry < y.expiry;
             }
 
             // Data
             Task::Handle    task;
-            Time_point      time;
+            Time_point      expiry;
         };
 
         class Alarm_queue {
-        public:
-            // Queue Functions
-            void    push(const Alarm&);
-            Alarm   pop();
+        private:
+            // Names/Types
+            using Alarm_vector = std::vector<Alarm>;
 
-            // Element Access
-            const Alarm& front() const;
+            // Data
+            Alarm_vector alarms;
+
+        public:
+            // Names/Types
+            using Alarm_ptr = Alarm_vector::const_iterator;
+
+            // Iterators
+            Alarm_ptr end() const;
 
             // Size
             int     size() const;
             bool    is_empty() const;
 
-        private:
-            // Data
-            std::vector<Alarm> alarms;
+            // Queue Functions
+            void    push(const Alarm&);
+            Alarm   pop();
+            void    erase(Alarm_ptr);
+
+            // Element Access
+            const Alarm&    front() const;
+            Alarm_ptr       find(Task::Handle) const;
         };
 
         // Execution
         void            run_thread();
-        static void     process_requests(Windows_handle timer, Request_queue*, Alarm_queue*);
-        static void     process_alarm(Windows_handle timer, Alarm_queue*);
-        static void     set_alarm(Windows_handle timer, const Alarm&);
+        static void     process(Request_queue*, Windows_handle timer, Alarm_queue*, Lock*);
+        static void     process(const Request&, Windows_handle timer, Alarm_queue*, Lock*);
+        static void     start(Windows_handle timer, Alarm_queue*, const Request&);
+        static void     cancel(Windows_handle timer, Alarm_queue*, const Request&, Lock*);
+        static Request  make_start(Task::Handle, nanoseconds duration);
+        static Request  make_cancel(Task::Handle);
+
         static Alarm    make_alarm(const Request&);
-        
+        static void     set(Windows_handle timer, const Alarm&);
+        static void     cancel(Windows_handle timer, const Alarm&);
+        static void     process(Windows_handle timer, Alarm_queue*, Lock*);
+        static bool     is_expired(const Alarm&, Time_point now);
+        static void     notify_complete(const Alarm&, Time_point now, Lock*);
+
         // Data
         Windows_handles handles;
         Request_queue   requestq;
-        Alarm_queue     alarms;
-        Thread          thread;
+        Alarm_queue     alarmq;
         mutable Mutex   mutex;
+        Thread          thread;
     };
     
     // Execution
@@ -1384,7 +1415,7 @@ private:
     Task_queue_array    workqueues;
     std::vector<Thread> threads;
     Suspended_tasks     waiters;
-    Alarm_set           alarms;
+    Timers              timers;
 };
 
 

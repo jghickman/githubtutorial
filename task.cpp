@@ -271,6 +271,52 @@ Task::Future_selection::Channel_locks::~Channel_locks()
 
 
 /*
+    Task Future Selection Timer
+*/
+inline void
+Task::Future_selection::Timer::cancel(Task::Handle task) const
+{
+    scheduler.cancel_timer(task);
+    exec = Execution::cancel_pending;
+}
+
+
+inline void
+Task::Future_selection::Timer::complete(Time_point /*when*/) const
+{
+    exec = Execution::inactive;
+}
+
+
+inline void
+Task::Future_selection::Timer::complete_cancel() const
+{
+    exec = Execution::inactive;
+}
+
+
+inline bool
+Task::Future_selection::Timer::is_active() const
+{
+    return exec != Execution::inactive;
+}
+
+
+inline bool
+Task::Future_selection::Timer::is_cancel_pending() const
+{
+    return exec == Execution::cancel_pending;
+}
+
+
+inline bool
+Task::Future_selection::Timer::is_running() const
+{
+    return exec == Execution::running;
+}
+
+
+/*
     Task Future Selection
 */
 Channel_size
@@ -284,12 +330,22 @@ Task::Future_selection::complete(Task::Handle task, const Future_wait_vector& fu
 }
 
 
-void
+bool
+Task::Future_selection::cancel_timer()
+{
+    timer.complete_cancel();
+    return nenqueued == 0;
+}
+
+
+bool
 Task::Future_selection::complete_timer(Task::Handle task, Time_point time)
 {
     timer.complete(time);
     if (nenqueued > 0)
         nenqueued -= dequeue_not_ready(task, futures, channels);
+
+    return nenqueued == 0;
 }
 
 
@@ -370,8 +426,8 @@ Task::Future_selection::select_channel(Task::Handle task, Channel_size pos)
 {
     const Channel_size futpos = complete(task, futures, channels, pos);
 
-    if (--nenqueued == 0 && timer.is_pending())
-        timer.cancel();
+    if (--nenqueued == 0 && timer.is_running())
+        timer.cancel(task);
 
     if (!winner) {
         winner = futpos;
@@ -379,7 +435,7 @@ Task::Future_selection::select_channel(Task::Handle task, Channel_size pos)
             nenqueued -= dequeue_not_ready(task, futures, channels);
     }
 
-    return Select_status(*winner, nenqueued == 0 && !timer.is_running());
+    return Select_status(*winner, nenqueued == 0 && !timer.is_active());
 }
 
 
@@ -789,24 +845,24 @@ Scheduler::Task_queue_array::size() const
 
 
 /*
-    Scheduler Alarm Set Alarm Queue
+    Scheduler Timers Alarm Queue
 */
-inline const Scheduler::Alarm_set::Alarm&
-Scheduler::Alarm_set::Alarm_queue::front() const
+inline const Scheduler::Timers::Alarm&
+Scheduler::Timers::Alarm_queue::front() const
 {
     return alarms.front();
 }
 
 
 inline bool
-Scheduler::Alarm_set::Alarm_queue::is_empty() const
+Scheduler::Timers::Alarm_queue::is_empty() const
 {
     return alarms.empty();
 }
 
 
-inline Scheduler::Alarm_set::Alarm
-Scheduler::Alarm_set::Alarm_queue::pop()
+inline Scheduler::Timers::Alarm
+Scheduler::Timers::Alarm_queue::pop()
 {
     Alarm a = alarms.back();
 
@@ -816,24 +872,24 @@ Scheduler::Alarm_set::Alarm_queue::pop()
 
 
 void
-Scheduler::Alarm_set::Alarm_queue::push(const Alarm& a)
+Scheduler::Timers::Alarm_queue::push(const Alarm& a)
 {
-    const auto ap = lower_bound(alarms.begin(), alarms.end(), a);
-    alarms.insert(ap, a);
+    const auto pos = upper_bound(alarms.begin(), alarms.end(), a);
+    alarms.insert(pos, a);
 }
 
 
 int
-Scheduler::Alarm_set::Alarm_queue::size() const
+Scheduler::Timers::Alarm_queue::size() const
 {
     return static_cast<int>(alarms.size());
 }
 
 
 /*
-    Scheduler Alarm Set Windows Handles
+    Scheduler Timers Windows Handles
 */
-Scheduler::Alarm_set::Windows_handles::Windows_handles()
+Scheduler::Timers::Windows_handles::Windows_handles()
 {
     int n = 0;
 
@@ -857,14 +913,14 @@ Scheduler::Alarm_set::Windows_handles::Windows_handles()
 
 
 inline
-Scheduler::Alarm_set::Windows_handles::~Windows_handles()
+Scheduler::Timers::Windows_handles::~Windows_handles()
 {
     close(hs);
 }
 
 
 void
-Scheduler::Alarm_set::Windows_handles::close(Windows_handle* hs, int n)
+Scheduler::Timers::Windows_handles::close(Windows_handle* hs, int n)
 {
     for (int i = 0; i < n; ++i)
         CloseHandle(hs[n - i - 1]);
@@ -872,48 +928,49 @@ Scheduler::Alarm_set::Windows_handles::close(Windows_handle* hs, int n)
 
 
 inline void
-Scheduler::Alarm_set::Windows_handles::signal_interrupt() const
+Scheduler::Timers::Windows_handles::signal_interrupt() const
 {
     SetEvent(hs[interrupt_pos]);
 }
 
 
 inline void
-Scheduler::Alarm_set::Windows_handles::signal_request() const
+Scheduler::Timers::Windows_handles::signal_request() const
 {
     SetEvent(hs[request_pos]);
 }
 
 
-inline Scheduler::Alarm_set::Windows_handle
-Scheduler::Alarm_set::Windows_handles::timer() const
+inline Scheduler::Timers::Windows_handle
+Scheduler::Timers::Windows_handles::timer() const
 {
     return hs[timer_pos];
 }
 
 
 inline int
-Scheduler::Alarm_set::Windows_handles::wait_any(Lock* lockp) const 
+Scheduler::Timers::Windows_handles::wait_any(Lock* lockp) const 
 {
     DWORD n;
 
     lockp->unlock();
     n = WaitForMultipleObjects(size, hs, FALSE, INFINITE);
     lockp->lock();
+
     return static_cast<int>(n - WAIT_OBJECT_0);
 }
 
 
 /*
-    Scheduler Alarm Set
+    Scheduler Timers
 */
-Scheduler::Alarm_set::Alarm_set()
+Scheduler::Timers::Timers()
     : thread{[&]() { run_thread(); }}
 {
 }
 
 
-Scheduler::Alarm_set::~Alarm_set()
+Scheduler::Timers::~Timers()
 {
     handles.signal_interrupt();
     thread.join();
@@ -921,21 +978,103 @@ Scheduler::Alarm_set::~Alarm_set()
 
 
 void
-Scheduler::Alarm_set::process_requests(Windows_handle timer, Request_queue* requestsp, Alarm_queue* alarmsp)
+Scheduler::Timers::cancel(Task::Handle task)
 {
-    if (!requestsp->empty()) {
-        const Request& request = requestsp->front();
-        if (request.is_start()) {
-            alarmsp->push(make_alarm(request));
-            if (alarmsp->size() == 1)
-                set_alarm(timer, alarmsp->front());
-        }
+    const Lock lock{mutex};
+
+    requestq.push(make_cancel(task));
+    handles.signal_request();
+}
+
+
+void
+Scheduler::Timers::cancel(Windows_handle timer, Alarm_queue* alarmqp, const Request& request, Lock* lockp)
+{
+    using std::next;
+
+    const Task::Handle  task    = request.task();
+    const auto          alarmp  = alarmqp->find(task);
+
+    if (alarmp != alarmqp->end()) {
+        const auto nextp = next(alarmp);
+        if (alarmp )
+        notify_cancel(task, lockp);
+        alarmqp->erase(alarmp);
+    }
+}
+
+
+Scheduler::Timers::Alarm
+Scheduler::Timers::make_alarm(const Request& request)
+{
+}
+
+
+inline Scheduler::Timers::Request
+Scheduler::Timers::make_cancel(Task::Handle task)
+{
+    return Request(task);
+}
+
+
+inline Scheduler::Timers::Request
+Scheduler::Timers::make_start(Task::Handle task, nanoseconds duration)
+{
+    return Request(task, duration);
+}
+
+
+void
+Scheduler::Timers::notify_complete(const Alarm& alarm, Time_point now, Lock* lockp)
+{
+    Task::Handle task = alarm.task;
+
+    /*
+        The task could be simultaneously attempting to cancel the timer,
+        so temporarily release the alarm lock to avoid a deadly embrace
+        between the task and the alarm thread.
+    */
+    lockp->unlock();
+    if (task.promise().complete_timer(now))
+        scheduler.resume(task);
+    lockp->lock();
+}
+
+
+void
+Scheduler::Timers::process(Windows_handle timer, Alarm_queue* alarmqp, Lock* lockp)
+{
+    const Time_point now = Clock::now();
+
+    while (!alarmqp->is_empty() && is_expired(alarmqp->front(), now)) {
+        const Alarm alarm = alarmqp->pop();
+        notify_complete(alarm, now, lockp);
     }
 }
 
 
 void
-Scheduler::Alarm_set::run_thread()
+Scheduler::Timers::process(const Request& request, Windows_handle timer, Alarm_queue* alarmqp, Lock* lockp)
+{
+    if (request.is_start())
+        start(timer, alarmqp, request);
+    else if (request.is_cancel())
+        cancel(timer, alarmqp, request, lockp);
+}
+
+
+void
+Scheduler::Timers::process(Request_queue* requestqp, Windows_handle timer, Alarm_queue* alarmqp, Lock* lockp)
+{
+    while (!requestqp->empty()) {
+        process(requestqp->front(), timer, alarmqp, lockp);
+        requestqp->pop();
+    }
+}
+
+
+void
+Scheduler::Timers::run_thread()
 {
     bool done{false};
     Lock lock{mutex};
@@ -943,11 +1082,11 @@ Scheduler::Alarm_set::run_thread()
     while (!done) {
         switch(handles.wait_any(&lock)) {
         case Windows_handles::request_pos:
-            process_requests(handles.timer(), &requestq, &alarms);
+            process(&requestq, handles.timer(), &alarmq, &lock);
             break;
 
         case Windows_handles::timer_pos:
-            process_alarm(handles.timer(), &alarms);
+            process(handles.timer(), &alarmq, &lock);
             break;
 
         default:
@@ -958,15 +1097,32 @@ Scheduler::Alarm_set::run_thread()
 }
 
 
+#if 0
 void
-Scheduler::Alarm_set::start(Task::Handle task, nanoseconds duration)
+Scheduler::Timers::set(Windows_handle timer, const Alarm& alarm)
 {
+}
+#endif
+
+
+void
+Scheduler::Timers::start(Task::Handle task, nanoseconds duration)
+{
+    const Lock lock{mutex};
+
+    requestq.push(make_start(task, duration));
+    handles.signal_request();
 }
 
 
 void
-Scheduler::Alarm_set::set_alarm(Windows_handle timer, const Alarm& a)
+Scheduler::Timers::start(Windows_handle timer, Alarm_queue* alarmqp, const Request& request)
 {
+    const Alarm alarm = make_alarm(request);
+
+    alarmqp->push(alarm);
+    if (alarm == alarmqp->front())
+        set(timer, alarm);
 }
 
 

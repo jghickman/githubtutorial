@@ -250,13 +250,20 @@ Task::Future_selection::Future_transform::Future_transform(const Future<T>* firs
 
 
 /*
-    Task Future Selection Locked Channel Wait Transformation
+    Task Future Selection Timer
 */
+inline
+Task::Future_selection::Timer::Timer()
+    : exec{Execution::inactive}
+{
+}
+
+
 inline void
 Task::Future_selection::Timer::start(Task::Handle task, nanoseconds duration) const
 {
     scheduler.start_timer(task, duration);
-
+    exec = Execution::running;
 }
 
 
@@ -329,13 +336,23 @@ Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Futu
 /*
     Task Promise
 */
-inline void
+inline bool
+Task::Promise::cancel_timer()
+{
+    const Handle    task{Handle::from_promise(*this)};
+    const Lock      lock{mutex};
+
+    return futures.cancel_timer();
+}
+
+
+inline bool
 Task::Promise::complete_timer(Time_point time)
 {
     const Handle    task{Handle::from_promise(*this)};
     const Lock      lock{mutex};
 
-    futures.complete_timer(task, time);
+    return futures.complete_timer(task, time);
 }
 
 
@@ -545,9 +562,9 @@ inline void
 Channel<T>::Readable_wait::notify(Mutex* mtxp) const
 {
     /*
-        The waiting task could now be awake and simultaneously trying to
-        dequeue this wait, so temporarily unlock the channel to void a
-        deadly embrace between reader and writer.
+        The task could be simultaneously trying to dequeue this wait, so
+        temporarily unlock the channel to void a deadly embrace between
+        reader and writer.
     */
     mtxp->unlock();
     select(taskh, waitpos);
@@ -847,8 +864,8 @@ Channel<T>::Receiver::select(Task::Handle task, Channel_size pos, T* valp, U* se
 {
     using std::move;
 
-    const Task::Select_status    select      = task.promise().select_operation(pos);
-    bool                            is_selected = false;
+    const Task::Select_status   select      = task.promise().select_operation(pos);
+    bool                        is_selected = false;
 
     if (select.position() == pos) {
         *valp = move(*sendbufp);
@@ -2220,10 +2237,11 @@ async(Fun f, Args&&... args)
     using Result_sender     = Send_channel<Result>;
     using Error_sender      = Send_channel<exception_ptr>;
 
-    Channel<Result>         r       = make_channel<Result>(1);
-    Channel<exception_ptr>  e       = make_channel<exception_ptr>(1);
-    auto                    task    = [](Result_sender r, Error_sender e, Fun f, Args&&... args) -> Task {
-    exception_ptr           ep;
+    const auto r    = make_channel<Result>(1);
+    const auto e    = make_channel<exception_ptr>(1);
+    const auto task = [](Result_sender r, Error_sender e, Fun f, Args&&... args) -> Task
+    {
+        exception_ptr ep;
 
         try {
             co_await r.send(f(forward<Args>(args)...));
