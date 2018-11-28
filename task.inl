@@ -339,9 +339,7 @@ Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Futu
 inline bool
 Task::Promise::cancel_timer()
 {
-    const Handle    task{Handle::from_promise(*this)};
-    const Lock      lock{mutex};
-
+    const Lock lock{mutex};
     return futures.cancel_timer();
 }
 

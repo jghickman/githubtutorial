@@ -61,7 +61,7 @@ template<class T> class Future;
 class Channel_base;
 class Channel_operation;
 using Channel_size = std::ptrdiff_t;
-using Time_point = std::chrono::high_resolution_clock::time_point;
+using Time_point = std::chrono::steady_clock::time_point;
 using boost::optional;
 using std::exception_ptr;
 using std::chrono::nanoseconds;
@@ -1281,36 +1281,12 @@ private:
         void cancel(Task::Handle);
 
     private:
-        // Names/Types
-        using Clock             = std::chrono::high_resolution_clock;
-        using Windows_handle    = HANDLE;
-
-        class Windows_handles {
-        public:
-            // Constants
-            enum : int { request_pos, timer_pos, interrupt_pos, size };
-
-            // Construct/Copy/Destroy
-            Windows_handles();
-            Windows_handles(const Windows_handles&) = delete;
-            Windows_handles& operator=(const Windows_handles&) = delete;
-            ~Windows_handles();
-
-            // Waiting
-            int     wait_any(Lock*) const;
-            void    signal_request() const;
-            void    signal_interrupt() const;
-
-            // Observers
-            Windows_handle timer() const;
-
-        private:
-            // Destroy
-            static void close(Windows_handle* hs, int n = size);
-
-            // Data
-            Windows_handle hs[size];
-        };
+        /*
+            The clock definition is platform dependent; it should be
+            monotonic with adequate resolution.  std::chrono::steady_clock
+            has nanosecond resolution on Windows.
+        */
+        using Clock = std::chrono::steady_clock;
 
         class Request {
         public:
@@ -1360,15 +1336,24 @@ private:
             // Names/Types
             using Alarm_vector = std::vector<Alarm>;
 
+            struct task_eq {
+                explicit task_eq(Task::Handle h) : task{h} {}
+                bool operator()(const Alarm& a) const {
+                    return a.task == task;
+                }
+                Task::Handle task;
+            };
+
             // Data
             Alarm_vector alarms;
 
         public:
             // Names/Types
-            using Alarm_ptr = Alarm_vector::const_iterator;
+            using Iterator = Alarm_vector::const_iterator;
 
             // Iterators
-            Alarm_ptr end() const;
+            Iterator begin() const;
+            Iterator end() const;
 
             // Size
             int     size() const;
@@ -1377,33 +1362,71 @@ private:
             // Queue Functions
             void    push(const Alarm&);
             Alarm   pop();
-            void    erase(Alarm_ptr);
+            void    erase(Iterator);
 
             // Element Access
             const Alarm&    front() const;
-            Alarm_ptr       find(Task::Handle) const;
+            Iterator        find(Task::Handle) const;
+        };
+
+        using Windows_handle = HANDLE;
+
+        class Windows_handles {
+        public:
+            // Constants
+            enum : int { request_pos, timer_pos, interrupt_pos, size };
+
+            // Construct/Copy/Destroy
+            Windows_handles();
+            Windows_handles(const Windows_handles&) = delete;
+            Windows_handles& operator=(const Windows_handles&) = delete;
+            ~Windows_handles();
+
+            // Synchronization
+            int     wait_any(Lock*) const;
+            void    signal_request() const;
+            void    signal_interrupt() const;
+
+            // Observers
+            Windows_handle timer() const;
+
+        private:
+            // Destroy
+            static void close(Windows_handle* hs, int n = size);
+
+            // Data
+            Windows_handle hs[size];
         };
 
         // Execution
-        void            run_thread();
-        static void     process(Request_queue*, Windows_handle timer, Alarm_queue*, Lock*);
-        static void     process(const Request&, Windows_handle timer, Alarm_queue*, Lock*);
-        static void     start(Windows_handle timer, Alarm_queue*, const Request&);
-        static void     cancel(Windows_handle timer, Alarm_queue*, const Request&, Lock*);
+        void run_thread();
+
+        // Request Processing
         static Request  make_start(Task::Handle, nanoseconds duration);
         static Request  make_cancel(Task::Handle);
+        static void     process_requests(Windows_handle timer, Request_queue*, Alarm_queue*);
+        static void     process_request(Windows_handle timer, const Request&, Alarm_queue*, Time_point now);
 
-        static Alarm    make_alarm(const Request&);
-        static void     set(Windows_handle timer, const Alarm&);
-        static void     cancel(Windows_handle timer, const Alarm&);
-        static void     process(Windows_handle timer, Alarm_queue*, Lock*);
-        static bool     is_expired(const Alarm&, Time_point now);
-        static void     notify_complete(const Alarm&, Time_point now, Lock*);
+        // Alarm Activation/Cancellation
+        static Alarm    make_alarm(const Request&, Time_point now);
+        static void     activate_alarm(Windows_handle timer, const Request&, Alarm_queue*, Time_point now);
+        static void     remove_alarm(Windows_handle timer, Alarm_queue*, Alarm_queue::Iterator, Time_point now);
+        static void     cancel_alarm(Windows_handle timer, const Request&, Alarm_queue*, Time_point now);
+        static void     notify_cancel(const Alarm&);
+
+        // Alarm Processing
+        static void process_alarms(Windows_handle timer, Alarm_queue*, Lock*);
+        static void notify_complete(const Alarm&, Time_point now, Lock*);
+        static bool is_expired(const Alarm&, Time_point now);
+
+        // Timer Functions
+        static void set_timer(Windows_handle timer, const Alarm&, Time_point now);
+        static void cancel_timer(Windows_handle timer);
 
         // Data
-        Windows_handles handles;
         Request_queue   requestq;
         Alarm_queue     alarmq;
+        Windows_handles handles;
         mutable Mutex   mutex;
         Thread          thread;
     };
@@ -1412,9 +1435,9 @@ private:
     void run_tasks(unsigned qpos);
 
     // Data
-    Task_queue_array    workqueues;
-    std::vector<Thread> threads;
-    Suspended_tasks     waiters;
+    Task_queue_array    ready;
+    Suspended_tasks     suspended;
+    std::vector<Thread> taskprocs;
     Timers              timers;
 };
 

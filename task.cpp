@@ -18,6 +18,7 @@
 
 #include "isptech/concurrency/task.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <numeric>
 
 #pragma warning(disable: 4073)
@@ -319,6 +320,14 @@ Task::Future_selection::Timer::is_running() const
 /*
     Task Future Selection
 */
+bool
+Task::Future_selection::cancel_timer()
+{
+    timer.complete_cancel();
+    return nenqueued == 0;
+}
+
+
 Channel_size
 Task::Future_selection::complete(Task::Handle task, const Future_wait_vector& futures, const Channel_wait_vector& chans, Channel_size pos)
 {
@@ -327,14 +336,6 @@ Task::Future_selection::complete(Task::Handle task, const Future_wait_vector& fu
 
     future.complete(task, chans, pos);
     return futpos;
-}
-
-
-bool
-Task::Future_selection::cancel_timer()
-{
-    timer.complete_cancel();
-    return nenqueued == 0;
 }
 
 
@@ -845,8 +846,84 @@ Scheduler::Task_queue_array::size() const
 
 
 /*
+    Scheduler Timers Request
+*/
+inline
+Scheduler::Timers::Request::Request(Task::Handle h)
+    : taskh{h}
+    , duration{}
+{
+}
+
+
+inline
+Scheduler::Timers::Request::Request(Task::Handle h, nanoseconds t)
+    : taskh{h}
+    , duration{t}
+{
+}
+
+
+inline bool
+Scheduler::Timers::Request::is_cancel() const
+{
+    return duration == 0ns;
+}
+
+
+inline bool
+Scheduler::Timers::Request::is_start() const
+{
+    return !is_cancel();
+}
+
+
+inline Task::Handle
+Scheduler::Timers::Request::task() const
+{
+    return taskh;
+}
+
+
+inline nanoseconds
+Scheduler::Timers::Request::time() const
+{
+    return duration;
+}
+
+
+/*
     Scheduler Timers Alarm Queue
 */
+inline Scheduler::Timers::Alarm_queue::Iterator
+Scheduler::Timers::Alarm_queue::begin() const
+{
+    return alarms.begin();
+}
+
+
+inline Scheduler::Timers::Alarm_queue::Iterator
+Scheduler::Timers::Alarm_queue::end() const
+{
+    return alarms.end();
+}
+
+
+inline void
+Scheduler::Timers::Alarm_queue::erase(Iterator p)
+{
+    alarms.erase(p);
+}
+
+
+inline Scheduler::Timers::Alarm_queue::Iterator
+Scheduler::Timers::Alarm_queue::find(Task::Handle task) const
+{
+    const auto p = find_if(alarms.begin(), alarms.end(), task_eq(task));
+    return (p->task == task) ? p : alarms.end();
+}
+
+
 inline const Scheduler::Timers::Alarm&
 Scheduler::Timers::Alarm_queue::front() const
 {
@@ -864,9 +941,9 @@ Scheduler::Timers::Alarm_queue::is_empty() const
 inline Scheduler::Timers::Alarm
 Scheduler::Timers::Alarm_queue::pop()
 {
-    Alarm a = alarms.back();
+    Alarm a = alarms.front();
 
-    alarms.pop_back();
+    alarms.erase(alarms.begin());
     return a;
 }
 
@@ -874,8 +951,8 @@ Scheduler::Timers::Alarm_queue::pop()
 void
 Scheduler::Timers::Alarm_queue::push(const Alarm& a)
 {
-    const auto pos = upper_bound(alarms.begin(), alarms.end(), a);
-    alarms.insert(pos, a);
+    const auto p = upper_bound(alarms.begin(), alarms.end(), a);
+    alarms.insert(p, a);
 }
 
 
@@ -978,9 +1055,20 @@ Scheduler::Timers::~Timers()
 
 
 void
+Scheduler::Timers::activate_alarm(Windows_handle timer, const Request& request, Alarm_queue* alarmqp, Time_point now)
+{
+    const Alarm alarm = make_alarm(request, now);
+
+    alarmqp->push(alarm);
+    if (alarm == alarmqp->front())
+        set_timer(timer, alarm, now);
+}
+
+
+void
 Scheduler::Timers::cancel(Task::Handle task)
 {
-    const Lock lock{mutex};
+    const Lock lock{mutex}; 
 
     requestq.push(make_cancel(task));
     handles.signal_request();
@@ -988,25 +1076,35 @@ Scheduler::Timers::cancel(Task::Handle task)
 
 
 void
-Scheduler::Timers::cancel(Windows_handle timer, Alarm_queue* alarmqp, const Request& request, Lock* lockp)
+Scheduler::Timers::cancel_alarm(Windows_handle timer, const Request& request, Alarm_queue* alarmqp, Time_point now)
 {
-    using std::next;
-
-    const Task::Handle  task    = request.task();
-    const auto          alarmp  = alarmqp->find(task);
+    const auto alarmp = alarmqp->find(request.task());
 
     if (alarmp != alarmqp->end()) {
-        const auto nextp = next(alarmp);
-        if (alarmp )
-        notify_cancel(task, lockp);
-        alarmqp->erase(alarmp);
+        notify_cancel(*alarmp);
+        remove_alarm(timer, alarmqp, alarmp, now);
     }
 }
 
 
-Scheduler::Timers::Alarm
-Scheduler::Timers::make_alarm(const Request& request)
+inline void
+Scheduler::Timers::cancel_timer(Windows_handle handle)
 {
+    CancelWaitableTimer(handle);
+}
+
+
+inline bool
+Scheduler::Timers::is_expired(const Alarm& alarm, Time_point now)
+{
+    return alarm.expiry <= now;
+}
+
+
+inline Scheduler::Timers::Alarm
+Scheduler::Timers::make_alarm(const Request& request, Time_point now)
+{
+    return Alarm(request.task(), now + request.time());
 }
 
 
@@ -1024,6 +1122,16 @@ Scheduler::Timers::make_start(Task::Handle task, nanoseconds duration)
 }
 
 
+inline void
+Scheduler::Timers::notify_cancel(const Alarm& alarm)
+{
+    Task::Handle task = alarm.task;
+
+    if (task.promise().cancel_timer())
+        scheduler.resume(task);
+}
+
+
 void
 Scheduler::Timers::notify_complete(const Alarm& alarm, Time_point now, Lock* lockp)
 {
@@ -1031,8 +1139,8 @@ Scheduler::Timers::notify_complete(const Alarm& alarm, Time_point now, Lock* loc
 
     /*
         The task could be simultaneously attempting to cancel the timer,
-        so temporarily release the alarm lock to avoid a deadly embrace
-        between the task and the alarm thread.
+        so temporarily release the timer lock to avoid a deadly embrace
+        between the task and the timer thread.
     */
     lockp->unlock();
     if (task.promise().complete_timer(now))
@@ -1042,34 +1150,53 @@ Scheduler::Timers::notify_complete(const Alarm& alarm, Time_point now, Lock* loc
 
 
 void
-Scheduler::Timers::process(Windows_handle timer, Alarm_queue* alarmqp, Lock* lockp)
+Scheduler::Timers::process_alarms(Windows_handle timer, Alarm_queue* alarmqp, Lock* lockp)
 {
     const Time_point now = Clock::now();
 
-    while (!alarmqp->is_empty() && is_expired(alarmqp->front(), now)) {
-        const Alarm alarm = alarmqp->pop();
-        notify_complete(alarm, now, lockp);
-    }
+    while (!alarmqp->is_empty() && is_expired(alarmqp->front(), now))
+        notify_complete(alarmqp->pop(), now, lockp);
+
+    if (!alarmqp->is_empty())
+        set_timer(timer, alarmqp->front(), now);
 }
 
 
 void
-Scheduler::Timers::process(const Request& request, Windows_handle timer, Alarm_queue* alarmqp, Lock* lockp)
+Scheduler::Timers::process_request(Windows_handle timer, const Request& request, Alarm_queue* alarmqp, Time_point now)
 {
     if (request.is_start())
-        start(timer, alarmqp, request);
+        activate_alarm(timer, request, alarmqp, now);
     else if (request.is_cancel())
-        cancel(timer, alarmqp, request, lockp);
+        cancel_alarm(timer, request, alarmqp, now);
 }
 
 
 void
-Scheduler::Timers::process(Request_queue* requestqp, Windows_handle timer, Alarm_queue* alarmqp, Lock* lockp)
+Scheduler::Timers::process_requests(Windows_handle timer, Request_queue* requestqp, Alarm_queue* alarmqp)
 {
+    const Time_point now = Clock::now();
+
     while (!requestqp->empty()) {
-        process(requestqp->front(), timer, alarmqp, lockp);
+        process_request(timer, requestqp->front(), alarmqp, now);
         requestqp->pop();
     }
+}
+
+
+void
+Scheduler::Timers::remove_alarm(Windows_handle timer, Alarm_queue* queuep, Alarm_queue::Iterator p, Time_point now)
+{
+    // If the alarm is the next to fire, update the timer.
+    if (p == queuep->begin()) {
+        const auto nextp = std::next(p);
+        if (nextp == queuep->end())
+            cancel_timer(timer);
+        else if (*p < *nextp)
+            set_timer(timer, *nextp, now);
+    }
+
+    queuep->erase(p);
 }
 
 
@@ -1082,11 +1209,11 @@ Scheduler::Timers::run_thread()
     while (!done) {
         switch(handles.wait_any(&lock)) {
         case Windows_handles::request_pos:
-            process(&requestq, handles.timer(), &alarmq, &lock);
+            process_requests(handles.timer(), &requestq, &alarmq);
             break;
 
         case Windows_handles::timer_pos:
-            process(handles.timer(), &alarmq, &lock);
+            process_alarms(handles.timer(), &alarmq, &lock);
             break;
 
         default:
@@ -1097,12 +1224,18 @@ Scheduler::Timers::run_thread()
 }
 
 
-#if 0
 void
-Scheduler::Timers::set(Windows_handle timer, const Alarm& alarm)
+Scheduler::Timers::set_timer(Windows_handle timer, const Alarm& alarm, Time_point now)
 {
+    const nanoseconds   offset{alarm.expiry - now};
+    const std::int64_t  n64{-offset.count()};
+    LARGE_INTEGER       nlarge;
+
+    nlarge.LowPart  = static_cast<DWORD>(n64 & 0xFFFFFFFF);
+    nlarge.HighPart = static_cast<LONG>(n64 >> 32);
+
+    SetWaitableTimer(timer, &nlarge, 0, NULL, NULL, FALSE);
 }
-#endif
 
 
 void
@@ -1115,28 +1248,17 @@ Scheduler::Timers::start(Task::Handle task, nanoseconds duration)
 }
 
 
-void
-Scheduler::Timers::start(Windows_handle timer, Alarm_queue* alarmqp, const Request& request)
-{
-    const Alarm alarm = make_alarm(request);
-
-    alarmqp->push(alarm);
-    if (alarm == alarmqp->front())
-        set(timer, alarm);
-}
-
-
 /*
     Scheduler
 */
 Scheduler::Scheduler(int nthreads)
-    : workqueues{nthreads > 0 ? nthreads : Thread::hardware_concurrency()}
+    : ready{nthreads > 0 ? nthreads : Thread::hardware_concurrency()}
 {
-    const auto nqs = workqueues.size();
+    const auto nqs = ready.size();
 
-    threads.reserve(nqs);
+    taskprocs.reserve(nqs);
     for (unsigned q = 0; q != nqs; ++q)
-        threads.emplace_back([&,q]{ run_tasks(q); });
+        taskprocs.emplace_back([&,q]{ run_tasks(q); });
 }
 
 
@@ -1148,35 +1270,35 @@ Scheduler::Scheduler(int nthreads)
 */
 Scheduler::~Scheduler()
 {
-    workqueues.interrupt();
-    for (auto& thread : threads)
-        thread.join();
+    ready.interrupt();
+    for (auto& proc : taskprocs)
+        proc.join();
 }
 
 
 void
 Scheduler::resume(Task::Handle task)
 {
-    workqueues.push(waiters.release(task));
+    ready.push(suspended.release(task));
 }
 
 
 void
 Scheduler::run_tasks(unsigned qpos)
 {
-    while (optional<Task> taskp = workqueues.pop(qpos)) {
+    while (optional<Task> taskp = ready.pop(qpos)) {
         try {
             switch(taskp->resume()) {
             case Task::Status::ready:
-                workqueues.push(qpos, move(*taskp));
+                ready.push(qpos, move(*taskp));
                 break;
 
             case Task::Status::suspended:
-                waiters.insert(move(*taskp));
+                suspended.insert(move(*taskp));
                 break;
             }
         } catch (...) {
-            workqueues.interrupt();
+            ready.interrupt();
         }
     }
 }
@@ -1185,7 +1307,7 @@ Scheduler::run_tasks(unsigned qpos)
 void
 Scheduler::submit(Task&& task)
 {
-    workqueues.push(move(task));
+    ready.push(move(task));
 }
 
 
