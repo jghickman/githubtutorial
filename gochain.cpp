@@ -141,11 +141,11 @@ main(int argc, char* argv[])
 
 #else
 
+static const int seconds = 1000;
 
 int
 add_one(int n)
 {
-//    Sleep(5000);
     return n + 1;
 }
 
@@ -153,14 +153,14 @@ add_one(int n)
 int
 two()
 {
-    static const int seconds = 1000;
-//    Sleep(10*seconds);
+    Sleep(120*seconds);
     return 2;
 }
 
 int
 four()
 {
+    Sleep(120*seconds);
     return 4;
 }
 
@@ -180,7 +180,7 @@ wait_all_task(int n, Send_channel<int> results)
     fs.push_back(async(two));
     fs.push_back(async(four));
 
-    if (!co_await wait_all(fs, 2s))
+    if (!co_await wait_all(fs, 0s))
         co_await results.send(error);
     else {
         int r = done;
@@ -209,15 +209,16 @@ wait_any_task(int n, Send_channel<int> results)
     fs.push_back(async(two));
     fs.push_back(async(four));
 
-    std::size_t i = co_await wait_any(fs);
+    const Channel_size  i = co_await wait_any(fs, 0ns);
+    int                 r = error;
 
-    int r;
-
-    try {
-        r = co_await fs[i].get();
-    }
-    catch (...) {
-        r = -1;
+    if (i != wait_fail) {
+        try {
+            r = co_await fs[i].get();
+        }
+        catch (...) {
+            r = error;
+        }
     }
 
     co_await results.send(r);
@@ -231,7 +232,7 @@ main(int argc, char* argv[])
     
     Channel<int> results = make_channel<int>(1);
 
-    start(wait_all_task, 0, results);
+    start(wait_any_task, 0, results);
 
     cout << "results = {" << blocking_receive(results);
 
