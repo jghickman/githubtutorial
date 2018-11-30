@@ -361,7 +361,7 @@ private:
         static Channel_size             count_ready(const Future_wait_vector&, const Channel_wait_vector&);
         static void                     dequeue_all(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
         static Channel_size             dequeue_not_ready(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
-        static void                     enqueue_all(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
+        static Channel_size             enqueue_all(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
         static Channel_size             enqueue_not_ready(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
         static optional<Channel_size>   pick_ready(const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
         static optional<Channel_size>   select_ready(const Future_wait_vector&, const Channel_wait_vector&);

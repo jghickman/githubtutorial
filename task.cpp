@@ -393,11 +393,13 @@ Task::Future_selection::dequeue_not_ready(Task::Handle task, const Future_wait_v
 }
 
 
-void
+Channel_size
 Task::Future_selection::enqueue_all(Task::Handle task, const Future_wait_vector& fs, const Channel_wait_vector& chans)
 {
     for (const auto& future : fs)
         future.enqueue(task, chans);
+
+    return fs.size();
 }
 
 

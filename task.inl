@@ -309,46 +309,20 @@ Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Futu
 {
     Transform_and_lock transform{first, last, &futures, &channels};
 
-    timer.clear();
-    type = Type::all;
-    result.reset();
-    nenqueued = enqueue_not_ready(task, futures, channels);
-
-    if (nenqueued == 0)
-        result = wait_success;
-    else if (is_valid(maxtime))
-        timer.start(task, *maxtime);
-    else {
-        dequeue_all(task, futures, channels);
-        nenqueued   = 0;
-        result      = wait_fail;
-    }
-
-    return nenqueued == 0;
-}
-
-
-template<class T>
-bool
-Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
-{
-    Transform_and_lock transform{first, last, &futures, &channels};
-
     type = Type::all;
     timer.clear();
     result.reset();
-    nenqueued = enqueue_not_ready(task, futures, channels);
 
+    nenqueued = enqueue_not_ready(task, futures, channels);
     if (nenqueued == 0)
         result = wait_success;
     else if (maxtime) {
-        const auto maxwait = *maxtime;
-        if (maxwait > 0ns)
-            timer.start(task, maxwait);
+        if (*maxtime > 0ns)
+            timer.start(task, *maxtime);
         else {
             dequeue_all(task, futures, channels);
-            nenqueued   = 0;
-            result      = wait_fail;
+            nenqueued = 0;
+            result = wait_fail;
         }
     }
 
@@ -362,44 +336,19 @@ Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Futu
 {
     Transform_and_lock transform{first, last, &futures, &channels};
 
-    timer.clear();
     type = Type::any;
-    nenqueued = 0;
-    result = select_ready(futures, channels);
-
-    if (!result) {
-        if (maxtime && *maxtime <= 0ns)
-            result = 
-        if (!maxtime || *maxtime > 0ns) {
-            enqueue_all(task, futures, channels);
-            nenqueued = futures.size();
-            if (*maxtime > 0ns)
-                timer.start(task, *maxtime);
-    }
-
-    return nenqueued == 0;
-}
-
-
-template<class T>
-bool
-Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
-{
-    Transform_and_lock transform{first, last, &futures, &channels};
-
     timer.clear();
-    type = Type::any;
     nenqueued = 0;
-    result = select_ready(futures, channels);
 
+    result = select_ready(futures, channels);
     if (!result) {
-        if (!maxtime) {
-            enqueue_all(task, futures, channels);
-            nenqueued = futures.size();
-        } else if (*maxtime > 0ns) {
+        if (!maxtime) 
+            nenqueued = enqueue_all(task, futures, channels);
+        else if (*maxtime > 0ns) {
+            nenqueued = enqueue_all(task, futures, channels);
             timer.start(task, *maxtime);
-            enqueue_all(task, futures, channels);
-            nenqueued = futures.size();
+        } else {
+            result = wait_fail;
         }
     }
 
