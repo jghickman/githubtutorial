@@ -135,17 +135,6 @@ Task::Future_selection::Channel_wait::unlock_channel() const
 
 
 /*
-    Task Future Selection Channel Sort
-*/
-inline
-Task::Future_selection::Channel_sort::Channel_sort(Channel_wait_vector* wsp)
-    : waitsp{wsp}
-{
-    sort_channels(waitsp);
-}
-
-
-/*
     Task Future Selection Future Wait
 */
 inline
@@ -223,15 +212,60 @@ Task::Future_selection::Future_wait::value() const
 
 
 /*
-    Task Future Selection Wait Future Transformation
+    Task Future Selection Wait Setup
 */
 template<class T>
-Task::Future_selection::Future_transform::Future_transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
+inline
+Task::Future_selection::Wait_setup::Wait_setup(const Future<T>* first, const Future<T>* last, Wait_set* wp)
+    : waitsp(wp)
 {
-    const Channel_size      nfutures    = last - first;
+    waitsp->begin_setup(first, last);
+}
+
+
+inline
+Task::Future_selection::Wait_setup::~Wait_setup()
+{
+    waitsp->end_setup();
+}
+
+
+/*
+    Task Future Selection Wait Set
+*/
+template<class T>
+void
+Task::Future_selection::Wait_set::begin_setup(const Future<T>* first, const Future<T>* last)
+{
+    transform(first, last, &futures, &channels);
+    sort(&channels);
+    lock(&channels);
+    nenqueued = 0;
+}
+
+
+inline void
+Task::Future_selection::Wait_set::end_setup()
+{
+    unlock(&channels);
+}
+
+
+inline Channel_size
+Task::Future_selection::Wait_set::enqueued() const
+{
+    return nenqueued;
+}
+
+
+template<class T>
+void
+Task::Future_selection::Wait_set::transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
+{
     Future_wait_vector&     fwaits      = *fwaitsp;
-    Channel_wait_vector&    cwaits      = *cwaitsp;
     const Future<T>*        futurep     = first;
+    const Channel_size      nfutures    = last - first;
+    Channel_wait_vector&    cwaits      = *cwaitsp;
     Channel_size            nextchan    = 0;
 
     fwaits.resize(nfutures);
@@ -282,18 +316,6 @@ Task::Future_selection::Timer::start(Task::Handle task, nanoseconds duration) co
 
 
 /*
-    Task Future Selection Locked Channel Wait Transformation
-*/
-template<class T>
-Task::Future_selection::Transform_and_lock::Transform_and_lock(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
-    : transform(first, last, fwaitsp, cwaitsp)
-    , sort(cwaitsp)
-    , lock(cwaitsp)
-{
-}
-
-
-/*
     Task Future Selection
 */
 inline Channel_size
@@ -307,26 +329,24 @@ template<class T>
 bool
 Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
 {
-    Transform_and_lock transform{first, last, &futures, &channels};
+    const Wait_setup setup{first, last, &waits};
 
     type = Type::all;
     timer.clear();
     result.reset();
 
-    nenqueued = enqueue_not_ready(task, futures, channels);
-    if (nenqueued == 0)
+    if (waits.enqueue_not_ready(task) == 0)
         result = wait_success;
     else if (maxtime) {
         if (*maxtime > 0ns)
             timer.start(task, *maxtime);
         else {
-            dequeue_all(task, futures, channels);
-            nenqueued = 0;
+            waits.dequeue_all(task);
             result = wait_fail;
         }
     }
 
-    return nenqueued == 0;
+    return waits.enqueued() == 0;
 }
 
 
@@ -334,25 +354,24 @@ template<class T>
 bool
 Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
 {
-    Transform_and_lock transform{first, last, &futures, &channels};
+    const Wait_setup setup{first, last, &waits};
 
     type = Type::any;
     timer.clear();
-    nenqueued = 0;
 
-    result = select_ready(futures, channels);
+    result = waits.select_ready();
     if (!result) {
-        if (!maxtime) 
-            nenqueued = enqueue_all(task, futures, channels);
-        else if (*maxtime > 0ns) {
-            nenqueued = enqueue_all(task, futures, channels);
+        if (!maxtime) {
+            waits.enqueue_all(task);
+        } else if (*maxtime > 0ns) {
+            waits.enqueue_all(task);
             timer.start(task, *maxtime);
         } else {
             result = wait_fail;
         }
     }
 
-    return nenqueued == 0;
+    return waits.enqueued() == 0;
 }
 
 
@@ -2354,7 +2373,8 @@ async(Fun f, Args&&... args)
         exception_ptr ep;
 
         try {
-            co_await r.send(f(forward<Args>(args)...));
+            Result x = f(forward<Args>(args)...);
+            co_await r.send(x);
         } catch (...) {
             ep = current_exception();
         }

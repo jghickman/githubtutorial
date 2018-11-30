@@ -153,14 +153,14 @@ add_one(int n)
 int
 two()
 {
-    Sleep(120*seconds);
+    Sleep(1*seconds);
     return 2;
 }
 
 int
 four()
 {
-    Sleep(120*seconds);
+    Sleep(1*seconds);
     return 4;
 }
 
@@ -180,21 +180,25 @@ wait_all_task(int n, Send_channel<int> results)
     fs.push_back(async(two));
     fs.push_back(async(four));
 
-    if (!co_await wait_all(fs, 0s))
+#if 0
+    if (!co_await wait_all(fs))
         co_await results.send(error);
     else {
+#endif
+        co_await wait_all(fs);
         int r = done;
         for (int i = 0; i < fs.size() && r != error; ++i) {
             try {
                 r = co_await fs[i].get();
-            }
-            catch (...) {
+            } catch (...) {
                 r = error;
             }
 
             co_await results.send(r);
         }
-    }
+#if 0
+}
+#endif
 
     co_await results.send(done);
 }
@@ -209,14 +213,13 @@ wait_any_task(int n, Send_channel<int> results)
     fs.push_back(async(two));
     fs.push_back(async(four));
 
-    const Channel_size  i = co_await wait_any(fs, 0ns);
+    const Channel_size  i = co_await wait_any(fs, 0s);
     int                 r = error;
 
     if (i != wait_fail) {
         try {
             r = co_await fs[i].get();
-        }
-        catch (...) {
+        } catch (...) {
             r = error;
         }
     }

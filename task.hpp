@@ -219,6 +219,7 @@ private:
         // Selection Operations
         template<class T> bool  wait_any(Task::Handle, const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
         template<class T> bool  wait_all(Task::Handle, const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
+
         bool                    complete_timer(Task::Handle, Time_point);
         bool                    cancel_timer();
         Select_status           select_channel(Task::Handle, Channel_size pos);
@@ -229,6 +230,7 @@ private:
 
     private:
         // Names/Types
+        class Wait_setup;
         enum class Type { any, all };
         static const Channel_size wait_success{1};
 
@@ -288,47 +290,55 @@ private:
 
         using Future_wait_vector = std::vector<Future_wait>;
 
-        class Channel_locks {
+        class Wait_set {
+        public:
+            // Construct
+            Wait_set() = default;
+
+            // Enqueue/Dequeue
+            void            enqueue_all(Task::Handle);
+            Channel_size    enqueue_not_ready(Task::Handle);
+            void            dequeue_all(Task::Handle);
+            void            dequeue_not_ready(Task::Handle);
+            Channel_size    enqueued() const;
+
+            // Selection
+            optional<Channel_size>  select_ready();
+            Channel_size            complete_channel(Task::Handle, Channel_size pos);
+
+            // Friends
+            friend class Wait_setup;
+
+        private:
+            // Setup
+            template<class T> void          begin_setup(const Future<T>*, const Future<T>*);
+            template<class T> static void   transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
+            static void                     sort(Channel_wait_vector*);
+            static void                     lock(Channel_wait_vector*);
+            static void                     unlock(Channel_wait_vector*);
+            void                            end_setup();
+
+            // Selection
+            static Channel_size             count_ready(const Future_wait_vector&, const Channel_wait_vector&);
+            static optional<Channel_size>   pick_ready(const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
+
+            // Data
+            Future_wait_vector      futures;
+            Channel_wait_vector     channels;
+            Channel_size            nenqueued;  // futures
+        };
+
+        class Wait_setup {
         public:
             // Construct/Copy/Destroy
-            explicit Channel_locks(Channel_wait_vector*);
-            Channel_locks(const Channel_locks&) = delete;
-            Channel_locks& operator=(const Channel_locks&) = delete;
-            ~Channel_locks();
+            template<class T> Wait_setup(const Future<T>*, const Future<T>*, Wait_set*);
+            Wait_setup(const Wait_setup&) = delete;
+            Wait_setup& operator=(const Wait_setup&) = delete;
+            ~Wait_setup();
 
         private:
             // Data
-            Channel_wait_vector* waitsp;
-        };
-
-        class Channel_sort {
-        public:
-            // Construct
-            explicit Channel_sort(Channel_wait_vector*);
-            Channel_sort(const Channel_sort&) = delete;
-            Channel_sort& operator=(const Channel_sort&) = delete;
-
-        private:
-            // Data
-            Channel_wait_vector* waitsp;
-        };
-
-        class Future_transform {
-        public:
-            // Construct
-            template<class T> Future_transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
-        };
-
-        class Transform_and_lock {
-        public:
-            // Construct
-            template<class T> Transform_and_lock(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
-
-        private:
-            // Data
-            Future_transform    transform;
-            Channel_sort        sort;
-            Channel_locks       lock;
+            Wait_set* waitsp;
         };
 
         class Timer {
@@ -356,24 +366,11 @@ private:
             mutable State state;
         };
 
-        // Selection
-        static Channel_size             complete(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&, Channel_size chanpos);
-        static Channel_size             count_ready(const Future_wait_vector&, const Channel_wait_vector&);
-        static void                     dequeue_all(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
-        static Channel_size             dequeue_not_ready(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
-        static Channel_size             enqueue_all(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
-        static Channel_size             enqueue_not_ready(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
-        static optional<Channel_size>   pick_ready(const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
-        static optional<Channel_size>   select_ready(const Future_wait_vector&, const Channel_wait_vector&);
-        static void                     sort_channels(Channel_wait_vector*);
-
         // Data
         Type                    type;
-        Future_wait_vector      futures;
-        Channel_wait_vector     channels;
-        Channel_size            nenqueued;
-        optional<Channel_size>  result;
+        Wait_set                waits;
         Timer                   timer;
+        optional<Channel_size>  result;
     };
 
     // Random Number Generation
@@ -1066,7 +1063,7 @@ private:
     bool*           ready() const;
 
     // Friends
-    friend class Task::Future_selection::Future_transform;
+    template<class T> friend void Task::Future_selection::Wait_set::transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
 
     // Data
     Value_receiver  vchan;
@@ -1117,8 +1114,9 @@ public:
 
 private:
     // Data
-    const Future<T>* first;
-    const Future<T>* last;
+    const Future<T>*        first;
+    const Future<T>*        last;
+    optional<nanoseconds>   time;
 };
 
 
