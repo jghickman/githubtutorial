@@ -254,8 +254,22 @@ Task::Future_selection::Future_transform::Future_transform(const Future<T>* firs
 */
 inline
 Task::Future_selection::Timer::Timer()
-    : exec{Execution::inactive}
 {
+    clear();
+}
+
+
+inline void
+Task::Future_selection::Timer::clear() const
+{
+    state = State::inactive;
+}
+
+
+inline bool
+Task::Future_selection::Timer::is_completed() const
+{
+    return state == State::complete;
 }
 
 
@@ -263,7 +277,7 @@ inline void
 Task::Future_selection::Timer::start(Task::Handle task, nanoseconds duration) const
 {
     scheduler.start_timer(task, duration);
-    exec = Execution::running;
+    state = State::running;
 }
 
 
@@ -285,7 +299,32 @@ Task::Future_selection::Transform_and_lock::Transform_and_lock(const Future<T>* 
 inline Channel_size
 Task::Future_selection::selected() const
 {
-    return *winner;
+    return *result;
+}
+
+
+template<class T>
+bool
+Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
+{
+    Transform_and_lock transform{first, last, &futures, &channels};
+
+    timer.clear();
+    type = Type::all;
+    result.reset();
+    nenqueued = enqueue_not_ready(task, futures, channels);
+
+    if (nenqueued == 0)
+        result = wait_success;
+    else if (is_valid(maxtime))
+        timer.start(task, *maxtime);
+    else {
+        dequeue_all(task, futures, channels);
+        nenqueued   = 0;
+        result      = wait_fail;
+    }
+
+    return nenqueued == 0;
 }
 
 
@@ -296,17 +335,20 @@ Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Futu
     Transform_and_lock transform{first, last, &futures, &channels};
 
     type = Type::all;
-    winner.reset();
+    timer.clear();
+    result.reset();
     nenqueued = enqueue_not_ready(task, futures, channels);
 
-    if (maxtime && nenqueued > 0) {
-        const nanoseconds maxwait = *maxtime;
+    if (nenqueued == 0)
+        result = wait_success;
+    else if (maxtime) {
+        const auto maxwait = *maxtime;
         if (maxwait > 0ns)
             timer.start(task, maxwait);
         else {
             dequeue_all(task, futures, channels);
             nenqueued   = 0;
-            winner      = no_selection;
+            result      = wait_fail;
         }
     }
 
@@ -320,13 +362,45 @@ Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Futu
 {
     Transform_and_lock transform{first, last, &futures, &channels};
 
-    type        = Type::any;
-    nenqueued   = 0;
-    winner      = select_ready(futures, channels);
+    timer.clear();
+    type = Type::any;
+    nenqueued = 0;
+    result = select_ready(futures, channels);
 
-    if (!winner) {
-        enqueue_all(task, futures, channels);
-        nenqueued = futures.size();
+    if (!result) {
+        if (maxtime && *maxtime <= 0ns)
+            result = 
+        if (!maxtime || *maxtime > 0ns) {
+            enqueue_all(task, futures, channels);
+            nenqueued = futures.size();
+            if (*maxtime > 0ns)
+                timer.start(task, *maxtime);
+    }
+
+    return nenqueued == 0;
+}
+
+
+template<class T>
+bool
+Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
+{
+    Transform_and_lock transform{first, last, &futures, &channels};
+
+    timer.clear();
+    type = Type::any;
+    nenqueued = 0;
+    result = select_ready(futures, channels);
+
+    if (!result) {
+        if (!maxtime) {
+            enqueue_all(task, futures, channels);
+            nenqueued = futures.size();
+        } else if (*maxtime > 0ns) {
+            timer.start(task, *maxtime);
+            enqueue_all(task, futures, channels);
+            nenqueued = futures.size();
+        }
     }
 
     return nenqueued == 0;
@@ -2083,10 +2157,9 @@ Future<T>::value() const
 */
 template<class T>
 inline
-Future_all_awaitable<T>::Future_all_awaitable(const Future<T>* begin, const Future<T>* end, const optional<nanoseconds>& maxtime)
+Future_all_awaitable<T>::Future_all_awaitable(const Future<T>* begin, const Future<T>* end)
     : first{begin}
     , last{end}
-    , time{maxtime}
 {
 }
 
@@ -2117,25 +2190,85 @@ Future_all_awaitable<T>::await_suspend(Task::Handle task)
 
 template<class T>
 inline Future_all_awaitable<T>
-wait_all(const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
+wait_all(const Future<T>* first, const Future<T>* last)
 {
-    return Future_all_awaitable<T>(first, last, maxtime);
+    return Future_all_awaitable<T>(first, last);
 }
 
 
 template<class T>
 inline Future_all_awaitable<T>
-wait_all(const vector<Future<T>>& fs, const optional<nanoseconds>& maxtime)
+wait_all(const vector<Future<T>>& fs)
 {
-    const Future<T>* first;
-    const Future<T>* last;
+    const Future<T>* first{nullptr};
+    const Future<T>* last{nullptr};
 
     if (!fs.empty()) {
         first = fs.data();
         last = first + fs.size();
-    } else {
-        first = nullptr;
-        last = nullptr;
+    }
+
+    return wait_all(first, last);
+}
+
+
+/*
+    Future All Timed Awaitable
+*/
+template<class T>
+inline
+Future_all_timed_awaitable<T>::Future_all_timed_awaitable(const Future<T>* begin, const Future<T>* end, nanoseconds maxtime)
+    : first{begin}
+    , last{end}
+    , time{maxtime}
+{
+}
+
+
+template<class T>
+inline bool
+Future_all_timed_awaitable<T>::await_ready()
+{
+    return false;
+}
+
+
+template<class T>
+inline bool
+Future_all_timed_awaitable<T>::await_resume()
+{
+    return task.promise().selected_future() != wait_fail;
+}
+
+
+template<class T>
+inline bool
+Future_all_timed_awaitable<T>::await_suspend(Task::Handle taskh)
+{
+    task = taskh;
+    task.promise().wait_all(first, last, time);
+    return true;
+}
+
+
+template<class T>
+inline Future_all_timed_awaitable<T>
+wait_all(const Future<T>* first, const Future<T>* last, nanoseconds maxtime)
+{
+    return Future_all_timed_awaitable<T>(first, last, maxtime);
+}
+
+
+template<class T>
+inline Future_all_timed_awaitable<T>
+wait_all(const vector<Future<T>>& fs, nanoseconds maxtime)
+{
+    const Future<T>* first{nullptr};
+    const Future<T>* last{nullptr};
+
+    if (!fs.empty()) {
+        first = fs.data();
+        last = first + fs.size();
     }
 
     return wait_all(first, last, maxtime);
@@ -2147,7 +2280,16 @@ wait_all(const vector<Future<T>>& fs, const optional<nanoseconds>& maxtime)
 */
 template<class T>
 inline
-Future_any_awaitable<T>::Future_any_awaitable(const Future<T>* begin, const Future<T>* end, const optional<nanoseconds>& maxtime)
+Future_any_awaitable<T>::Future_any_awaitable(const Future<T>* begin, const Future<T>* end)
+    : first{begin}
+    , last{end}
+{
+}
+
+
+template<class T>
+inline
+Future_any_awaitable<T>::Future_any_awaitable(const Future<T>* begin, const Future<T>* end, nanoseconds maxtime)
     : first{begin}
     , last{end}
     , time{maxtime}
@@ -2173,9 +2315,9 @@ Future_any_awaitable<T>::await_resume()
 
 template<class T>
 inline bool
-Future_any_awaitable<T>::await_suspend(Task::Handle h)
+Future_any_awaitable<T>::await_suspend(Task::Handle taskh)
 {
-    task = h;
+    task = taskh;
     task.promise().wait_any(first, last, time);
     return true;
 }
@@ -2183,7 +2325,15 @@ Future_any_awaitable<T>::await_suspend(Task::Handle h)
 
 template<class T>
 inline Future_any_awaitable<T>
-wait_any(const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
+wait_any(const Future<T>* first, const Future<T>* last)
+{
+    return Future_any_awaitable<T>(first, last);
+}
+
+
+template<class T>
+inline Future_any_awaitable<T>
+wait_any(const Future<T>* first, const Future<T>* last, nanoseconds maxtime)
 {
     return Future_any_awaitable<T>(first, last, maxtime);
 }
@@ -2191,17 +2341,30 @@ wait_any(const Future<T>* first, const Future<T>* last, const optional<nanosecon
 
 template<class T>
 inline Future_any_awaitable<T>
-wait_any(const vector<Future<T>>& fs, const optional<nanoseconds>& maxtime)
+wait_any(const vector<Future<T>>& fs)
 {
-    const Future<T>* first;
-    const Future<T>* last;
+    const Future<T>* first{nullptr};
+    const Future<T>* last{nullptr};
 
     if (!fs.empty()) {
         first = fs.data();
         last = first + fs.size();
-    } else {
-        first = nullptr;
-        last = nullptr;
+    }
+
+    return wait_any(first, last);
+}
+
+
+template<class T>
+inline Future_any_awaitable<T>
+wait_any(const vector<Future<T>>& fs, nanoseconds maxtime)
+{
+    const Future<T>* first{nullptr};
+    const Future<T>* last{nullptr};
+
+    if (!fs.empty()) {
+        first = fs.data();
+        last = first + fs.size();
     }
 
     return wait_any(first, last, maxtime);

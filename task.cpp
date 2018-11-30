@@ -278,42 +278,52 @@ inline void
 Task::Future_selection::Timer::cancel(Task::Handle task) const
 {
     scheduler.cancel_timer(task);
-    exec = Execution::cancel_pending;
+    state = State::cancel_pending;
 }
 
 
 inline void
 Task::Future_selection::Timer::complete(Time_point /*when*/) const
 {
-    exec = Execution::inactive;
+    if (state == State::cancel_pending)
+        state = State::cancel_complete;
+    else
+        state = State::complete;
 }
 
 
 inline void
 Task::Future_selection::Timer::complete_cancel() const
 {
-    exec = Execution::inactive;
+    state = State::cancel_complete;
 }
 
 
 inline bool
 Task::Future_selection::Timer::is_active() const
 {
-    return exec != Execution::inactive;
+    switch(state) {
+    case State::running:
+    case State::cancel_pending:
+        return true;
+
+    default:
+        return false;
+    }
 }
 
 
 inline bool
-Task::Future_selection::Timer::is_cancel_pending() const
+Task::Future_selection::Timer::is_cancelled() const
 {
-    return exec == Execution::cancel_pending;
-}
+    switch(state) {
+    case State::cancel_pending:
+    case State::cancel_complete:
+        return true;
 
-
-inline bool
-Task::Future_selection::Timer::is_running() const
-{
-    return exec == Execution::running;
+    default:
+        return false;
+    }
 }
 
 
@@ -343,8 +353,11 @@ bool
 Task::Future_selection::complete_timer(Task::Handle task, Time_point time)
 {
     timer.complete(time);
-    if (nenqueued > 0)
-        nenqueued -= dequeue_not_ready(task, futures, channels);
+    if (!timer.is_cancelled()) {
+        result = wait_fail;
+        if (nenqueued > 0)
+            nenqueued -= dequeue_not_ready(task, futures, channels);
+    }
 
     return nenqueued == 0;
 }
@@ -427,16 +440,16 @@ Task::Future_selection::select_channel(Task::Handle task, Channel_size pos)
 {
     const Channel_size futpos = complete(task, futures, channels, pos);
 
-    if (--nenqueued == 0 && timer.is_running())
+    if (--nenqueued == 0 && timer.is_active() && !timer.is_cancelled())
         timer.cancel(task);
 
-    if (!winner) {
-        winner = futpos;
+    if (!result) {
+        result = futpos;
         if (type == Type::any)
             nenqueued -= dequeue_not_ready(task, futures, channels);
     }
 
-    return Select_status(*winner, nenqueued == 0 && !timer.is_active());
+    return Select_status(*result, nenqueued == 0 && !timer.is_active());
 }
 
 
@@ -1055,12 +1068,12 @@ Scheduler::Timers::~Timers()
 
 
 void
-Scheduler::Timers::activate_alarm(Windows_handle timer, const Request& request, Alarm_queue* alarmqp, Time_point now)
+Scheduler::Timers::activate_alarm(Windows_handle timer, const Request& request, Alarm_queue* queuep, Time_point now)
 {
     const Alarm alarm = make_alarm(request, now);
 
-    alarmqp->push(alarm);
-    if (alarm == alarmqp->front())
+    queuep->push(alarm);
+    if (alarm == queuep->front())
         set_timer(timer, alarm, now);
 }
 
@@ -1076,13 +1089,13 @@ Scheduler::Timers::cancel(Task::Handle task)
 
 
 void
-Scheduler::Timers::cancel_alarm(Windows_handle timer, const Request& request, Alarm_queue* alarmqp, Time_point now)
+Scheduler::Timers::cancel_alarm(Windows_handle timer, const Request& request, Alarm_queue* queuep, Time_point now)
 {
-    const auto alarmp = alarmqp->find(request.task());
+    const auto alarmp = queuep->find(request.task());
 
-    if (alarmp != alarmqp->end()) {
+    if (alarmp != queuep->end()) {
         notify_cancel(*alarmp);
-        remove_alarm(timer, alarmqp, alarmp, now);
+        remove_alarm(timer, queuep, alarmp, now);
     }
 }
 
@@ -1150,35 +1163,35 @@ Scheduler::Timers::notify_complete(const Alarm& alarm, Time_point now, Lock* loc
 
 
 void
-Scheduler::Timers::process_alarms(Windows_handle timer, Alarm_queue* alarmqp, Lock* lockp)
+Scheduler::Timers::process_alarms(Windows_handle timer, Alarm_queue* queuep, Lock* lockp)
 {
     const Time_point now = Clock::now();
 
-    while (!alarmqp->is_empty() && is_expired(alarmqp->front(), now))
-        notify_complete(alarmqp->pop(), now, lockp);
+    while (!queuep->is_empty() && is_expired(queuep->front(), now))
+        notify_complete(queuep->pop(), now, lockp);
 
-    if (!alarmqp->is_empty())
-        set_timer(timer, alarmqp->front(), now);
+    if (!queuep->is_empty())
+        set_timer(timer, queuep->front(), now);
 }
 
 
 void
-Scheduler::Timers::process_request(Windows_handle timer, const Request& request, Alarm_queue* alarmqp, Time_point now)
+Scheduler::Timers::process_request(Windows_handle timer, const Request& request, Alarm_queue* queuep, Time_point now)
 {
     if (request.is_start())
-        activate_alarm(timer, request, alarmqp, now);
+        activate_alarm(timer, request, queuep, now);
     else if (request.is_cancel())
-        cancel_alarm(timer, request, alarmqp, now);
+        cancel_alarm(timer, request, queuep, now);
 }
 
 
 void
-Scheduler::Timers::process_requests(Windows_handle timer, Request_queue* requestqp, Alarm_queue* alarmqp)
+Scheduler::Timers::process_requests(Windows_handle timer, Request_queue* requestqp, Alarm_queue* queuep)
 {
     const Time_point now = Clock::now();
 
     while (!requestqp->empty()) {
-        process_request(timer, requestqp->front(), alarmqp, now);
+        process_request(timer, requestqp->front(), queuep, now);
         requestqp->pop();
     }
 }
@@ -1227,14 +1240,15 @@ Scheduler::Timers::run_thread()
 void
 Scheduler::Timers::set_timer(Windows_handle timer, const Alarm& alarm, Time_point now)
 {
-    const nanoseconds   offset{alarm.expiry - now};
-    const std::int64_t  n64{-offset.count()};
-    LARGE_INTEGER       nlarge;
+    static const int nanosecs_per_tick = 100;
 
-    nlarge.LowPart  = static_cast<DWORD>(n64 & 0xFFFFFFFF);
-    nlarge.HighPart = static_cast<LONG>(n64 >> 32);
+    const nanoseconds   dt      =  alarm.expiry - now;
+    const std::int64_t  timerdt = -(dt.count() / nanosecs_per_tick);
+    LARGE_INTEGER       timerbuf;
 
-    SetWaitableTimer(timer, &nlarge, 0, NULL, NULL, FALSE);
+    timerbuf.LowPart = static_cast<DWORD>(timerdt & 0xFFFFFFFF);
+    timerbuf.HighPart = static_cast<LONG>(timerdt >> 32);
+    SetWaitableTimer(timer, &timerbuf, 0, NULL, NULL, FALSE);
 }
 
 
@@ -1256,9 +1270,9 @@ Scheduler::Scheduler(int nthreads)
 {
     const auto nqs = ready.size();
 
-    taskprocs.reserve(nqs);
+    processors.reserve(nqs);
     for (unsigned q = 0; q != nqs; ++q)
-        taskprocs.emplace_back([&,q]{ run_tasks(q); });
+        processors.emplace_back([&,q]{ run_tasks(q); });
 }
 
 
@@ -1271,8 +1285,15 @@ Scheduler::Scheduler(int nthreads)
 Scheduler::~Scheduler()
 {
     ready.interrupt();
-    for (auto& proc : taskprocs)
+    for (auto& proc : processors)
         proc.join();
+}
+
+
+void
+Scheduler::cancel_timer(Task::Handle task)
+{
+    timers.cancel(task);
 }
 
 
@@ -1301,6 +1322,13 @@ Scheduler::run_tasks(unsigned qpos)
             ready.interrupt();
         }
     }
+}
+
+
+void
+Scheduler::start_timer(Task::Handle task, nanoseconds duration)
+{
+    timers.start(task, duration);
 }
 
 

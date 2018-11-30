@@ -153,6 +153,8 @@ add_one(int n)
 int
 two()
 {
+    static const int seconds = 1000;
+//    Sleep(10*seconds);
     return 2;
 }
 
@@ -166,6 +168,8 @@ four()
 const int done = 0;
 const int error = -1;
 
+using namespace std::literals::chrono_literals;
+
 
 Task
 wait_all_task(int n, Send_channel<int> results)
@@ -176,19 +180,20 @@ wait_all_task(int n, Send_channel<int> results)
     fs.push_back(async(two));
     fs.push_back(async(four));
 
-    co_await wait_all(fs);
+    if (!co_await wait_all(fs, 2s))
+        co_await results.send(error);
+    else {
+        int r = done;
+        for (int i = 0; i < fs.size() && r != error; ++i) {
+            try {
+                r = co_await fs[i].get();
+            }
+            catch (...) {
+                r = error;
+            }
 
-    int r = done;
-
-    for (int i = 0; i < fs.size() && r != error; ++i) {
-        try {
-            r = co_await fs[i].get();
+            co_await results.send(r);
         }
-        catch (...) {
-            r = error;
-        }
-
-        co_await results.send(r);
     }
 
     co_await results.send(done);

@@ -230,6 +230,7 @@ private:
     private:
         // Names/Types
         enum class Type { any, all };
+        static const Channel_size wait_success{1};
 
         class Channel_wait {
         public:
@@ -342,19 +343,18 @@ private:
             void complete(Time_point) const;
             void cancel(Task::Handle) const;
             void complete_cancel() const;
-            bool is_running() const;
-            bool is_cancel_pending() const;
+            void clear() const;
             bool is_active() const;
+            bool is_completed() const;
+            bool is_cancelled() const;
 
         private:
             // Constants
-            enum class Execution { inactive, running, cancel_pending };
+            enum class State { inactive, running, cancel_pending, cancel_complete, complete };
 
             // Data
-            mutable Execution exec;
+            mutable State state;
         };
-
-        static const Channel_size no_selection{-1};
 
         // Selection
         static Channel_size             complete(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&, Channel_size chanpos);
@@ -372,8 +372,8 @@ private:
         Future_wait_vector      futures;
         Channel_wait_vector     channels;
         Channel_size            nenqueued;
+        optional<Channel_size>  result;
         Timer                   timer;
-        optional<Channel_size>  winner;
     };
 
     // Random Number Generation
@@ -1108,7 +1108,7 @@ template<class T>
 class Future_all_awaitable {
 public:
     // Construct
-    Future_all_awaitable(const Future<T>*, const Future<T>*, const optional<nanoseconds>& maxtime);
+    Future_all_awaitable(const Future<T>*, const Future<T>*);
 
     // Awaitable Operations
     bool await_ready();
@@ -1117,9 +1117,31 @@ public:
 
 private:
     // Data
+    const Future<T>* first;
+    const Future<T>* last;
+};
+
+
+/*
+    Future All Timed Awaitable
+*/
+template<class T>
+class Future_all_timed_awaitable {
+public:
+    // Construct
+    Future_all_timed_awaitable(const Future<T>*, const Future<T>*, nanoseconds maxtime);
+
+    // Awaitable Operations
+    bool await_ready();
+    bool await_suspend(Task::Handle);
+    bool await_resume();
+
+private:
+    // Data
     const Future<T>*        first;
     const Future<T>*        last;
     optional<nanoseconds>   time;
+    Task::Handle            task;
 };
 
 
@@ -1130,7 +1152,8 @@ template<class T>
 class Future_any_awaitable {
 public:
     // Construct
-    Future_any_awaitable(const Future<T>*, const Future<T>*, const optional<nanoseconds>& maxtime);
+    Future_any_awaitable(const Future<T>*, const Future<T>*);
+    Future_any_awaitable(const Future<T>*, const Future<T>*, nanoseconds maxtime);
 
     // Awaitable Operations
     bool            await_ready();
@@ -1149,10 +1172,15 @@ private:
 /*
     Future Waiting
 */
-template<class T> Future_any_awaitable<T> wait_any(const vector<Future<T>>&, const optional<nanoseconds>& maxtime = optional<nanoseconds>());
-template<class T> Future_any_awaitable<T> wait_any(const Future<T>*, const Future<T>*, const optional<nanoseconds>& maxtime = optional<nanoseconds>());
-template<class T> Future_all_awaitable<T> wait_all(const vector<Future<T>>&, const optional<nanoseconds>& maxtime = optional<nanoseconds>());
-template<class T> Future_all_awaitable<T> wait_all(const Future<T>*, const Future<T>*, const optional<nanoseconds>& maxtime = optional<nanoseconds>());
+template<class T> Future_any_awaitable<T>       wait_any(const vector<Future<T>>&);
+template<class T> Future_any_awaitable<T>       wait_any(const vector<Future<T>>&, nanoseconds maxtime);
+template<class T> Future_any_awaitable<T>       wait_any(const Future<T>*, const Future<T>*);
+template<class T> Future_any_awaitable<T>       wait_any(const Future<T>*, const Future<T>*, nanoseconds maxtime);
+template<class T> Future_all_awaitable<T>       wait_all(const vector<Future<T>>&);
+template<class T> Future_all_awaitable<T>       wait_all(const Future<T>*, const Future<T>*);
+template<class T> Future_all_timed_awaitable<T> wait_all(const vector<Future<T>>&, nanoseconds maxtime);
+template<class T> Future_all_timed_awaitable<T> wait_all(const Future<T>*, const Future<T>*, nanoseconds maxtime);
+static const Channel_size wait_fail = -1;
 
 
 /*
@@ -1437,7 +1465,7 @@ private:
     // Data
     Task_queue_array    ready;
     Suspended_tasks     suspended;
-    std::vector<Thread> taskprocs;
+    std::vector<Thread> processors;
     Timers              timers;
 };
 
