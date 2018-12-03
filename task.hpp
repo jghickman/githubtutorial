@@ -66,7 +66,6 @@ using boost::optional;
 using std::exception_ptr;
 using std::chrono::nanoseconds;
 #pragma warning(disable: 4455)
-using std::chrono::operator""ns;
 using std::vector;
 
 
@@ -124,6 +123,9 @@ public:
     // Synchronization
     void unlock();
 
+    // Conversions
+    explicit operator bool() const;
+
     // Comparisons
     friend bool operator==(const Task&, const Task&);
 
@@ -158,44 +160,83 @@ private:
 
         // Selection Operations
         bool                            select(Task::Handle, Channel_operation*, Channel_operation*);
-        Select_status                   select(Task::Handle, Channel_size pos);
+        Select_status                   complete(Task::Handle, Channel_size pos);
         Channel_size                    selected() const;
         static optional<Channel_size>   try_select(Channel_operation*, Channel_operation*);
 
     private:
         // Names/Types
-        class Lock_guard {
+        class Range {
         public:
-            Lock_guard(Channel_operation*, Channel_operation*);
-            Lock_guard(const Lock_guard&) = delete;
-            Lock_guard& operator=(const Lock_guard&) = delete;
-            ~Lock_guard();
-        
+            // Construct
+            Range() = default;
+            Range(Channel_operation* first, Channel_operation* last);
+
+            // Observers
+            Channel_operation* begin() const;
+            Channel_operation* end() const;
+
         private:
             // Data
-            Channel_operation* first;
-            Channel_operation* last;
+            Channel_operation* start;
+            Channel_operation* stop;
         };
 
-        class Sort_guard {
+        class Sorted_range {
         public:
-            Sort_guard(Channel_operation*, Channel_operation*);
-            Sort_guard(const Sort_guard&) = delete;
-            Sort_guard& operator=(const Sort_guard&) = delete;
-            ~Sort_guard();
-        
+            // Construct
+            Sorted_range() = default;
+            Sorted_range(Channel_operation* ufirst, Channel_operation* ulast, Channel_operation* last);
+
+            // Observers
+            Range unique() const;
+            Range all() const;
+
         private:
             // Data
-            Channel_operation* first;
-            Channel_operation* last;
+            Channel_operation*  ubegin;
+            Channel_operation*  uend;
+            Channel_operation   end;
+        };
+
+        class Channel_locks {
+        public:
+            explicit Channel_locks(const Range&);
+            Channel_locks(const Channel_locks&) = delete;
+            Channel_locks& operator=(const Channel_locks&) = delete;
+            ~Channel_locks();
+
+        private:
+            // Data
+            Range range;
+        };
+
+        class Channel_sort {
+        public:
+            Channel_sort(Channel_operation*, Channel_operation*);
+            Channel_sort(const Channel_sort&) = delete;
+            Channel_sort& operator=(const Channel_sort&) = delete;
+            ~Channel_sort();
+
+            // Observers
+            Range unique() const;
+        
+            // Sentry Operations
+            Sorted_range    keep();
+            bool            is_dismissed() const;
+
+        private:
+            // Data
+            Sorted_range    rng;
+            bool            iskept;
         };
 
         // Selection
-        static optional<Channel_size>   select_ready(Channel_operation*, Channel_operation*);
-        static Channel_size             count_ready(const Channel_operation*, const Channel_operation*);
-        static Channel_operation*       pick_ready(Channel_operation*, Channel_operation*, Channel_size nready);
-        static Channel_size             enqueue(Task::Handle, Channel_operation*, Channel_operation*);
-        static Channel_size             dequeue(Task::Handle, Channel_operation*, Channel_operation*, Channel_size selected);
+        static optional<Channel_size>   select_ready(const Range&);
+        static Channel_size             count_ready(const Range&);
+        static Channel_operation*       pick_ready(const Range&, Channel_size nready);
+        static Channel_size             enqueue(Task::Handle, const Range&);
+        static Channel_size             dequeue(Task::Handle, const Range&, Channel_size selected);
 
         // Sorting
         static void save_positions(Channel_operation*, Channel_operation*);
@@ -203,11 +244,12 @@ private:
         static void restore_positions(Channel_operation*, Channel_operation*);
 
         // Data
-        Channel_operation*      begin;
-        Channel_operation*      end;
+        Sorted_range            enqueued;
         Channel_size            nenqueued;
         optional<Channel_size>  winner;
     };
+
+    using Channel_operation_selection = Channel_selection;
 
     class Future_selection {
     public:
@@ -216,13 +258,12 @@ private:
         Future_selection(const Future_selection&) = delete;
         Future_selection& operator=(const Future_selection&) = delete;
 
-        // Selection Operations
+        // Select
         template<class T> bool  wait_any(Task::Handle, const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
         template<class T> bool  wait_all(Task::Handle, const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
-
+        Select_status           complete_readable(Task::Handle, Channel_size chan);
         bool                    complete_timer(Task::Handle, Time_point);
         bool                    cancel_timer();
-        Select_status           select_channel(Task::Handle, Channel_size pos);
         Channel_size            selected() const;
 
         // Friends
@@ -268,18 +309,18 @@ private:
             Future_wait() = default;
             Future_wait(bool* readyp, Channel_size vpos, Channel_size epos);
 
-            // Channels
-            Channel_size value() const;
-            Channel_size error() const;
-
             // Enqueue/Dequeue
             void enqueue(Task::Handle, const Channel_wait_vector&) const;
             bool dequeue(Task::Handle, const Channel_wait_vector&) const;
             void dequeue_locked(Task::Handle, const Channel_wait_vector&) const;
 
-            // Completion
+            // Complete
             void complete(Task::Handle, const Channel_wait_vector&, Channel_size pos) const;
             bool is_ready(const Channel_wait_vector&) const;
+
+            // Channels
+            Channel_size value() const;
+            Channel_size error() const;
 
         private:
             // Data
@@ -290,9 +331,6 @@ private:
 
         class Wait_set {
         public:
-            // Construct
-            Wait_set() = default;
-
             // Enqueue/Dequeue
             void            enqueue_all(Task::Handle);
             Channel_size    enqueue_not_ready(Task::Handle);
@@ -300,9 +338,9 @@ private:
             void            dequeue_not_ready(Task::Handle);
             Channel_size    enqueued() const;
 
-            // Selection
+            // Complete
             optional<Channel_size>  select_ready();
-            Channel_size            complete_channel(Task::Handle, Channel_size pos);
+            Channel_size            complete_readable(Task::Handle, Channel_size chan);
 
             // Friends
             friend class Wait_setup;
@@ -319,14 +357,14 @@ private:
             static void                     unlock(Channel_wait_vector*);
             void                            end_setup();
 
-            // Selection
+            // Select
             static Channel_size             count_ready(const Future_wait_vector&, const Channel_wait_vector&);
             static optional<Channel_size>   pick_ready(const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
 
             // Data
-            Future_wait_vector      futures;
             Channel_wait_vector     channels;
-            Channel_size            nenqueued;  // futures
+            Future_wait_vector      futures;
+            Channel_size            nenqueued; // futures
         };
 
         class Wait_setup {
@@ -349,18 +387,17 @@ private:
 
             // Execution
             void start(Task::Handle, nanoseconds duration) const;
-            void complete(Time_point) const;
+            void expire(Time_point) const;
             void cancel(Task::Handle) const;
             void complete_cancel() const;
             void clear() const;
-            bool is_active() const;
-            bool is_running() const;
-            bool is_completed() const;
-            bool is_cancelled() const;
+            bool is_running() const;    // active and neither cancelled nor expired
+            bool is_active() const;     // either running or cancel pending
+            bool is_cancelled() const;  // cancel either pending or complete
 
         private:
             // Constants
-            enum class State { inactive, running, cancel_pending, cancel_complete, complete };
+            enum class State { inactive, running, cancel_pending, cancel_complete, expired };
 
             // Data
             mutable State state;
@@ -393,22 +430,20 @@ public:
         Initial_suspend initial_suspend() const;
         Final_suspend   final_suspend();
     
-        // Channel Operation Selection
+        // Channel Operations
         template<Channel_size N> void   select(Channel_operation (&ops)[N]);
         void                            select(Channel_operation*, Channel_operation*);
-        Select_status                   select_operation(Channel_size);
+        Select_status                   complete_operation(Channel_size);
         Channel_size                    selected_operation() const;
         static optional<Channel_size>   try_select(Channel_operation*, Channel_operation*);
 
-        // Channel Event Selection
-        Select_status select_readable(Channel_size pos);
-
-        // Future Selection
+        // Future Operations
         template<class T> void  wait_all(const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
         template<class T> void  wait_any(const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
-        Channel_size            selected_future() const;
+        Select_status           complete_readable(Channel_size chan);
         bool                    complete_timer(Time_point);
         bool                    cancel_timer();
+        Channel_size            selected_future() const;
 
         // Execution
         void    make_ready();
@@ -544,11 +579,11 @@ private:
     public:
         // Construct
         Readable_wait() = default;
-        Readable_wait(Task::Handle, Channel_size pos);
+        Readable_wait(Task::Handle, Channel_size chan);
 
         // Identity
         Task::Handle task() const;
-        Channel_size position() const;
+        Channel_size channel() const;
 
         // Selection
         void notify(Mutex*) const;
@@ -556,7 +591,7 @@ private:
         // Comparisons
         friend bool operator==(const Readable_wait& x, const Readable_wait& y) {
             if (x.task() != y.task()) return false;
-            if (x.position() != y.position()) return false;
+            if (x.channel() != y.channel()) return false;
             return true;
         }
 
@@ -566,7 +601,7 @@ private:
 
         // Data
         mutable Task::Handle    taskh;
-        Channel_size            waitpos;
+        Channel_size            chanpos;
     };
 
     class Buffer {
@@ -1223,11 +1258,11 @@ private:
         Task_queue& operator=(const Task_queue&) = delete;
 
         // Queue Operations
-        void            push(Task&&);
-        optional<Task>  pop();
-        bool            try_push(Task&&);
-        optional<Task>  try_pop();
-        void            interrupt();
+        void push(Task&&);
+        Task pop();
+        bool try_push(Task&&);
+        Task try_pop();
+        void interrupt();
     
     private:
         // Queue Operations
@@ -1258,10 +1293,10 @@ private:
         Size size() const;
     
         // Queue Operations
-        void            push(Task&&);
-        void            push(Size qpref, Task&&);
-        optional<Task>  pop(Size qpref);
-        void            interrupt();
+        void push(Task&&);
+        void push(Size qpref, Task&&);
+        Task pop(Size qpref);
+        void interrupt();
 
     private:
         // Queue Operations

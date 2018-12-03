@@ -54,8 +54,8 @@ Scheduler scheduler;
     Task Channel Selection Lock Guard
 */
 Task::Channel_selection::Lock_guard::Lock_guard(Channel_operation* fst, Channel_operation* lst)
-    : first(fst)
-    , last(lst)
+    : first{fst}
+    , last{lst}
 {
     Channel_base* prevchanp = nullptr;
 
@@ -88,8 +88,8 @@ Task::Channel_selection::Lock_guard::~Lock_guard()
 */
 inline
 Task::Channel_selection::Sort_guard::Sort_guard(Channel_operation* begin, Channel_operation* end)
-    : first(begin)
-    , last(end)
+    : first{begin}
+    , last{end}
 {
     save_positions(first, last);
     sort_channels(first, last);
@@ -106,11 +106,24 @@ Task::Channel_selection::Sort_guard::~Sort_guard()
 /*
     Task Channel Selection
 */
-Channel_size
-Task::Channel_selection::count_ready(const Channel_operation* first, const Channel_operation* last)
+Task::Select_status
+Task::Channel_selection::complete(Task::Handle task, Channel_size pos)
 {
-    return count_if(first, last, [](const auto& co) {
-        return co.is_ready();
+    --nenqueued;
+    if (!winner) {
+        winner = pos;
+        nenqueued -= dequeue(task, firstenq, lastenq, pos);
+    }
+
+    return Select_status(*winner, nenqueued == 0);
+}
+
+
+Channel_size
+Task::Channel_selection::count_ready(const Range& ops)
+{
+    return count_if(ops.begin(), ops.end(), [](const auto& op) {
+        return op.is_ready();
     });
 }
 
@@ -177,33 +190,21 @@ Task::Channel_selection::save_positions(Channel_operation* first, Channel_operat
 }
 
 
-Task::Select_status
-Task::Channel_selection::select(Task::Handle task, Channel_size pos)
-{
-    --nenqueued;
-    if (!winner) {
-        winner = pos;
-        nenqueued -= dequeue(task, begin, end, pos);
-    }
-
-    return Select_status(*winner, nenqueued == 0);
-}
-
-
 bool
 Task::Channel_selection::select(Task::Handle task, Channel_operation* first, Channel_operation* last)
 {
-    Sort_guard chansort{first, last};
-    Lock_guard chanlocks{first, last};
+    Channel_sort        sorted{first, last};
+    const Range         unique{sorted.unique()};
+    const Channel_locks lock{unique};
 
     nenqueued   = 0;
-    winner      = select_ready(first, last);
+    winner      = select_ready(unique);
 
-    // If nothing is ready, enqueue the operations.
+    // If none of the operations are ready, enqueue and store them in unique
+    // order.
     if (!winner) {
-        nenqueued = enqueue(task, first, last);
-        begin = first;
-        end = last;
+        nenqueued = enqueue(task, unique);
+        enqueued = sorted.keep();
     }
 
     return winner ? true : false;
@@ -211,13 +212,13 @@ Task::Channel_selection::select(Task::Handle task, Channel_operation* first, Cha
 
 
 optional<Channel_size>
-Task::Channel_selection::select_ready(Channel_operation* first, Channel_operation* last)
+Task::Channel_selection::select_ready(const Range& ops)
 {
     optional<Channel_size>  pos;
-    const Channel_size      n = count_ready(first, last);
+    const Channel_size      n = count_ready(ops);
 
     if (n > 0) {
-        Channel_operation* cop = pick_ready(first, last, n);
+        Channel_operation* cop = pick_ready(ops, n);
         cop->execute();
         pos = cop->position();
     }
@@ -229,7 +230,7 @@ Task::Channel_selection::select_ready(Channel_operation* first, Channel_operatio
 Channel_size
 Task::Channel_selection::selected() const
 {
-    restore_positions(begin, end);
+    restore_positions(firstenq, lastenq);
     return *winner;
 }
 
@@ -257,13 +258,13 @@ Task::Channel_selection::try_select(Channel_operation* first, Channel_operation*
     Task Future Selection Wait Set
 */
 Channel_size
-Task::Future_selection::Wait_set::complete_channel(Task::Handle task, Channel_size pos)
+Task::Future_selection::Wait_set::complete_readable(Task::Handle task, Channel_size chan)
 {
-    const Channel_size fpos = channels[pos].future();
+    const Channel_size future = channels[chan].future();
 
-    futures[fpos].complete(task, channels, pos);
+    futures[future].complete(task, channels, chan);
     --nenqueued;
-    return fpos;
+    return future;
 }
 
 
@@ -290,13 +291,15 @@ void
 Task::Future_selection::Wait_set::dequeue_not_ready(Task::Handle task)
 {
     if (nenqueued > 0) {
-        nenqueued -= accumulate(futures.begin(), futures.end(), 0, [&](auto n, const auto& f) {
+        auto n = accumulate(futures.begin(), futures.end(), 0, [&](auto x, const auto& f) {
             if (!f.is_ready(channels)) {
                 f.dequeue(task, channels);
-                ++n;
+                ++x;
             }
-            return n;
+            return x;
         });
+
+        nenqueued -= n;
     }
 }
 
@@ -314,12 +317,12 @@ Task::Future_selection::Wait_set::enqueue_all(Task::Handle task)
 Channel_size
 Task::Future_selection::Wait_set::enqueue_not_ready(Task::Handle task)
 {
-    const auto n = accumulate(futures.begin(), futures.end(), 0, [&](auto n, const auto& f) {
+    const auto n = accumulate(futures.begin(), futures.end(), 0, [&](auto x, const auto& f) {
         if (!f.is_ready(channels)) {
             f.enqueue(task, channels);
-            ++n;
+            ++x;
         }
-        return n;
+        return x;
     });
 
     nenqueued += n;
@@ -330,8 +333,8 @@ Task::Future_selection::Wait_set::enqueue_not_ready(Task::Handle task)
 void
 Task::Future_selection::Wait_set::lock(Channel_wait_vector* waitsp)
 {
-    for (const auto& wait : *waitsp)
-        wait.lock_channel();
+    for (const auto& w : *waitsp)
+        w.lock_channel();
 }
 
 
@@ -376,8 +379,8 @@ Task::Future_selection::Wait_set::sort(Channel_wait_vector* waitsp)
 void
 Task::Future_selection::Wait_set::unlock(Channel_wait_vector* waitsp)
 {
-    for (const auto& wait : *waitsp)
-        wait.unlock_channel();
+    for (const auto& w : *waitsp)
+        w.unlock_channel();
 }
 
 
@@ -393,19 +396,19 @@ Task::Future_selection::Timer::cancel(Task::Handle task) const
 
 
 inline void
-Task::Future_selection::Timer::complete(Time_point /*when*/) const
+Task::Future_selection::Timer::complete_cancel() const
 {
-    if (state == State::cancel_pending)
-        state = State::cancel_complete;
-    else
-        state = State::complete;
+    state = State::cancel_complete;
 }
 
 
 inline void
-Task::Future_selection::Timer::complete_cancel() const
+Task::Future_selection::Timer::expire(Time_point /*when*/) const
 {
-    state = State::cancel_complete;
+    if (state == State::cancel_pending)
+        state = State::cancel_complete;
+    else
+        state = State::expired;
 }
 
 
@@ -440,7 +443,7 @@ Task::Future_selection::Timer::is_cancelled() const
 inline bool
 Task::Future_selection::Timer::is_running() const
 {
-    return state == State::running
+    return state == State::running;
 }
 
 
@@ -455,10 +458,28 @@ Task::Future_selection::cancel_timer()
 }
 
 
+Task::Select_status
+Task::Future_selection::complete_readable(Task::Handle task, Channel_size chan)
+{
+    const Channel_size future = waits.complete_readable(task, chan);
+
+    if (!waits.enqueued() && timer.is_running())
+        timer.cancel(task);
+
+    if (!result) {
+        result = future;
+        if (waittype == Wait_type::any)
+            waits.dequeue_not_ready(task);
+    }
+
+    return Select_status(*result, is_done(waits, timer));
+}
+
+
 bool
 Task::Future_selection::complete_timer(Task::Handle task, Time_point time)
 {
-    timer.complete(time);
+    timer.expire(time);
     if (!timer.is_cancelled()) {
         result = wait_fail;
         waits.dequeue_not_ready(task);
@@ -474,24 +495,6 @@ Task::Future_selection::is_done(const Wait_set& waits, Timer timer)
     return !(waits.enqueued() || timer.is_active());
 }
 
-
-
-Task::Select_status
-Task::Future_selection::select_channel(Task::Handle task, Channel_size pos)
-{
-    const Channel_size future = waits.complete_channel(task, pos);
-
-    if (!waits.enqueued() && timer.is_running())
-        timer.cancel(task);
-
-    if (!result) {
-        result = future;
-        if (waittype == Wait_type::any)
-            waits.dequeue_not_ready(task);
-    }
-
-    return Select_status(*result, is_done(waits, timer));
-}
 
 
 /*
@@ -736,11 +739,11 @@ Scheduler::Task_queue::interrupt()
 }
 
 
-optional<Task>
+Task
 Scheduler::Task_queue::pop()
 {
-    optional<Task>  task;
-    Lock            lock{mutex};
+    Task task;
+    Lock lock{mutex};
 
     while (tasks.empty() && !is_interrupt)
         ready.wait(lock);
@@ -772,11 +775,11 @@ Scheduler::Task_queue::push(Task&& task)
 }
 
 
-optional<Task>
+Task
 Scheduler::Task_queue::try_pop()
 {
-    optional<Task>  task;
-    Lock            lock{mutex, try_to_lock};
+    Task task;
+    Lock lock{mutex, try_to_lock};
 
     if (lock && !tasks.empty())
         task = pop_front(&tasks);
@@ -818,23 +821,23 @@ Scheduler::Task_queue_array::interrupt()
 }
 
 
-optional<Task>
+Task
 Scheduler::Task_queue_array::pop(Size qpref)
 {
-    const auto      nqs = qs.size();
-    optional<Task>  taskp;
+    const auto  nqs = qs.size();
+    Task        task;
 
     // Try to dequeue a task without waiting.
-    for (Size i = 0; i < nqs && !taskp; ++i) {
+    for (Size i = 0; i < nqs && !task; ++i) {
         auto pos = (qpref + i) % nqs;
-        taskp = qs[pos].try_pop();
+        task = qs[pos].try_pop();
     }
 
     // If that failed, wait on the preferred queue.
-    if (!taskp)
-        taskp = qs[qpref].pop();
+    if (!task)
+        task = qs[qpref].pop();
 
-    return taskp;
+    return task;
 }
 
 
@@ -904,6 +907,8 @@ Scheduler::Timers::Request::Request(Task::Handle h, nanoseconds t)
 inline bool
 Scheduler::Timers::Request::is_cancel() const
 {
+    using namespace std::literals::chrono_literals;
+
     return duration == 0ns;
 }
 
@@ -1331,15 +1336,15 @@ Scheduler::resume(Task::Handle task)
 void
 Scheduler::run_tasks(unsigned qpos)
 {
-    while (optional<Task> taskp = ready.pop(qpos)) {
+    while (Task task = ready.pop(qpos)) {
         try {
-            switch(taskp->resume()) {
+            switch(task.resume()) {
             case Task::Status::ready:
-                ready.push(qpos, move(*taskp));
+                ready.push(qpos, move(task));
                 break;
 
             case Task::Status::suspended:
-                suspended.insert(move(*taskp));
+                suspended.insert(move(task));
                 break;
             }
         } catch (...) {

@@ -263,22 +263,20 @@ void
 Task::Future_selection::Wait_set::transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
 {
     Future_wait_vector&     fwaits      = *fwaitsp;
-    const Future<T>*        futurep     = first;
-    const Channel_size      nfutures    = last - first;
     Channel_wait_vector&    cwaits      = *cwaitsp;
-    Channel_size            nextchan    = 0;
+    const Channel_size      nfutures    = last - first;
 
     fwaits.resize(nfutures);
     cwaits.resize(nfutures * 2);
 
-    for (Channel_size i=0; i < nfutures; ++i) {
-        const Channel_size vpos = nextchan++;
-        const Channel_size epos = nextchan++;
+    for (const Future<T>* futurep = first; futurep != last; ++futurep) {
+        const Channel_size fpos = futurep - first;
+        const Channel_size vpos = 2 * fpos;
+        const Channel_size epos = vpos + 1;
 
-        cwaits[vpos]    = Channel_wait{futurep->value(), i};
-        cwaits[epos]    = Channel_wait{futurep->error(), i};
-        fwaits[i]       = Future_wait{futurep->ready(), vpos, epos};
-        ++futurep;
+        cwaits[vpos] = Channel_wait{futurep->value(), fpos};
+        cwaits[epos] = Channel_wait{futurep->error(), fpos};
+        fwaits[fpos] = Future_wait{futurep->ready(), vpos, epos};
     }
 }
 
@@ -297,13 +295,6 @@ inline void
 Task::Future_selection::Timer::clear() const
 {
     state = State::inactive;
-}
-
-
-inline bool
-Task::Future_selection::Timer::is_completed() const
-{
-    return state == State::complete;
 }
 
 
@@ -386,6 +377,26 @@ Task::Promise::cancel_timer()
 }
 
 
+inline Task::Select_status
+Task::Promise::complete_operation(Channel_size pos)
+{
+    const Handle    task{Handle::from_promise(*this)};
+    const Lock      lock{mutex};
+
+    return channels.complete(task, pos);
+}
+
+
+inline Task::Select_status
+Task::Promise::complete_readable(Channel_size pos)
+{
+    const Handle    task{Handle::from_promise(*this)};
+    const Lock      lock{mutex};
+
+    return futures.complete_readable(task, pos);
+}
+
+
 inline bool
 Task::Promise::complete_timer(Time_point time)
 {
@@ -434,26 +445,6 @@ Task::Promise::select(Channel_operation* first, Channel_operation* last)
 
     if (!channels.select(task, first, last))
         suspend(&lock);
-}
-
-
-inline Task::Select_status
-Task::Promise::select_operation(Channel_size pos)
-{
-    const Handle    task{Handle::from_promise(*this)};
-    const Lock      lock{mutex};
-
-    return channels.select(task, pos);
-}
-
-
-inline Task::Select_status
-Task::Promise::select_readable(Channel_size pos)
-{
-    const Handle    task{Handle::from_promise(*this)};
-    const Lock      lock{mutex};
-
-    return futures.select_channel(task, pos);
 }
 
 
@@ -551,6 +542,13 @@ Task::operator=(Task&& other)
 }
 
 
+inline
+Task::operator bool() const
+{
+    return coro ? true : false;
+}
+
+
 inline Task::Status
 Task::resume()
 {
@@ -590,10 +588,18 @@ swap(Task& x, Task& y)
 */
 template<class T>
 inline
-Channel<T>::Readable_wait::Readable_wait(Task::Handle task, Channel_size pos)
+Channel<T>::Readable_wait::Readable_wait(Task::Handle task, Channel_size chan)
     : taskh{task}
-    , waitpos{pos}
+    , chanpos{chan}
 {
+}
+
+
+template<class T>
+inline Channel_size
+Channel<T>::Readable_wait::channel() const
+{
+    return chanpos;
 }
 
 
@@ -607,24 +613,16 @@ Channel<T>::Readable_wait::notify(Mutex* mtxp) const
         reader and writer.
     */
     mtxp->unlock();
-    select(taskh, waitpos);
+    select(taskh, chanpos);
     mtxp->lock();
 }
 
 
 template<class T>
-inline Channel_size
-Channel<T>::Readable_wait::position() const
-{
-    return waitpos;
-}
-
-
-template<class T>
 void
-Channel<T>::Readable_wait::select(Task::Handle task, Channel_size pos)
+Channel<T>::Readable_wait::select(Task::Handle task, Channel_size chan)
 {
-    const Task::Select_status select = task.promise().select_readable(pos);
+    const Task::Select_status select = task.promise().complete_readable(chan);
 
     if (select.is_complete())
         scheduler.resume(task);
@@ -904,7 +902,7 @@ Channel<T>::Receiver::select(Task::Handle task, Channel_size pos, T* valp, U* se
 {
     using std::move;
 
-    const Task::Select_status   select      = task.promise().select_operation(pos);
+    const Task::Select_status   select      = task.promise().complete_operation(pos);
     bool                        is_selected = false;
 
     if (select.position() == pos) {
@@ -1045,8 +1043,8 @@ template<class U>
 bool
 Channel<T>::Sender::select(Task::Handle task, Channel_size pos, T* lvalp, const T* rvalp, U* recvbufp)
 {
-    const Task::Select_status    select      = task.promise().select_operation(pos);
-    bool                            is_selected = false;
+    const Task::Select_status   select      = task.promise().complete_operation(pos);
+    bool                        is_selected = false;
 
     if (select.position() == pos) {
         move(lvalp, rvalp, recvbufp);
@@ -1972,9 +1970,9 @@ inline T
 Future<T>::Awaitable::await_resume()
 {
     /*
-        If the future is ready we can get the result from one of its
-        channels; otherwise, we have just been awakened after a call
-        to select() having already obtained a value or an error.
+        If a future is ready, the result can be obtained from one of its
+        channels without waiting.  Otherwise, the task waiting on this
+        future has just awakened having obtained a value or an error.
     */
     if (selfp->is_ready())
         v = selfp->get_ready();
@@ -2055,7 +2053,7 @@ Future<T>::get_ready()
         isready = false;
     } else if (optional<exception_ptr> ep = echan.try_receive()) {
         isready = false;
-        rethrow_exception(ep);
+        rethrow_exception(*ep);
     }
 
     return move(*v);
@@ -2105,7 +2103,7 @@ Future<T>::try_get()
         isready = false;
     } else if (optional<exception_ptr> ep = echan.try_receive()) {
         isready = false;
-        rethrow_exception(ep);
+        rethrow_exception(*ep);
     }
 
     return v;
