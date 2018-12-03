@@ -231,7 +231,7 @@ private:
     private:
         // Names/Types
         class Wait_setup;
-        enum class Type { any, all };
+        enum class Wait_type{ any, all };
         static const Channel_size wait_success{1};
 
         class Channel_wait {
@@ -288,8 +288,6 @@ private:
             bool*           isreadyp;
         };
 
-        using Future_wait_vector = std::vector<Future_wait>;
-
         class Wait_set {
         public:
             // Construct
@@ -310,6 +308,9 @@ private:
             friend class Wait_setup;
 
         private:
+            // Names/Types
+            using Future_wait_vector = std::vector<Future_wait>;
+
             // Setup
             template<class T> void          begin_setup(const Future<T>*, const Future<T>*);
             template<class T> static void   transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
@@ -338,15 +339,13 @@ private:
 
         private:
             // Data
-            Wait_set* waitsp;
+            Wait_set* pwaits;
         };
 
         class Timer {
         public:
             // Construct
             Timer();
-            Timer(const Timer&) = delete;
-            Timer& operator=(const Timer&) = delete;
 
             // Execution
             void start(Task::Handle, nanoseconds duration) const;
@@ -355,6 +354,7 @@ private:
             void complete_cancel() const;
             void clear() const;
             bool is_active() const;
+            bool is_running() const;
             bool is_completed() const;
             bool is_cancelled() const;
 
@@ -366,8 +366,11 @@ private:
             mutable State state;
         };
 
+        // Selection
+        static bool is_done(const Wait_set&, Timer);
+
         // Data
-        Type                    type;
+        Wait_type               waittype;
         Wait_set                waits;
         Timer                   timer;
         optional<Channel_size>  result;

@@ -217,16 +217,16 @@ Task::Future_selection::Future_wait::value() const
 template<class T>
 inline
 Task::Future_selection::Wait_setup::Wait_setup(const Future<T>* first, const Future<T>* last, Wait_set* wp)
-    : waitsp(wp)
+    : pwaits(wp)
 {
-    waitsp->begin_setup(first, last);
+    pwaits->begin_setup(first, last);
 }
 
 
 inline
 Task::Future_selection::Wait_setup::~Wait_setup()
 {
-    waitsp->end_setup();
+    pwaits->end_setup();
 }
 
 
@@ -331,7 +331,7 @@ Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Futu
 {
     const Wait_setup setup{first, last, &waits};
 
-    type = Type::all;
+    waittype = Wait_type::all;
     timer.clear();
     result.reset();
 
@@ -346,7 +346,7 @@ Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Futu
         }
     }
 
-    return waits.enqueued() == 0;
+    return !waits.enqueued();
 }
 
 
@@ -356,7 +356,7 @@ Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Futu
 {
     const Wait_setup setup{first, last, &waits};
 
-    type = Type::any;
+    waittype = Wait_type::any;
     timer.clear();
 
     result = waits.select_ready();
@@ -371,7 +371,7 @@ Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Futu
         }
     }
 
-    return waits.enqueued() == 0;
+    return !waits.enqueued();
 }
 
 
@@ -1973,8 +1973,8 @@ Future<T>::Awaitable::await_resume()
 {
     /*
         If the future is ready we can get the result from one of its
-        channels.  Otherwise, we have just been awakened after a call
-        to select() having obtained either a value or an error.
+        channels; otherwise, we have just been awakened after a call
+        to select() having already obtained a value or an error.
     */
     if (selfp->is_ready())
         v = selfp->get_ready();
@@ -2055,7 +2055,7 @@ Future<T>::get_ready()
         isready = false;
     } else if (optional<exception_ptr> ep = echan.try_receive()) {
         isready = false;
-        rethrow_exception(*ep);
+        rethrow_exception(ep);
     }
 
     return move(*v);
@@ -2105,7 +2105,7 @@ Future<T>::try_get()
         isready = false;
     } else if (optional<exception_ptr> ep = echan.try_receive()) {
         isready = false;
-        rethrow_exception(*ep);
+        rethrow_exception(ep);
     }
 
     return v;

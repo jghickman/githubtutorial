@@ -437,6 +437,13 @@ Task::Future_selection::Timer::is_cancelled() const
 }
 
 
+inline bool
+Task::Future_selection::Timer::is_running() const
+{
+    return state == State::running
+}
+
+
 /*
     Task Future Selection
 */
@@ -444,7 +451,7 @@ bool
 Task::Future_selection::cancel_timer()
 {
     timer.complete_cancel();
-    return waits.enqueued() == 0;
+    return !waits.enqueued();
 }
 
 
@@ -457,8 +464,16 @@ Task::Future_selection::complete_timer(Task::Handle task, Time_point time)
         waits.dequeue_not_ready(task);
     }
 
-    return waits.enqueued() == 0;
+    return !waits.enqueued();
 }
+
+
+inline bool
+Task::Future_selection::is_done(const Wait_set& waits, Timer timer)
+{
+    return !(waits.enqueued() || timer.is_active());
+}
+
 
 
 Task::Select_status
@@ -466,16 +481,16 @@ Task::Future_selection::select_channel(Task::Handle task, Channel_size pos)
 {
     const Channel_size future = waits.complete_channel(task, pos);
 
-    if (waits.enqueued() == 0 && timer.is_active() && !timer.is_cancelled())
+    if (!waits.enqueued() && timer.is_running())
         timer.cancel(task);
 
     if (!result) {
         result = future;
-        if (type == Type::any)
+        if (waittype == Wait_type::any)
             waits.dequeue_not_ready(task);
     }
 
-    return Select_status(*result, waits.enqueued() == 0 && !timer.is_active());
+    return Select_status(*result, is_done(waits, timer));
 }
 
 
