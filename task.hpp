@@ -151,105 +151,96 @@ private:
         Channel_base* chanp;
     };
 
-    class Channel_selection {
+    class Operation_selection {
     public:
         // Construct/Copy 
-        Channel_selection() = default;
-        Channel_selection(const Channel_selection&) = delete;
-        Channel_selection& operator=(const Channel_selection&) = delete;
+        Operation_selection() = default;
+        Operation_selection(const Operation_selection&) = delete;
+        Operation_selection& operator=(const Operation_selection&) = delete;
 
-        // Selection Operations
-        bool                            select(Task::Handle, Channel_operation*, Channel_operation*);
-        Select_status                   complete(Task::Handle, Channel_size pos);
-        Channel_size                    selected() const;
-        static optional<Channel_size>   try_select(Channel_operation*, Channel_operation*);
+        // Select
+        bool                    select(Task::Handle, Channel_operation*, Channel_operation*);
+        Select_status           complete(Task::Handle, Channel_size pos);
+        Channel_size            selected() const;
+        optional<Channel_size>  try_select(Channel_operation*, Channel_operation*);
 
     private:
         // Names/Types
-        class Range {
+        class Operation_view;
+        using Operation_vector = std::vector<Operation_view>;
+
+        class Operation_view : boost::totally_ordered<Operation_view> {
         public:
             // Construct
-            Range() = default;
-            Range(Channel_operation* first, Channel_operation* last);
+            Operation_view() = default;
+            Operation_view(const Channel_operation*, Channel_size pos);
+
+            // Execution
+            bool is_ready() const;
+            void enqueue(Task::Handle) const;
+            bool dequeue(Task::Handle) const;
+            void execute() const;
 
             // Observers
-            Channel_operation* begin() const;
-            Channel_operation* end() const;
+            Channel_base*   channel() const;
+            Channel_size    position() const;
+
+            // Comparisons
+            bool operator==(Operation_view) const;
+            bool operator< (Operation_view) const;
 
         private:
             // Data
-            Channel_operation* start;
-            Channel_operation* stop;
+            const Channel_operation*    pop;
+            Channel_size                index;
         };
 
-        class Sorted_range {
+        class Transform_unique {
         public:
             // Construct
-            Sorted_range() = default;
-            Sorted_range(Channel_operation* ufirst, Channel_operation* ulast, Channel_operation* last);
-
-            // Observers
-            Range unique() const;
-            Range all() const;
+            Transform_unique(const Channel_operation*, const Channel_operation*, Operation_vector*);
 
         private:
-            // Data
-            Channel_operation*  ubegin;
-            Channel_operation*  uend;
-            Channel_operation   end;
+            // Transformation
+            static void transform(const Channel_operation*, const Channel_operation*, Operation_vector* outp);
+            static void remove_duplicates(Operation_vector*);
         };
 
         class Channel_locks {
         public:
-            explicit Channel_locks(const Range&);
+            explicit Channel_locks(const Operation_vector&);
             Channel_locks(const Channel_locks&) = delete;
             Channel_locks& operator=(const Channel_locks&) = delete;
             ~Channel_locks();
 
         private:
+            // Synchronization
+            static void lock(Channel_base*);
+            static void unlock(Channel_base*);
+
+            // Iteration
+            template<class T> static void for_each_channel(const Operation_vector&, T f);
+
             // Data
-            Range range;
-        };
-
-        class Channel_sort {
-        public:
-            Channel_sort(Channel_operation*, Channel_operation*);
-            Channel_sort(const Channel_sort&) = delete;
-            Channel_sort& operator=(const Channel_sort&) = delete;
-            ~Channel_sort();
-
-            // Observers
-            Range unique() const;
-        
-            // Sentry Operations
-            Sorted_range    keep();
-            bool            is_dismissed() const;
-
-        private:
-            // Data
-            Sorted_range    rng;
-            bool            iskept;
+            const Operation_vector& ops;
         };
 
         // Selection
-        static optional<Channel_size>   select_ready(const Range&);
-        static Channel_size             count_ready(const Range&);
-        static Channel_operation*       pick_ready(const Range&, Channel_size nready);
-        static Channel_size             enqueue(Task::Handle, const Range&);
-        static Channel_size             dequeue(Task::Handle, const Range&, Channel_size selected);
+        static optional<Channel_size>   select_ready(const Operation_vector&);
+        static Channel_size             count_ready(const Operation_vector&);
+        static Channel_size             pick_ready(const Operation_vector&, Channel_size nready);
+        static Channel_size             enqueue(Task::Handle, const Operation_vector&);
+        static Channel_size             dequeue(Task::Handle, const Operation_vector&, Channel_size selected);
 
         // Sorting
-        static void save_positions(Channel_operation*, Channel_operation*);
-        static void sort_channels(Channel_operation*, Channel_operation*);
-        static void restore_positions(Channel_operation*, Channel_operation*);
+        static void save_order(Channel_operation*, Channel_operation*);
+        static void restore_order(Channel_operation*, Channel_operation*);
 
         // Data
-        Sorted_range            enqueued;
+        Operation_vector        operations;
         Channel_size            nenqueued;
         optional<Channel_size>  winner;
     };
-
-    using Channel_operation_selection = Channel_selection;
 
     class Future_selection {
     public:
@@ -279,7 +270,7 @@ private:
         public:
             // Construct
             Channel_wait() = default;
-            Channel_wait(Channel_base*, Channel_size fpos);
+            Channel_wait(Channel_base*, Channel_size futpos);
 
             // Enqueue/Dequeue
             void enqueue(Task::Handle, Channel_size pos) const;
@@ -287,9 +278,9 @@ private:
             void dequeue_locked(Task::Handle, Channel_size pos) const;
 
             // Observers
-            bool            is_ready() const;
             Channel_base*   channel() const;
             Channel_size    future() const;
+            bool            is_ready() const;
 
             // Synchronization
             void lock_channel() const;
@@ -298,10 +289,28 @@ private:
         private:
             // Data
             Channel_base*   chanp;
-            Channel_size    futpos;
+            Channel_size    fpos;
         };
 
         using Channel_wait_vector = std::vector<Channel_wait>;
+
+        class Channel_locks {
+        public:
+            // Acquire/Release
+            void acquire(const Channel_wait_vector&);
+            void release(const Channel_wait_vector&);
+
+        private:
+            // Names/Types
+            using Wait_index    = Channel_wait_vector::size_type;
+            using Channel_index = std::vector<Wait_index>;
+
+            // Index Construction
+            static void build(Channel_index*, const Channel_wait_vector&);
+            
+            // Data
+            Channel_index index;
+        };
 
         class Future_wait {
         public:
@@ -365,6 +374,7 @@ private:
             Channel_wait_vector     channels;
             Future_wait_vector      futures;
             Channel_size            nenqueued; // futures
+            Channel_locks           locks;
         };
 
         class Wait_setup {
@@ -457,10 +467,10 @@ public:
         void suspend(Lock*);
 
         // Data
-        mutable Mutex       mutex;
-        Channel_selection   channels;
-        Future_selection    futures;
-        Status              taskstat;
+        mutable Mutex               mutex;
+        Operation_selection operations;
+        Future_selection            futures;
+        Status                      taskstat;
     };
 
 private:
@@ -982,7 +992,7 @@ private:
     Perhaps the small object optimization could be employed in the future
     to realize a better design.
 */
-class Channel_operation {
+class Channel_operation : boost::totally_ordered<Channel_operation> {
 public:
     // Names/Types
     enum class Type { none, send, receive };
@@ -992,19 +1002,28 @@ public:
     Channel_operation(Channel_base*, const void* rvaluep); // send copy
     Channel_operation(Channel_base*, void* lvaluep, Type); // send movable/receive
 
-    // Channel
-    Channel_base*       channel();
-    const Channel_base* channel() const;
-
-    // Selection
+    // Execution
     bool is_ready() const;
-    void execute();
-    void enqueue(Task::Handle);
-    bool dequeue(Task::Handle);
+    void enqueue(Task::Handle, Channel_size pos) const;
+    bool dequeue(Task::Handle, Channel_size pos) const;
+    void execute() const;
 
-    // Position
-    void            position(Channel_size);
-    Channel_size    position() const;
+    // Observers
+    Channel_base* channel() const;
+
+    // Comparisons
+    friend inline bool operator==(const Channel_operation& x, const Channel_operation& y) {
+        if (x.chanp != y.chanp) return false;
+        if (x.kind != y.kind) return false;
+        return true;
+    }
+
+    inline friend bool operator< (const Channel_operation& x, const Channel_operation& y) {
+        if (x.chanp < y.chanp) return true;
+        if (y.chanp < x.chanp) return false;
+        if (x.kind < y.kind) return true;
+        return false;
+    }
 
 private:
     // Data
@@ -1012,7 +1031,6 @@ private:
     Type            kind;
     const void*     rvalp;
     void*           lvalp;
-    Channel_size    pos{0};
 };
 
 
@@ -1044,6 +1062,8 @@ template<Channel_size N> Channel_select_awaitable   select(Channel_operation (&o
 Channel_select_awaitable                            select(Channel_operation*, Channel_operation*);
 template<Channel_size N> optional<Channel_size>     try_select(Channel_operation (&ops)[N]);
 optional<Channel_size>                              try_select(Channel_operation*, Channel_operation*);
+static const Channel_size select_fail{-1};
+
 
 
 /*
@@ -1216,7 +1236,7 @@ template<class T> Future_all_awaitable<T>       wait_all(const vector<Future<T>>
 template<class T> Future_all_awaitable<T>       wait_all(const Future<T>*, const Future<T>*);
 template<class T> Future_all_timed_awaitable<T> wait_all(const vector<Future<T>>&, nanoseconds maxtime);
 template<class T> Future_all_timed_awaitable<T> wait_all(const Future<T>*, const Future<T>*, nanoseconds maxtime);
-static const Channel_size wait_fail = -1;
+static const Channel_size wait_fail{-1};
 
 
 /*

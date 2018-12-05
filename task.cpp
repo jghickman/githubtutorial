@@ -38,9 +38,11 @@ namespace Concurrency   {
 using std::accumulate;
 using std::count_if;
 using std::find_if;
+using std::iota;
 using std::move;
 using std::sort;
 using std::try_to_lock;
+using std::unique;
 using std::upper_bound;
 
 
@@ -51,68 +53,161 @@ Scheduler scheduler;
 
 
 /*
-    Task Channel Selection Lock Guard
+    Task Operation Selection Operation View
 */
-Task::Channel_selection::Lock_guard::Lock_guard(Channel_operation* fst, Channel_operation* lst)
-    : first{fst}
-    , last{lst}
+inline
+Task::Operation_selection::Operation_view::Operation_view(const Channel_operation* cop, Channel_size pos)
+    : pop{cop}
+    , index{pos}
 {
-    Channel_base* prevchanp = nullptr;
+}
 
-    for (Channel_operation* cop = first; cop != last; ++cop) {
-        Channel_base* chanp = cop->channel();
+
+inline Channel_base*
+Task::Operation_selection::Operation_view::channel() const
+{
+    return pop->channel();
+}
+
+
+inline bool
+Task::Operation_selection::Operation_view::dequeue(Task::Handle task) const
+{
+    return pop->dequeue(task, index);
+}
+
+
+inline void
+Task::Operation_selection::Operation_view::enqueue(Task::Handle task) const
+{
+    pop->enqueue(task, index);
+}
+
+
+inline void
+Task::Operation_selection::Operation_view::execute() const
+{
+    return pop->execute();
+}
+
+
+inline bool
+Task::Operation_selection::Operation_view::is_ready() const
+{
+    return pop->is_ready();
+}
+
+
+inline Channel_size
+Task::Operation_selection::Operation_view::position() const
+{
+    return index;
+}
+
+
+inline bool
+Task::Operation_selection::Operation_view::operator==(Operation_view other) const
+{
+    return *this->pop == *other.pop;
+}
+
+
+inline bool
+Task::Operation_selection::Operation_view::operator< (Operation_view other) const
+{
+    return *this->pop < *other.pop;
+}
+
+
+/*
+    Task Operation Selection Channel Locks
+*/
+Task::Operation_selection::Channel_locks::Channel_locks(const Operation_vector& opers)
+    : ops{opers}
+{
+    for_each_channel(ops, lock);
+}
+
+
+Task::Operation_selection::Channel_locks::~Channel_locks()
+{
+    for_each_channel(ops, unlock);
+}
+
+
+template<class T>
+void
+Task::Operation_selection::Channel_locks::for_each_channel(const Operation_vector& ops, T f)
+{
+    Channel_base* prevchanp{nullptr};
+
+    for (const Operation_view op : ops) {
+        Channel_base* chanp = op.channel();
         if (chanp && chanp != prevchanp) {
-            chanp->lock();
+            f(chanp);
             prevchanp = chanp;
         }
     }
 }
 
 
-Task::Channel_selection::Lock_guard::~Lock_guard()
+inline void
+Task::Operation_selection::Channel_locks::lock(Channel_base* chanp)
 {
-    Channel_base* prevchanp = nullptr;
+    chanp->lock();
+}
 
-    for (Channel_operation* cop = first; cop != last; ++cop) {
-        Channel_base* chanp = cop->channel();
-        if (chanp && chanp != prevchanp) {
-            chanp->unlock();
-            prevchanp = chanp;
-        }
-    }
+
+inline void
+Task::Operation_selection::Channel_locks::unlock(Channel_base* chanp)
+{
+    chanp->unlock();
 }
 
 
 /*
-    Task Channel Selection Sort Guard
+    Task Operation Selection Unique Operations
 */
-inline
-Task::Channel_selection::Sort_guard::Sort_guard(Channel_operation* begin, Channel_operation* end)
-    : first{begin}
-    , last{end}
+Task::Operation_selection::Transform_unique::Transform_unique(const Channel_operation* first, const Channel_operation* last, Operation_vector* outp)
 {
-    save_positions(first, last);
-    sort_channels(first, last);
+    transform(first, last, outp);
+    sort(outp->begin(), outp->end());
+    remove_duplicates(outp);
 }
 
 
-inline
-Task::Channel_selection::Sort_guard::~Sort_guard()
+void
+Task::Operation_selection::Transform_unique::remove_duplicates(Operation_vector* vp)
 {
-    restore_positions(first, last);
+    const auto dup = unique(vp->begin(), vp->end());
+    vp->erase(dup, vp->end());
+}
+
+
+void
+Task::Operation_selection::Transform_unique::transform(const Channel_operation* first, const Channel_operation* last, Operation_vector* outp)
+{
+    Operation_vector& out = *outp;
+
+    out.resize(last - first);
+    for (const Channel_operation* p = first; p != last; ++p) {
+        const auto i = p - first;
+        out[i] = Operation_view(p, i);
+    }
+        
 }
 
 
 /*
-    Task Channel Selection
+    Task Operation Selection
 */
 Task::Select_status
-Task::Channel_selection::complete(Task::Handle task, Channel_size pos)
+Task::Operation_selection::complete(Task::Handle task, Channel_size pos)
 {
     --nenqueued;
     if (!winner) {
         winner = pos;
-        nenqueued -= dequeue(task, firstenq, lastenq, pos);
+        nenqueued -= dequeue(task, operations, pos);
     }
 
     return Select_status(*winner, nenqueued == 0);
@@ -120,21 +215,21 @@ Task::Channel_selection::complete(Task::Handle task, Channel_size pos)
 
 
 Channel_size
-Task::Channel_selection::count_ready(const Range& ops)
+Task::Operation_selection::count_ready(const Operation_vector& ops)
 {
-    return count_if(ops.begin(), ops.end(), [](const auto& op) {
+    return count_if(ops.begin(), ops.end(), [](auto op) {
         return op.is_ready();
     });
 }
 
 
 Channel_size
-Task::Channel_selection::dequeue(Task::Handle task, Channel_operation* first, Channel_operation* last, Channel_size selected)
+Task::Operation_selection::dequeue(Task::Handle task, const Operation_vector& ops, Channel_size selected)
 {
     Channel_size n = 0;
 
-    for (Channel_operation* cop = first; cop != last; ++cop) {
-        if (cop->position() != selected && cop->dequeue(task))
+    for (const auto op : ops) {
+        if (op.position() != selected && op.dequeue(task))
             ++n;
     }
 
@@ -143,114 +238,116 @@ Task::Channel_selection::dequeue(Task::Handle task, Channel_operation* first, Ch
 
 
 Channel_size
-Task::Channel_selection::enqueue(Task::Handle task, Channel_operation* first, Channel_operation* last)
+Task::Operation_selection::enqueue(Task::Handle task, const Operation_vector& ops)
 {
-    Channel_size n = 0;
+    for (const auto op : ops)
+        op.enqueue(task);
 
-    for (Channel_operation* cop = first; cop != last; ++cop) {
-        cop->enqueue(task);
-        ++n;
-    }
-
-    return n;
+    return ops.size();
 }
 
 
-Channel_operation*
-Task::Channel_selection::pick_ready(Channel_operation* first, Channel_operation* last, Channel_size nready)
+Channel_size
+Task::Operation_selection::pick_ready(const Operation_vector& ops, Channel_size nready)
 {
-    Channel_operation*  readyp  = last;
-    Channel_size        n       = random(1, nready);
+    assert(ops.size() > 0 && nready > 0);
 
-    for (Channel_operation* cop = first; cop != last; ++cop) {
-        if (cop->is_ready() && --n == 0) {
-            readyp = cop;
+    Channel_size pos;
+    Channel_size pick = random(1, nready);
+
+    for (Channel_size i = 0, n = ops.size(); i < n; ++i) {
+        if (ops[i].is_ready() && --pick == 0) {
+            pos = i;
             break;
         }
-    }
-
-    return readyp;
-}
-
-
-void
-Task::Channel_selection::restore_positions(Channel_operation* first, Channel_operation* last)
-{
-    sort(first, last, [](const auto& x, const auto& y) {
-        return x.position() < y.position();
-    });
-}
-
-
-void
-Task::Channel_selection::save_positions(Channel_operation* first, Channel_operation* last)
-{
-    for (Channel_operation* cop = first; cop != last; ++cop)
-        cop->position(cop - first);
-}
-
-
-bool
-Task::Channel_selection::select(Task::Handle task, Channel_operation* first, Channel_operation* last)
-{
-    Channel_sort        sorted{first, last};
-    const Range         unique{sorted.unique()};
-    const Channel_locks lock{unique};
-
-    nenqueued   = 0;
-    winner      = select_ready(unique);
-
-    // If none of the operations are ready, enqueue and store them in unique
-    // order.
-    if (!winner) {
-        nenqueued = enqueue(task, unique);
-        enqueued = sorted.keep();
-    }
-
-    return winner ? true : false;
-}
-
-
-optional<Channel_size>
-Task::Channel_selection::select_ready(const Range& ops)
-{
-    optional<Channel_size>  pos;
-    const Channel_size      n = count_ready(ops);
-
-    if (n > 0) {
-        Channel_operation* cop = pick_ready(ops, n);
-        cop->execute();
-        pos = cop->position();
     }
 
     return pos;
 }
 
-   
-Channel_size
-Task::Channel_selection::selected() const
-{
-    restore_positions(firstenq, lastenq);
-    return *winner;
-}
 
-
-inline void
-Task::Channel_selection::sort_channels(Channel_operation* first, Channel_operation* last)
+bool
+Task::Operation_selection::select(Task::Handle task, Channel_operation* first, Channel_operation* last)
 {
-    sort(first, last, [](const auto& x, const auto& y) {
-        return x.channel() < y.channel();
-    });
+    Transform_unique    transform{first, last, &operations};
+    const Channel_locks lock{operations};
+
+    nenqueued = 0;
+    winner = select_ready(operations);
+    if (!winner)
+        nenqueued = enqueue(task, operations);
+
+    return nenqueued == 0;
 }
 
 
 optional<Channel_size>
-Task::Channel_selection::try_select(Channel_operation* first, Channel_operation* last)
+Task::Operation_selection::select_ready(const Operation_vector& ops)
 {
-    Sort_guard chansort{first, last};
-    Lock_guard chanlocks{first, last};
+    optional<Channel_size> ready;
 
-    return select_ready(first, last);
+    if (ops.empty())
+        ready = select_fail;
+    else {
+        const auto n = count_ready(ops);
+        if (n > 0) {
+            const Channel_size  pos = pick_ready(ops, n);
+            const auto          op = ops[pos];
+
+            op.execute();
+            ready = op.position();
+        }
+    }
+
+    return ready;
+}
+
+   
+Channel_size
+Task::Operation_selection::selected() const
+{
+    return *winner;
+}
+
+
+optional<Channel_size>
+Task::Operation_selection::try_select(Channel_operation* first, Channel_operation* last)
+{
+    Transform_unique    transform{first, last, &operations};
+    const Channel_locks lock{operations};
+
+    return select_ready(operations);
+}
+
+
+/*
+    Task Future Selection Channel Locks
+*/
+void
+Task::Future_selection::Channel_locks::acquire(const Channel_wait_vector& waits)
+{
+    build(&index, waits);
+    for (auto i : index)
+        waits[i].lock_channel();
+}
+
+
+void
+Task::Future_selection::Channel_locks::build(Channel_index* indexp, const Channel_wait_vector& waits)
+{
+    indexp->resize(waits.size());
+    iota(indexp->begin(), indexp->end(), 0);
+    sort(indexp->begin(), indexp->end(), [&](auto x, auto y) {
+        return waits[x].channel() < waits[y].channel();
+    });
+}
+
+
+void
+Task::Future_selection::Channel_locks::release(const Channel_wait_vector& waits)
+{
+    for (auto i : index)
+        waits[i].unlock_channel();
 }
 
 
@@ -305,6 +402,13 @@ Task::Future_selection::Wait_set::dequeue_not_ready(Task::Handle task)
 
 
 void
+Task::Future_selection::Wait_set::end_setup()
+{
+    locks.release(channels);
+}
+
+
+void
 Task::Future_selection::Wait_set::enqueue_all(Task::Handle task)
 {
     for (const auto& f : futures)
@@ -327,14 +431,6 @@ Task::Future_selection::Wait_set::enqueue_not_ready(Task::Handle task)
 
     nenqueued += n;
     return n;
-}
-
-
-void
-Task::Future_selection::Wait_set::lock(Channel_wait_vector* waitsp)
-{
-    for (const auto& w : *waitsp)
-        w.lock_channel();
 }
 
 
@@ -580,13 +676,6 @@ Channel_operation::Channel_operation(Channel_base* cp, void* lvaluep, Type optyp
 
 
 inline Channel_base*
-Channel_operation::channel()
-{
-    return chanp;
-}
-
-
-inline const Channel_base*
 Channel_operation::channel() const
 {
     return chanp;
@@ -594,7 +683,7 @@ Channel_operation::channel() const
 
 
 bool
-Channel_operation::dequeue(Task::Handle task)
+Channel_operation::dequeue(Task::Handle task, Channel_size pos) const
 {
     bool is_dequeued;
 
@@ -617,7 +706,7 @@ Channel_operation::dequeue(Task::Handle task)
 
 
 void
-Channel_operation::enqueue(Task::Handle task)
+Channel_operation::enqueue(Task::Handle task, Channel_size pos) const
 {
     if (chanp) {
         switch(kind) {
@@ -637,7 +726,7 @@ Channel_operation::enqueue(Task::Handle task)
 
 
 void
-Channel_operation::execute()
+Channel_operation::execute() const
 {
     if (chanp) {
         switch(kind) {
@@ -666,20 +755,6 @@ Channel_operation::is_ready() const
     case Type::receive: return chanp->is_readable();
     default:            return false;
     }
-}
-
-
-inline void
-Channel_operation::position(Channel_size n)
-{
-    pos = n;
-}
-
-
-inline Channel_size
-Channel_operation::position() const
-{
-    return pos;
 }
 
 

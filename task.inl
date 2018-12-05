@@ -70,9 +70,9 @@ Task::Select_status::position() const
     Task Future Selection Channel Wait
 */
 inline
-Task::Future_selection::Channel_wait::Channel_wait(Channel_base* chp, Channel_size fpos)
-    : chanp{chp}
-    , futpos{fpos}
+Task::Future_selection::Channel_wait::Channel_wait(Channel_base* channelp, Channel_size futpos)
+    : chanp{channelp}
+    , fpos{futpos}
 {
 }
 
@@ -109,7 +109,7 @@ Task::Future_selection::Channel_wait::enqueue(Task::Handle task, Channel_size po
 inline Channel_size
 Task::Future_selection::Channel_wait::future() const
 {
-    return futpos;
+    return fpos;
 }
 
 
@@ -237,17 +237,9 @@ template<class T>
 void
 Task::Future_selection::Wait_set::begin_setup(const Future<T>* first, const Future<T>* last)
 {
-    transform(first, last, &futures, &channels);
-    sort(&channels);
-    lock(&channels);
     nenqueued = 0;
-}
-
-
-inline void
-Task::Future_selection::Wait_set::end_setup()
-{
-    unlock(&channels);
+    transform(first, last, &futures, &channels);
+    locks.acquire(channels);
 }
 
 
@@ -383,7 +375,7 @@ Task::Promise::complete_operation(Channel_size pos)
     const Handle    task{Handle::from_promise(*this)};
     const Lock      lock{mutex};
 
-    return channels.complete(task, pos);
+    return operations.complete(task, pos);
 }
 
 
@@ -443,7 +435,7 @@ Task::Promise::select(Channel_operation* first, Channel_operation* last)
     const Handle    task{Handle::from_promise(*this)};
     Lock            lock{mutex};
 
-    if (!channels.select(task, first, last))
+    if (!operations.select(task, first, last))
         suspend(&lock);
 }
 
@@ -458,7 +450,7 @@ Task::Promise::selected_future() const
 inline Channel_size
 Task::Promise::selected_operation() const
 {
-    return channels.selected();
+    return operations.selected();
 }
 
 
@@ -473,7 +465,7 @@ Task::Promise::suspend(Lock* lockp)
 inline optional<Channel_size>
 Task::Promise::try_select(Channel_operation* first, Channel_operation* last)
 {
-    return Channel_selection::try_select(first, last);
+    return try_select(first, last);
 }
 
 
