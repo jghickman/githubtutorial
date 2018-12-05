@@ -61,7 +61,10 @@ template<class T> class Future;
 class Channel_base;
 class Channel_operation;
 using Channel_size = std::ptrdiff_t;
+class Scheduler;
 using Time_point = std::chrono::steady_clock::time_point;
+using Time_receiver = Receive_channel<Time_point>;
+class Timer;
 using boost::optional;
 using std::exception_ptr;
 using std::chrono::nanoseconds;
@@ -120,9 +123,6 @@ public:
     // Execution
     Status resume();
 
-    // Synchronization
-    void unlock();
-
     // Conversions
     explicit operator bool() const;
 
@@ -130,6 +130,7 @@ public:
     friend bool operator==(const Task&, const Task&);
 
     // Friends
+    friend class Scheduler;
     friend class Channel_operation; // for Channel_lock :(
     template<class T> friend class Future;
 
@@ -214,12 +215,12 @@ private:
             ~Channel_locks();
 
         private:
+            // Iteration
+            template<class T> static void for_each_channel(const Operation_vector&, T f);
+
             // Synchronization
             static void lock(Channel_base*);
             static void unlock(Channel_base*);
-
-            // Iteration
-            template<class T> static void for_each_channel(const Operation_vector&, T f);
 
             // Data
             const Operation_vector& ops;
@@ -231,10 +232,6 @@ private:
         static Channel_size             pick_ready(const Operation_vector&, Channel_size nready);
         static Channel_size             enqueue(Task::Handle, const Operation_vector&);
         static Channel_size             dequeue(Task::Handle, const Operation_vector&, Channel_size selected);
-
-        // Sorting
-        static void save_order(Channel_operation*, Channel_operation*);
-        static void restore_order(Channel_operation*, Channel_operation*);
 
         // Data
         Operation_vector        operations;
@@ -306,7 +303,10 @@ private:
             using Channel_index = std::vector<Wait_index>;
 
             // Index Construction
-            static void build(Channel_index*, const Channel_wait_vector&);
+            static void index_unique(const Channel_wait_vector&, Channel_index*);
+            static void init(Channel_index*, Channel_size n);
+            static void sort(Channel_index*, const Channel_wait_vector&);
+            static void remove_duplicates(Channel_index*, const Channel_wait_vector&);
             
             // Data
             Channel_index index;
@@ -327,9 +327,13 @@ private:
             void complete(Task::Handle, const Channel_wait_vector&, Channel_size pos) const;
             bool is_ready(const Channel_wait_vector&) const;
 
-            // Channels
+            // Observers
             Channel_size value() const;
             Channel_size error() const;
+
+            // Comparisons
+            bool operator==(const Future_wait&) const;
+            bool operator< (const Future_wait&) const;
 
         private:
             // Data
@@ -356,23 +360,26 @@ private:
 
         private:
             // Names/Types
-            using Future_wait_vector = std::vector<Future_wait>;
+            using Future_wait_vector    = std::vector<Future_wait>;
+            using Future_wait_index     = std::vector<Future_wait_vector::size_type>;
 
             // Setup
             template<class T> void          begin_setup(const Future<T>*, const Future<T>*);
             template<class T> static void   transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
-            static void                     sort(Channel_wait_vector*);
-            static void                     lock(Channel_wait_vector*);
-            static void                     unlock(Channel_wait_vector*);
+            static void                     init(Future_wait_index*, Channel_size n);
+            static void                     index_unique(const Future_wait_vector&, Future_wait_index*);
+            static void                     sort(Future_wait_index*, const Future_wait_vector&);
+            static void                     remove_duplicates(Future_wait_index*, const Future_wait_vector&);
             void                            end_setup();
 
             // Select
-            static Channel_size             count_ready(const Future_wait_vector&, const Channel_wait_vector&);
-            static optional<Channel_size>   pick_ready(const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
+            static Channel_size             count_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&);
+            static optional<Channel_size>   pick_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
 
             // Data
             Channel_wait_vector     channels;
             Future_wait_vector      futures;
+            Future_wait_index       futureindex;
             Channel_size            nenqueued; // futures
             Channel_locks           locks;
         };
@@ -414,7 +421,7 @@ private:
         };
 
         // Selection
-        static bool is_done(const Wait_set&, Timer);
+        static bool is_ready(const Wait_set&, Timer);
 
         // Data
         Wait_type               waittype;
@@ -425,6 +432,9 @@ private:
 
     // Random Number Generation
     static Channel_size random(Channel_size min, Channel_size max);
+
+    // Synchronization
+    void unlock();
 
 public:
     // Names/Types
@@ -451,8 +461,8 @@ public:
         template<class T> void  wait_all(const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
         template<class T> void  wait_any(const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
         Select_status           complete_readable(Channel_size chan);
-        bool                    complete_timer(Time_point);
-        bool                    cancel_timer();
+        bool                    complete_wait_timer(Time_point);
+        bool                    cancel_wait_timer();
         Channel_size            selected_future() const;
 
         // Execution
@@ -467,10 +477,10 @@ public:
         void suspend(Lock*);
 
         // Data
-        mutable Mutex               mutex;
+        mutable Mutex       mutex;
         Operation_selection operations;
-        Future_selection            futures;
-        Status                      taskstat;
+        Future_selection    futures;
+        Status              taskstat;
     };
 
 private:
@@ -1240,6 +1250,23 @@ static const Channel_size wait_fail{-1};
 
 
 /*
+    Timer
+*/
+class Timer : boost::totally_ordered<Timer> {
+public:
+    // Construct
+    explicit Timer(Time_receiver = Time_receiver());
+
+    // Channel
+    Time_receiver channel() const;
+
+private:
+    // Data
+    Time_receiver chan;
+};
+
+
+/*
     Scheduler
 
     A Scheduler multiplexes Tasks onto operating system threads.
@@ -1260,8 +1287,8 @@ public:
     void resume(Task::Handle);
 
     // Timers
-    void start_timer(Task::Handle, nanoseconds);
-    void cancel_timer(Task::Handle);
+    void start_wait_timer(Task::Handle, nanoseconds duration);
+    void cancel_wait_timer(Task::Handle);
 
 private:
     // Names/Types
@@ -1361,8 +1388,8 @@ private:
         ~Timers();
 
         // Timer Operations
-        void start(Task::Handle, nanoseconds duration);
-        void cancel(Task::Handle);
+        void start_wait(Task::Handle, nanoseconds duration);
+        void cancel_wait(Task::Handle);
 
     private:
         /*

@@ -204,6 +204,25 @@ Task::Future_selection::Future_wait::is_ready(const Channel_wait_vector& chans) 
 }
 
 
+inline bool
+Task::Future_selection::Future_wait::operator==(const Future_wait& other) const
+{
+    return this->isreadyp == other.isreadyp;
+}
+
+
+inline bool
+Task::Future_selection::Future_wait::operator< (const Future_wait& other) const
+{
+    if (this->isreadyp < other.isreadyp) return true;
+    if (other.isreadyp < this->isreadyp) return false;
+    if (this->vchan < other.vchan) return true;
+    if (other.vchan < this->vchan) return false;
+    if (this->echan < other.echan) return true;
+    return false;
+}
+
+
 inline Channel_size
 Task::Future_selection::Future_wait::value() const
 {
@@ -239,6 +258,7 @@ Task::Future_selection::Wait_set::begin_setup(const Future<T>* first, const Futu
 {
     nenqueued = 0;
     transform(first, last, &futures, &channels);
+    index_unique(futures, &futureindex);
     locks.acquire(channels);
 }
 
@@ -263,9 +283,10 @@ Task::Future_selection::Wait_set::transform(const Future<T>* first, const Future
 
     for (const Future<T>* futurep = first; futurep != last; ++futurep) {
         const Channel_size fpos = futurep - first;
-        const Channel_size vpos = 2 * fpos;
+        const Channel_size vpos = fpos * 2;
         const Channel_size epos = vpos + 1;
 
+        // TODO: Cheaper to modify an existing wait than copy a new one.
         cwaits[vpos] = Channel_wait{futurep->value(), fpos};
         cwaits[epos] = Channel_wait{futurep->error(), fpos};
         fwaits[fpos] = Future_wait{futurep->ready(), vpos, epos};
@@ -293,7 +314,7 @@ Task::Future_selection::Timer::clear() const
 inline void
 Task::Future_selection::Timer::start(Task::Handle task, nanoseconds duration) const
 {
-    scheduler.start_timer(task, duration);
+    scheduler.start_wait_timer(task, duration);
     state = State::running;
 }
 
@@ -362,7 +383,7 @@ Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Futu
     Task Promise
 */
 inline bool
-Task::Promise::cancel_timer()
+Task::Promise::cancel_wait_timer()
 {
     const Lock lock{mutex};
     return futures.cancel_timer();
@@ -390,7 +411,7 @@ Task::Promise::complete_readable(Channel_size pos)
 
 
 inline bool
-Task::Promise::complete_timer(Time_point time)
+Task::Promise::complete_wait_timer(Time_point time)
 {
     const Handle    task{Handle::from_promise(*this)};
     const Lock      lock{mutex};

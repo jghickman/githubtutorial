@@ -228,7 +228,7 @@ Task::Operation_selection::dequeue(Task::Handle task, const Operation_vector& op
 {
     Channel_size n = 0;
 
-    for (const auto op : ops) {
+    for (Operation_view op : ops) {
         if (op.position() != selected && op.dequeue(task))
             ++n;
     }
@@ -240,7 +240,7 @@ Task::Operation_selection::dequeue(Task::Handle task, const Operation_vector& op
 Channel_size
 Task::Operation_selection::enqueue(Task::Handle task, const Operation_vector& ops)
 {
-    for (const auto op : ops)
+    for (Operation_view op : ops)
         op.enqueue(task);
 
     return ops.size();
@@ -270,7 +270,7 @@ bool
 Task::Operation_selection::select(Task::Handle task, Channel_operation* first, Channel_operation* last)
 {
     Transform_unique    transform{first, last, &operations};
-    const Channel_locks lock{operations};
+    Channel_locks       lock{operations};
 
     nenqueued = 0;
     winner = select_ready(operations);
@@ -291,8 +291,8 @@ Task::Operation_selection::select_ready(const Operation_vector& ops)
     else {
         const auto n = count_ready(ops);
         if (n > 0) {
-            const Channel_size  pos = pick_ready(ops, n);
-            const auto          op = ops[pos];
+            const auto i    = pick_ready(ops, n);
+            const auto op   = ops[i];
 
             op.execute();
             ready = op.position();
@@ -314,7 +314,7 @@ optional<Channel_size>
 Task::Operation_selection::try_select(Channel_operation* first, Channel_operation* last)
 {
     Transform_unique    transform{first, last, &operations};
-    const Channel_locks lock{operations};
+    Channel_locks       lock{operations};
 
     return select_ready(operations);
 }
@@ -326,20 +326,26 @@ Task::Operation_selection::try_select(Channel_operation* first, Channel_operatio
 void
 Task::Future_selection::Channel_locks::acquire(const Channel_wait_vector& waits)
 {
-    build(&index, waits);
+    index_unique(waits, &index);
     for (auto i : index)
         waits[i].lock_channel();
 }
 
 
 void
-Task::Future_selection::Channel_locks::build(Channel_index* indexp, const Channel_wait_vector& waits)
+Task::Future_selection::Channel_locks::index_unique(const Channel_wait_vector& waits, Channel_index* indexp)
 {
-    indexp->resize(waits.size());
+    init(indexp, waits.size());
+    sort(indexp, waits);
+    remove_duplicates(indexp, waits);
+}
+
+
+void
+Task::Future_selection::Channel_locks::init(Channel_index* indexp, Channel_size n)
+{
+    indexp->resize(n);
     iota(indexp->begin(), indexp->end(), 0);
-    sort(indexp->begin(), indexp->end(), [&](auto x, auto y) {
-        return waits[x].channel() < waits[y].channel();
-    });
 }
 
 
@@ -348,6 +354,28 @@ Task::Future_selection::Channel_locks::release(const Channel_wait_vector& waits)
 {
     for (auto i : index)
         waits[i].unlock_channel();
+}
+
+
+void
+Task::Future_selection::Channel_locks::remove_duplicates(Channel_index* indexp, const Channel_wait_vector& waits)
+{
+    const auto first    = indexp->begin();
+    const auto last     = indexp->end();
+    const auto dup      = unique(first, last, [&](auto x, auto y) {
+        return waits[x].channel() == waits[y].channel();
+    });
+
+    indexp->erase(dup, last);
+}
+
+
+void
+Task::Future_selection::Channel_locks::sort(Channel_index* indexp, const Channel_wait_vector& waits)
+{
+    std::sort(indexp->begin(), indexp->end(), [&](auto x, auto y) {
+        return waits[x].channel() < waits[y].channel();
+    });
 }
 
 
@@ -366,10 +394,10 @@ Task::Future_selection::Wait_set::complete_readable(Task::Handle task, Channel_s
 
 
 Channel_size
-Task::Future_selection::Wait_set::count_ready(const Future_wait_vector& fs, const Channel_wait_vector& chans)
+Task::Future_selection::Wait_set::count_ready(const Future_wait_index& index, const Future_wait_vector& futures, const Channel_wait_vector& chans)
 {
-    return count_if(fs.begin(), fs.end(), [&](const auto& future) {
-        return future.is_ready(chans);
+    return count_if(index.begin(), index.end(), [&](auto i) {
+        return futures[i].is_ready(chans);
     });
 }
 
@@ -377,8 +405,8 @@ Task::Future_selection::Wait_set::count_ready(const Future_wait_vector& fs, cons
 void
 Task::Future_selection::Wait_set::dequeue_all(Task::Handle task)
 {
-    for (const auto& f : futures)
-        f.dequeue_locked(task, channels);
+    for (auto i : futureindex)
+        futures[i].dequeue_locked(task, channels);
 
     nenqueued = 0;
 }
@@ -388,15 +416,14 @@ void
 Task::Future_selection::Wait_set::dequeue_not_ready(Task::Handle task)
 {
     if (nenqueued > 0) {
-        auto n = accumulate(futures.begin(), futures.end(), 0, [&](auto x, const auto& f) {
+        nenqueued -= accumulate(futureindex.begin(), futureindex.end(), 0, [&](auto accum, auto i) {
+            const auto& f = futures[i];
             if (!f.is_ready(channels)) {
                 f.dequeue(task, channels);
-                ++x;
+                ++accum;
             }
-            return x;
+            return accum;
         });
-
-        nenqueued -= n;
     }
 }
 
@@ -411,22 +438,23 @@ Task::Future_selection::Wait_set::end_setup()
 void
 Task::Future_selection::Wait_set::enqueue_all(Task::Handle task)
 {
-    for (const auto& f : futures)
-        f.enqueue(task, channels);
+    for (auto i : futureindex)
+        futures[i].enqueue(task, channels);
 
-    nenqueued = futures.size();
+    nenqueued = futureindex.size();
 }
 
 
 Channel_size
 Task::Future_selection::Wait_set::enqueue_not_ready(Task::Handle task)
 {
-    const auto n = accumulate(futures.begin(), futures.end(), 0, [&](auto x, const auto& f) {
+    const auto n = accumulate(futureindex.begin(), futureindex.end(), 0, [&](auto accum, auto i) {
+        const auto& f = futures[i];
         if (!f.is_ready(channels)) {
             f.enqueue(task, channels);
-            ++x;
+            ++accum;
         }
-        return x;
+        return accum;
     });
 
     nenqueued += n;
@@ -434,16 +462,31 @@ Task::Future_selection::Wait_set::enqueue_not_ready(Task::Handle task)
 }
 
 
-optional<Channel_size>
-Task::Future_selection::Wait_set::pick_ready(const Future_wait_vector& futures, const Channel_wait_vector& chans, Channel_size nready)
+void
+Task::Future_selection::Wait_set::index_unique(const Future_wait_vector& waits, Future_wait_index* indexp)
 {
-    using Size = Future_wait_vector::size_type;
+    init(indexp, waits.size());
+    sort(indexp, waits);
+    remove_duplicates(indexp, waits);
+}
 
+
+void
+Task::Future_selection::Wait_set::init(Future_wait_index* indexp, Channel_size n)
+{
+    indexp->resize(n);
+    iota(indexp->begin(), indexp->end(), 0);
+}
+
+
+optional<Channel_size>
+Task::Future_selection::Wait_set::pick_ready(const Future_wait_index& index, const Future_wait_vector& futures, const Channel_wait_vector& chans, Channel_size nready)
+{
     optional<Channel_size> ready;
 
     if (nready > 0) {
         Channel_size choice = random(1, nready);
-        for (Size i = 0, n = futures.size(); i < n; ++i) {
+        for (auto i : index) {
             if (futures[i].is_ready(chans) && --choice == 0) {
                 ready = i;
                 break;
@@ -455,28 +498,31 @@ Task::Future_selection::Wait_set::pick_ready(const Future_wait_vector& futures, 
 }
 
 
+void
+Task::Future_selection::Wait_set::remove_duplicates(Future_wait_index* indexp, const Future_wait_vector& waits)
+{
+    const auto dup = unique(indexp->begin(), indexp->end(), [&](auto x, auto y) {
+        return waits[x] == waits[y];
+    });
+
+    indexp->erase(dup, indexp->end());
+}
+
+
 optional<Channel_size>
 Task::Future_selection::Wait_set::select_ready()
 {
-    const auto n = count_ready(futures, channels);
-    return pick_ready(futures, channels, n);
+    const auto n = count_ready(futureindex, futures, channels);
+    return pick_ready(futureindex, futures, channels, n);
 }
 
 
 void
-Task::Future_selection::Wait_set::sort(Channel_wait_vector* waitsp)
+Task::Future_selection::Wait_set::sort(Future_wait_index* indexp, const Future_wait_vector& waits)
 {
-    return std::sort(waitsp->begin(), waitsp->end(), [](const auto& x, const auto& y) {
-        return x.channel() < y.channel();
+    std::sort(indexp->begin(), indexp->end(), [&](auto x, auto y) {
+        return waits[x] < waits[y];
     });
-}
-
-
-void
-Task::Future_selection::Wait_set::unlock(Channel_wait_vector* waitsp)
-{
-    for (const auto& w : *waitsp)
-        w.unlock_channel();
 }
 
 
@@ -486,7 +532,7 @@ Task::Future_selection::Wait_set::unlock(Channel_wait_vector* waitsp)
 inline void
 Task::Future_selection::Timer::cancel(Task::Handle task) const
 {
-    scheduler.cancel_timer(task);
+    scheduler.cancel_wait_timer(task);
     state = State::cancel_pending;
 }
 
@@ -568,7 +614,7 @@ Task::Future_selection::complete_readable(Task::Handle task, Channel_size chan)
             waits.dequeue_not_ready(task);
     }
 
-    return Select_status(*result, is_done(waits, timer));
+    return Select_status(*result, is_ready(waits, timer));
 }
 
 
@@ -586,7 +632,7 @@ Task::Future_selection::complete_timer(Task::Handle task, Time_point time)
 
 
 inline bool
-Task::Future_selection::is_done(const Wait_set& waits, Timer timer)
+Task::Future_selection::is_ready(const Wait_set& waits, Timer timer)
 {
     return !(waits.enqueued() || timer.is_active());
 }
@@ -1183,7 +1229,7 @@ Scheduler::Timers::activate_alarm(Windows_handle timer, const Request& request, 
 
 
 void
-Scheduler::Timers::cancel(Task::Handle task)
+Scheduler::Timers::cancel_wait(Task::Handle task)
 {
     const Lock lock{mutex}; 
 
@@ -1244,7 +1290,7 @@ Scheduler::Timers::notify_cancel(const Alarm& alarm)
 {
     Task::Handle task = alarm.task;
 
-    if (task.promise().cancel_timer())
+    if (task.promise().cancel_wait_timer())
         scheduler.resume(task);
 }
 
@@ -1260,7 +1306,7 @@ Scheduler::Timers::notify_complete(const Alarm& alarm, Time_point now, Lock* loc
         between the task and the timer thread.
     */
     lockp->unlock();
-    if (task.promise().complete_timer(now))
+    if (task.promise().complete_wait_timer(now))
         scheduler.resume(task);
     lockp->lock();
 }
@@ -1357,7 +1403,7 @@ Scheduler::Timers::set_timer(Windows_handle timer, const Alarm& alarm, Time_poin
 
 
 void
-Scheduler::Timers::start(Task::Handle task, nanoseconds duration)
+Scheduler::Timers::start_wait(Task::Handle task, nanoseconds duration)
 {
     const Lock lock{mutex};
 
@@ -1395,9 +1441,9 @@ Scheduler::~Scheduler()
 
 
 void
-Scheduler::cancel_timer(Task::Handle task)
+Scheduler::cancel_wait_timer(Task::Handle task)
 {
-    timers.cancel(task);
+    timers.cancel_wait(task);
 }
 
 
@@ -1430,9 +1476,9 @@ Scheduler::run_tasks(unsigned qpos)
 
 
 void
-Scheduler::start_timer(Task::Handle task, nanoseconds duration)
+Scheduler::start_wait_timer(Task::Handle task, nanoseconds duration)
 {
-    timers.start(task, duration);
+    timers.start_wait(task, duration);
 }
 
 
