@@ -444,14 +444,14 @@ Task::Promise::initial_suspend() const
 
 template<Channel_size N>
 inline void
-Task::Promise::select(Channel_operation (&ops)[N])
+Task::Promise::select(const Channel_operation (&ops)[N])
 {
     select(begin(ops), end(ops));
 }
 
 
 inline void
-Task::Promise::select(Channel_operation* first, Channel_operation* last)
+Task::Promise::select(const Channel_operation* first, const Channel_operation* last)
 {
     const Handle    task{Handle::from_promise(*this)};
     Lock            lock{mutex};
@@ -484,7 +484,7 @@ Task::Promise::suspend(Lock* lockp)
 
 
 inline optional<Channel_size>
-Task::Promise::try_select(Channel_operation* first, Channel_operation* last)
+Task::Promise::try_select(const Channel_operation* first, const Channel_operation* last)
 {
     return try_select(first, last);
 }
@@ -1888,7 +1888,7 @@ swap(Send_channel<T>& x, Send_channel<T>& y)
     Channel Select Awaitable
 */
 inline
-Channel_select_awaitable::Channel_select_awaitable(Channel_operation* begin, Channel_operation* end)
+Channel_select_awaitable::Channel_select_awaitable(const Channel_operation* begin, const Channel_operation* end)
     : first{begin}
     , last{end}
 {
@@ -1923,7 +1923,7 @@ Channel_select_awaitable::await_suspend(Task::Handle h)
 */
 template<Channel_size N>
 inline Channel_select_awaitable
-select(Channel_operation (&ops)[N])
+select(const Channel_operation (&ops)[N])
 {
     return Channel_select_awaitable(begin(ops), end(ops));
 }
@@ -1934,7 +1934,7 @@ select(Channel_operation (&ops)[N])
 */
 template<Channel_size N>
 inline optional<Channel_size>
-try_select(Channel_operation* first, Channel_operation* last)
+try_select(const Channel_operation* first, const Channel_operation* last)
 {
     return Task::Promise::try_select(first, last);
 }
@@ -1942,7 +1942,7 @@ try_select(Channel_operation* first, Channel_operation* last)
 
 template<Channel_size N>
 inline optional<Channel_size>
-try_select(Channel_operation (&ops)[N])
+try_select(const Channel_operation (&ops)[N])
 {
     return try_select(begin(ops), end(ops));
 }
@@ -1985,7 +1985,8 @@ Future<T>::Awaitable::await_resume()
     /*
         If a future is ready, the result can be obtained from one of its
         channels without waiting.  Otherwise, the task waiting on this
-        future has just awakened having obtained a value or an error.
+        future has just awakened from a call to select() having received
+        either a value or an error.
     */
     if (selfp->is_ready())
         v = selfp->get_ready();

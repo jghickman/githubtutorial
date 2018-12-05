@@ -267,7 +267,7 @@ Task::Operation_selection::pick_ready(const Operation_vector& ops, Channel_size 
 
 
 bool
-Task::Operation_selection::select(Task::Handle task, Channel_operation* first, Channel_operation* last)
+Task::Operation_selection::select(Task::Handle task, const Channel_operation* first, const Channel_operation* last)
 {
     Transform_unique    transform{first, last, &operations};
     Channel_locks       lock{operations};
@@ -311,7 +311,7 @@ Task::Operation_selection::selected() const
 
 
 optional<Channel_size>
-Task::Operation_selection::try_select(Channel_operation* first, Channel_operation* last)
+Task::Operation_selection::try_select(const Channel_operation* first, const Channel_operation* last)
 {
     Transform_unique    transform{first, last, &operations};
     Channel_locks       lock{operations};

@@ -160,10 +160,10 @@ private:
         Operation_selection& operator=(const Operation_selection&) = delete;
 
         // Select
-        bool                    select(Task::Handle, Channel_operation*, Channel_operation*);
+        bool                    select(Task::Handle, const Channel_operation*, const Channel_operation*);
         Select_status           complete(Task::Handle, Channel_size pos);
         Channel_size            selected() const;
-        optional<Channel_size>  try_select(Channel_operation*, Channel_operation*);
+        optional<Channel_size>  try_select(const Channel_operation*, const Channel_operation*);
 
     private:
         // Names/Types
@@ -451,11 +451,11 @@ public:
         Final_suspend   final_suspend();
     
         // Channel Operations
-        template<Channel_size N> void   select(Channel_operation (&ops)[N]);
-        void                            select(Channel_operation*, Channel_operation*);
+        template<Channel_size N> void   select(const Channel_operation (&ops)[N]);
+        void                            select(const Channel_operation*, const Channel_operation*);
         Select_status                   complete_operation(Channel_size);
         Channel_size                    selected_operation() const;
-        static optional<Channel_size>   try_select(Channel_operation*, Channel_operation*);
+        static optional<Channel_size>   try_select(const Channel_operation*, const Channel_operation*);
 
         // Future Operations
         template<class T> void  wait_all(const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
@@ -1050,7 +1050,7 @@ private:
 class Channel_select_awaitable {
 public:
     // Construct
-    Channel_select_awaitable(Channel_operation*, Channel_operation*);
+    Channel_select_awaitable(const Channel_operation*, const Channel_operation*);
 
     // Awaitable Operations
     bool            await_ready();
@@ -1059,19 +1059,19 @@ public:
 
 private:
     // Data
-    Task::Handle        task;
-    Channel_operation*  first;
-    Channel_operation*  last;
+    Task::Handle                task;
+    const Channel_operation*    first;
+    const Channel_operation*    last;
 };
 
 
 /*
     Channel Selection
 */
-template<Channel_size N> Channel_select_awaitable   select(Channel_operation (&ops)[N]);
-Channel_select_awaitable                            select(Channel_operation*, Channel_operation*);
-template<Channel_size N> optional<Channel_size>     try_select(Channel_operation (&ops)[N]);
-optional<Channel_size>                              try_select(Channel_operation*, Channel_operation*);
+template<Channel_size N> Channel_select_awaitable   select(const Channel_operation (&ops)[N]);
+Channel_select_awaitable                            select(const Channel_operation*, const Channel_operation*);
+template<Channel_size N> optional<Channel_size>     try_select(const Channel_operation (&ops)[N]);
+optional<Channel_size>                              try_select(const Channel_operation*, const Channel_operation*);
 static const Channel_size select_fail{-1};
 
 
