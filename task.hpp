@@ -254,9 +254,6 @@ private:
         bool                    cancel_timer();
         Channel_size            selected() const;
 
-        // Friends
-        template<class T> friend class Future;
-
     private:
         // Names/Types
         class Wait_setup;
@@ -1119,6 +1116,7 @@ public:
 
     // Friends
     friend class Awaitable;
+    friend class Task;
 
 private:
     // Result Access
@@ -1129,9 +1127,6 @@ private:
     Channel_base*   value() const;
     Channel_base*   error() const;
     bool*           ready() const;
-
-    // Friends
-    template<class T> friend void Task::Future_selection::Wait_set::transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
 
     // Data
     Value_receiver  vchan;

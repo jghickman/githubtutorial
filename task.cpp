@@ -1079,11 +1079,14 @@ Scheduler::Timers::Alarm_queue::erase(Iterator p)
 }
 
 
-inline Scheduler::Timers::Alarm_queue::Iterator
+Scheduler::Timers::Alarm_queue::Iterator
 Scheduler::Timers::Alarm_queue::find(Task::Handle task) const
 {
-    const auto p = find_if(alarms.begin(), alarms.end(), task_eq(task));
-    return (p->task == task) ? p : alarms.end();
+    const auto first    = alarms.begin();
+    const auto last     = alarms.end();
+    const auto p        = find_if(first, last, task_eq(task));
+
+    return (p != last && p->task == task) ? p : last;
 }
 
 
