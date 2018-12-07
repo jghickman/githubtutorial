@@ -405,7 +405,7 @@ Task::Future_selection::Wait_set::count_ready(const Future_wait_index& index, co
 void
 Task::Future_selection::Wait_set::dequeue_all(Task::Handle task)
 {
-    for (auto i : futureindex)
+    for (auto i : index)
         futures[i].dequeue_locked(task, channels);
 
     nenqueued = 0;
@@ -416,7 +416,7 @@ void
 Task::Future_selection::Wait_set::dequeue_not_ready(Task::Handle task)
 {
     if (nenqueued > 0) {
-        nenqueued -= accumulate(futureindex.begin(), futureindex.end(), 0, [&](auto accum, auto i) {
+        nenqueued -= accumulate(index.begin(), index.end(), 0, [&](auto accum, auto i) {
             const auto& f = futures[i];
             if (!f.is_ready(channels)) {
                 f.dequeue(task, channels);
@@ -438,17 +438,17 @@ Task::Future_selection::Wait_set::end_setup()
 void
 Task::Future_selection::Wait_set::enqueue_all(Task::Handle task)
 {
-    for (auto i : futureindex)
+    for (auto i : index)
         futures[i].enqueue(task, channels);
 
-    nenqueued = futureindex.size();
+    nenqueued = index.size();
 }
 
 
 Channel_size
 Task::Future_selection::Wait_set::enqueue_not_ready(Task::Handle task)
 {
-    const auto n = accumulate(futureindex.begin(), futureindex.end(), 0, [&](auto accum, auto i) {
+    const auto n = accumulate(index.begin(), index.end(), 0, [&](auto accum, auto i) {
         const auto& f = futures[i];
         if (!f.is_ready(channels)) {
             f.enqueue(task, channels);
@@ -512,8 +512,8 @@ Task::Future_selection::Wait_set::remove_duplicates(Future_wait_index* indexp, c
 optional<Channel_size>
 Task::Future_selection::Wait_set::select_ready()
 {
-    const auto n = count_ready(futureindex, futures, channels);
-    return pick_ready(futureindex, futures, channels, n);
+    const auto n = count_ready(index, futures, channels);
+    return pick_ready(index, futures, channels, n);
 }
 
 
@@ -533,24 +533,24 @@ inline void
 Task::Future_selection::Timer::cancel(Task::Handle task) const
 {
     scheduler.cancel_wait_timer(task);
-    state = State::cancel_pending;
+    state = cancel_pending;
 }
 
 
 inline void
 Task::Future_selection::Timer::complete_cancel() const
 {
-    state = State::cancel_complete;
+    state = cancel_complete;
 }
 
 
 inline void
 Task::Future_selection::Timer::expire(Time_point /*when*/) const
 {
-    if (state == State::cancel_pending)
-        state = State::cancel_complete;
+    if (state == cancel_pending)
+        state = cancel_complete;
     else
-        state = State::expired;
+        state = expired;
 }
 
 
@@ -558,8 +558,8 @@ inline bool
 Task::Future_selection::Timer::is_active() const
 {
     switch(state) {
-    case State::running:
-    case State::cancel_pending:
+    case running:
+    case cancel_pending:
         return true;
 
     default:
@@ -572,8 +572,8 @@ inline bool
 Task::Future_selection::Timer::is_cancelled() const
 {
     switch(state) {
-    case State::cancel_pending:
-    case State::cancel_complete:
+    case cancel_pending:
+    case cancel_complete:
         return true;
 
     default:
@@ -585,7 +585,7 @@ Task::Future_selection::Timer::is_cancelled() const
 inline bool
 Task::Future_selection::Timer::is_running() const
 {
-    return state == State::running;
+    return state == running;
 }
 
 
@@ -643,7 +643,7 @@ Task::Future_selection::is_ready(const Wait_set& waits, Timer timer)
     Task Promise
 */
 Task::Promise::Promise()
-    : taskstat{Status::ready}
+    : taskstate{State::ready}
 {
 }
 
@@ -651,14 +651,14 @@ Task::Promise::Promise()
 inline void
 Task::Promise::make_ready()
 {
-    taskstat = Status::ready;
+    taskstate = State::ready;
 }
 
 
-inline Task::Status
-Task::Promise::status() const
+inline Task::State
+Task::Promise::state() const
 {
-    return taskstat;
+    return taskstate;
 }
 
 
@@ -1136,18 +1136,21 @@ Scheduler::Timers::Windows_handles::Windows_handles()
 {
     int n = 0;
 
+    /*
+        TODO:  Implement error handling for Windows APIs (perhaps using
+        std::system_error).
+    */
     try {
-        assert(request_pos == n);
-        hs[request_pos] = CreateEvent(NULL, FALSE, FALSE, NULL);
-        ++n;
+        assert(request_handle == n);
+        hs[n++] = CreateEvent(NULL, FALSE, FALSE, NULL);
 
-        assert(timer_pos == n);
-        hs[timer_pos] = CreateWaitableTimer(NULL, FALSE, NULL);
-        ++n;
+        assert(timer_handle == n);
+        hs[n++] = CreateWaitableTimer(NULL, FALSE, NULL);
 
-        assert(interrupt_pos == n);
-        hs[interrupt_pos] = CreateEvent(NULL, FALSE, FALSE, NULL);
-        ++n;
+        assert(interrupt_handle == n);
+        hs[n++] = CreateEvent(NULL, FALSE, FALSE, NULL);
+
+        assert(n == array_size);
     }
     catch (...) {
         close(hs, n);
@@ -1173,21 +1176,21 @@ Scheduler::Timers::Windows_handles::close(Windows_handle* hs, int n)
 inline void
 Scheduler::Timers::Windows_handles::signal_interrupt() const
 {
-    SetEvent(hs[interrupt_pos]);
+    SetEvent(hs[interrupt_handle]);
 }
 
 
 inline void
 Scheduler::Timers::Windows_handles::signal_request() const
 {
-    SetEvent(hs[request_pos]);
+    SetEvent(hs[request_handle]);
 }
 
 
 inline Scheduler::Timers::Windows_handle
 Scheduler::Timers::Windows_handles::timer() const
 {
-    return hs[timer_pos];
+    return hs[timer_handle];
 }
 
 
@@ -1197,7 +1200,7 @@ Scheduler::Timers::Windows_handles::wait_any(Lock* lockp) const
     DWORD n;
 
     lockp->unlock();
-    n = WaitForMultipleObjects(size, hs, FALSE, INFINITE);
+    n = WaitForMultipleObjects(array_size, hs, FALSE, INFINITE);
     lockp->lock();
 
     return static_cast<int>(n - WAIT_OBJECT_0);
@@ -1374,11 +1377,11 @@ Scheduler::Timers::run_thread()
 
     while (!done) {
         switch(handles.wait_any(&lock)) {
-        case Windows_handles::request_pos:
+        case request_handle:
             process_requests(handles.timer(), &requestq, &alarmq);
             break;
 
-        case Windows_handles::timer_pos:
+        case timer_handle:
             process_alarms(handles.timer(), &alarmq, &lock);
             break;
 
@@ -1463,11 +1466,11 @@ Scheduler::run_tasks(unsigned qpos)
     while (Task task = ready.pop(qpos)) {
         try {
             switch(task.resume()) {
-            case Task::Status::ready:
+            case Task::State::ready:
                 ready.push(qpos, move(task));
                 break;
 
-            case Task::Status::suspended:
+            case Task::State::suspended:
                 suspended.insert(move(task));
                 break;
             }

@@ -86,11 +86,11 @@ public:
     // Names/Types
     class Promise;
     using promise_type      = Promise;
-    using Handle            = std::experimental::coroutine_handle<promise_type>;
+    using Handle            = std::experimental::coroutine_handle<Promise>;
     using Initial_suspend   = std::experimental::suspend_always;
     using Final_suspend     = std::experimental::suspend_always;
 
-    enum class Status { ready, suspended, done };
+    enum class State : int { ready, suspended, done };
 
     class Select_status {
     public:
@@ -121,7 +121,7 @@ public:
     Handle handle() const;
 
     // Execution
-    Status resume();
+    State resume();
 
     // Conversions
     explicit operator bool() const;
@@ -131,8 +131,7 @@ public:
 
     // Friends
     friend class Scheduler;
-    friend class Channel_operation; // for Channel_lock :(
-    template<class T> friend class Future;
+    friend class Channel_operation;
 
 private:
     // Names/Types
@@ -167,9 +166,6 @@ private:
 
     private:
         // Names/Types
-        class Operation_view;
-        using Operation_vector = std::vector<Operation_view>;
-
         class Operation_view : boost::totally_ordered<Operation_view> {
         public:
             // Construct
@@ -195,6 +191,8 @@ private:
             const Channel_operation*    pop;
             Channel_size                index;
         };
+
+        using Operation_vector = std::vector<Operation_view>;
 
         class Transform_unique {
         public:
@@ -257,7 +255,7 @@ private:
     private:
         // Names/Types
         class Wait_setup;
-        enum class Wait_type{ any, all };
+        enum class Wait_type : int { any, all };
         static const Channel_size wait_success{1};
 
         class Channel_wait {
@@ -290,6 +288,11 @@ private:
 
         class Channel_locks {
         public:
+            // Construct/Copy
+            Channel_locks() = default;
+            Channel_locks(const Channel_locks&) = delete;
+            Channel_locks& operator=(const Channel_locks&) = delete;
+
             // Acquire/Release
             void acquire(const Channel_wait_vector&);
             void release(const Channel_wait_vector&);
@@ -341,6 +344,11 @@ private:
 
         class Wait_set {
         public:
+            // Construct/Copy
+            Wait_set() = default;
+            Wait_set(const Wait_set&) = delete;
+            Wait_set& operator=(const Wait_set&) = delete;
+
             // Enqueue/Dequeue
             void            enqueue_all(Task::Handle);
             Channel_size    enqueue_not_ready(Task::Handle);
@@ -376,7 +384,7 @@ private:
             // Data
             Channel_wait_vector     channels;
             Future_wait_vector      futures;
-            Future_wait_index       futureindex;
+            Future_wait_index       index;
             Channel_size            nenqueued; // futures
             Channel_locks           locks;
         };
@@ -396,9 +404,6 @@ private:
 
         class Timer {
         public:
-            // Construct
-            Timer();
-
             // Execution
             void start(Task::Handle, nanoseconds duration) const;
             void expire(Time_point) const;
@@ -411,10 +416,10 @@ private:
 
         private:
             // Constants
-            enum class State { inactive, running, cancel_pending, cancel_complete, expired };
+            enum State : int { inactive, running, cancel_pending, cancel_complete, expired };
 
             // Data
-            mutable State state;
+            mutable State state{inactive};
         };
 
         // Selection
@@ -464,7 +469,7 @@ public:
 
         // Execution
         void    make_ready();
-        Status  status() const;
+        State   state() const;
 
         // Synchronization
         void unlock();
@@ -477,7 +482,7 @@ public:
         mutable Mutex       mutex;
         Operation_selection operations;
         Future_selection    futures;
-        Status              taskstat;
+        State               taskstate;
     };
 
 private:
@@ -1002,7 +1007,7 @@ private:
 class Channel_operation : boost::totally_ordered<Channel_operation> {
 public:
     // Names/Types
-    enum class Type { none, send, receive };
+    enum class Type : int { none, send, receive };
 
     // Construct/Move/Copy/Destroy
     Channel_operation();
@@ -1477,11 +1482,10 @@ private:
 
         using Windows_handle = HANDLE;
 
+        enum : int { request_handle, timer_handle, interrupt_handle };
+
         class Windows_handles {
         public:
-            // Constants
-            enum : int { request_pos, timer_pos, interrupt_pos, size };
-
             // Construct/Copy/Destroy
             Windows_handles();
             Windows_handles(const Windows_handles&) = delete;
@@ -1497,11 +1501,14 @@ private:
             Windows_handle timer() const;
 
         private:
+            // Constants
+            static const int array_size{3};
+
             // Destroy
-            static void close(Windows_handle* hs, int n = size);
+            static void close(Windows_handle* hs, int n = array_size);
 
             // Data
-            Windows_handle hs[size];
+            Windows_handle hs[array_size];
         };
 
         // Execution

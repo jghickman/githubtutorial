@@ -256,9 +256,9 @@ template<class T>
 void
 Task::Future_selection::Wait_set::begin_setup(const Future<T>* first, const Future<T>* last)
 {
-    nenqueued = 0;
     transform(first, last, &futures, &channels);
-    index_unique(futures, &futureindex);
+    index_unique(futures, &index);
+    nenqueued = 0;
     locks.acquire(channels);
 }
 
@@ -297,17 +297,10 @@ Task::Future_selection::Wait_set::transform(const Future<T>* first, const Future
 /*
     Task Future Selection Timer
 */
-inline
-Task::Future_selection::Timer::Timer()
-{
-    clear();
-}
-
-
 inline void
 Task::Future_selection::Timer::clear() const
 {
-    state = State::inactive;
+    state = inactive;
 }
 
 
@@ -315,7 +308,7 @@ inline void
 Task::Future_selection::Timer::start(Task::Handle task, nanoseconds duration) const
 {
     scheduler.start_wait_timer(task, duration);
-    state = State::running;
+    state = running;
 }
 
 
@@ -423,7 +416,7 @@ Task::Promise::complete_wait_timer(Time_point time)
 inline Task::Final_suspend
 Task::Promise::final_suspend()
 {
-    taskstat = Status::done;
+    taskstate = State::done;
     return Final_suspend{};
 }
 
@@ -478,7 +471,7 @@ Task::Promise::selected_operation() const
 inline void
 Task::Promise::suspend(Lock* lockp)
 {
-    taskstat = Status::suspended;
+    taskstate = State::suspended;
     lockp->release();
 }
 
@@ -562,14 +555,14 @@ Task::operator bool() const
 }
 
 
-inline Task::Status
+inline Task::State
 Task::resume()
 {
     Promise& promise = coro.promise();
 
     promise.make_ready();
     coro.resume();
-    return promise.status();
+    return promise.state();
 }
 
 
