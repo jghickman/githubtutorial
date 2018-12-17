@@ -90,7 +90,7 @@ public:
     using Initial_suspend   = std::experimental::suspend_always;
     using Final_suspend     = std::experimental::suspend_always;
 
-    enum class State : int { ready, suspended, done };
+    enum class State : int { ready, waiting, done };
 
     class Select_status {
     public:
@@ -597,11 +597,11 @@ private:
     using Lock      = std::unique_lock<Mutex>;
     using Condition = std::condition_variable;
 
-    class Readable_wait : boost::equality_comparable<Readable_wait> {
+    class Readable_waiter : boost::equality_comparable<Readable_waiter> {
     public:
         // Construct
-        Readable_wait() = default;
-        Readable_wait(Task::Handle, Channel_size chan);
+        Readable_waiter() = default;
+        Readable_waiter(Task::Handle, Channel_size chan);
 
         // Identity
         Task::Handle task() const;
@@ -611,7 +611,7 @@ private:
         void notify(Mutex*) const;
 
         // Comparisons
-        friend bool operator==(const Readable_wait& x, const Readable_wait& y) {
+        friend bool operator==(const Readable_waiter& x, const Readable_waiter& y) {
             if (x.task() != y.task()) return false;
             if (x.channel() != y.channel()) return false;
             return true;
@@ -643,14 +643,14 @@ private:
         template<class U> bool pop(U*);
 
         // Waiters
-        void enqueue(const Readable_wait&);
-        bool dequeue(const Readable_wait&);
+        void enqueue(const Readable_waiter&);
+        bool dequeue(const Readable_waiter&);
 
     private:
         // Data
-        std::queue<T>               q;
+        std::queue<T>               elemq;
         Channel_size                sizemax;
-        std::deque<Readable_wait>   readers;
+        std::deque<Readable_waiter> readers;
     };
 
     class Sender : boost::equality_comparable<Sender> {
@@ -1354,12 +1354,12 @@ private:
         std::atomic<Size>   nextq{0};
     };
 
-    class Suspended_tasks {
+    class Waiting_tasks {
     public:
         // Construct/Copy
-        Suspended_tasks() = default;
-        Suspended_tasks(const Suspended_tasks&) = delete;
-        Suspended_tasks& operator=(const Suspended_tasks&) = delete;
+        Waiting_tasks() = default;
+        Waiting_tasks(const Waiting_tasks&) = delete;
+        Waiting_tasks& operator=(const Waiting_tasks&) = delete;
 
         // Task Operations
         void insert(Task&&);
@@ -1549,7 +1549,7 @@ private:
 
     // Data
     Task_queue_array    ready;
-    Suspended_tasks     suspended;
+    Waiting_tasks       waiting;
     std::vector<Thread> processors;
     Timers              timers;
 };

@@ -808,21 +808,21 @@ Channel_operation::is_ready() const
     Scheduler Suspended Tasks
 */
 inline
-Scheduler::Suspended_tasks::handle_equal::handle_equal(Task::Handle task)
+Scheduler::Waiting_tasks::handle_equal::handle_equal(Task::Handle task)
     : h{task}
 {
 }
 
 
 inline bool
-Scheduler::Suspended_tasks::handle_equal::operator()(const Task& task) const
+Scheduler::Waiting_tasks::handle_equal::operator()(const Task& task) const
 {
     return task.handle() == h;
 }
 
 
 void
-Scheduler::Suspended_tasks::insert(Task&& task)
+Scheduler::Waiting_tasks::insert(Task&& task)
 {
     Lock lock{mutex};
 
@@ -832,7 +832,7 @@ Scheduler::Suspended_tasks::insert(Task&& task)
 
 
 Task
-Scheduler::Suspended_tasks::release(Task::Handle h)
+Scheduler::Waiting_tasks::release(Task::Handle h)
 {
     Task        task;
     Lock        lock{mutex};
@@ -917,8 +917,8 @@ Scheduler::Task_queue::try_push(Task&& task)
 
     if (lock) {
         tasks.push_back(move(task));
-        ready.notify_one();
         is_pushed = true;
+        ready.notify_one();
     }
 
     return is_pushed;
@@ -1400,11 +1400,11 @@ Scheduler::Timers::set_timer(Windows_handle timer, const Alarm& alarm, Time_poin
 
     const nanoseconds   dt      =  alarm.expiry - now;
     const std::int64_t  timerdt = -(dt.count() / nanosecs_per_tick);
-    LARGE_INTEGER       timerbuf;
+    LARGE_INTEGER       timebuf;
 
-    timerbuf.LowPart = static_cast<DWORD>(timerdt & 0xFFFFFFFF);
-    timerbuf.HighPart = static_cast<LONG>(timerdt >> 32);
-    SetWaitableTimer(timer, &timerbuf, 0, NULL, NULL, FALSE);
+    timebuf.LowPart = static_cast<DWORD>(timerdt & 0xFFFFFFFF);
+    timebuf.HighPart = static_cast<LONG>(timerdt >> 32);
+    SetWaitableTimer(timer, &timebuf, 0, NULL, NULL, FALSE);
 }
 
 
@@ -1456,7 +1456,7 @@ Scheduler::cancel_wait_timer(Task::Handle task)
 void
 Scheduler::resume(Task::Handle task)
 {
-    ready.push(suspended.release(task));
+    ready.push(waiting.release(task));
 }
 
 
@@ -1470,8 +1470,8 @@ Scheduler::run_tasks(unsigned qpos)
                 ready.push(qpos, move(task));
                 break;
 
-            case Task::State::suspended:
-                suspended.insert(move(task));
+            case Task::State::waiting:
+                waiting.insert(move(task));
                 break;
             }
         } catch (...) {

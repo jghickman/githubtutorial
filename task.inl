@@ -471,7 +471,7 @@ Task::Promise::selected_operation() const
 inline void
 Task::Promise::suspend(Lock* lockp)
 {
-    taskstate = State::suspended;
+    taskstate = State::waiting;
     lockp->release();
 }
 
@@ -590,11 +590,11 @@ swap(Task& x, Task& y)
 
 
 /*
-    Channel Readable Channel_wait
+    Channel Readable Waiter
 */
 template<class T>
 inline
-Channel<T>::Readable_wait::Readable_wait(Task::Handle task, Channel_size chan)
+Channel<T>::Readable_waiter::Readable_waiter(Task::Handle task, Channel_size chan)
     : taskh{task}
     , chanpos{chan}
 {
@@ -603,7 +603,7 @@ Channel<T>::Readable_wait::Readable_wait(Task::Handle task, Channel_size chan)
 
 template<class T>
 inline Channel_size
-Channel<T>::Readable_wait::channel() const
+Channel<T>::Readable_waiter::channel() const
 {
     return chanpos;
 }
@@ -611,12 +611,14 @@ Channel<T>::Readable_wait::channel() const
 
 template<class T>
 inline void
-Channel<T>::Readable_wait::notify(Mutex* mtxp) const
+Channel<T>::Readable_waiter::notify(Mutex* mtxp) const
 {
     /*
-        The task could be simultaneously trying to dequeue this wait, so
-        temporarily unlock the channel to void a deadly embrace between
-        reader and writer.
+        If the waiting task has already awakened, it could be in the midst
+        of dequeing itself from this channel.  To avoid a potential deadly
+        embrace between an awakened task and the current thread, the channel
+        must be temporarily unlocked while notifying the task that it has
+        become readable.
     */
     mtxp->unlock();
     select(taskh, chanpos);
@@ -626,7 +628,7 @@ Channel<T>::Readable_wait::notify(Mutex* mtxp) const
 
 template<class T>
 void
-Channel<T>::Readable_wait::select(Task::Handle task, Channel_size chan)
+Channel<T>::Readable_waiter::select(Task::Handle task, Channel_size chan)
 {
     const Task::Select_status select = task.promise().complete_readable(chan);
 
@@ -637,7 +639,7 @@ Channel<T>::Readable_wait::select(Task::Handle task, Channel_size chan)
 
 template<class T>
 inline Task::Handle
-Channel<T>::Readable_wait::task() const
+Channel<T>::Readable_waiter::task() const
 {
     return taskh;
 }
@@ -657,7 +659,7 @@ Channel<T>::Buffer::Buffer(Channel_size maxsize)
 
 template<class T>
 inline void
-Channel<T>::Buffer::enqueue(const Readable_wait& r)
+Channel<T>::Buffer::enqueue(const Readable_waiter& r)
 {
     readers.push_back(r);
 }
@@ -665,7 +667,7 @@ Channel<T>::Buffer::enqueue(const Readable_wait& r)
 
 template<class T>
 inline bool
-Channel<T>::Buffer::dequeue(const Readable_wait& r)
+Channel<T>::Buffer::dequeue(const Readable_waiter& r)
 {
     using std::find;
 
@@ -683,7 +685,7 @@ template<class T>
 inline bool
 Channel<T>::Buffer::is_empty() const
 {
-    return q.empty();
+    return elemq.empty();
 }
 
 
@@ -713,8 +715,8 @@ Channel<T>::Buffer::pop(U* valuep)
     const bool is_data = !is_empty();
 
     if (is_data) {
-        *valuep = move(q.front());
-        q.pop();
+        *valuep = move(elemq.front());
+        elemq.pop();
     }
 
     return is_data;
@@ -731,9 +733,9 @@ Channel<T>::Buffer::push(U&& value, Mutex* mtxp)
     const bool is_pushed = push_silent(move(value));
 
     if (is_pushed && !readers.empty()) {
-        const Readable_wait reader = readers.front();
+        const Readable_waiter waiter = readers.front();
         readers.pop_front();
-        reader.notify(mtxp);
+        waiter.notify(mtxp);
     }
 
     return is_pushed;
@@ -750,7 +752,7 @@ Channel<T>::Buffer::push_silent(U&& value)
     bool is_space = !is_full();
 
     if (is_space)
-        q.push(move(value));
+        elemq.push(move(value));
 
     return is_space;
 }
@@ -760,7 +762,7 @@ template<class T>
 inline Channel_size
 Channel<T>::Buffer::size() const
 {
-    return static_cast<Channel_size>(q.size());
+    return static_cast<Channel_size>(elemq.size());
 }
 
 
@@ -1343,7 +1345,7 @@ template<class T>
 bool
 Channel<T>::Impl::dequeue_readable_wait(Task::Handle task, Channel_size pos)
 {
-    return buffer.dequeue(Readable_wait(task, pos));
+    return buffer.dequeue(Readable_waiter(task, pos));
 }
 
 
@@ -1376,7 +1378,7 @@ template<class T>
 void
 Channel<T>::Impl::enqueue_readable_wait(Task::Handle task, Channel_size pos)
 {
-    buffer.enqueue(Readable_wait(task, pos));
+    buffer.enqueue(Readable_waiter(task, pos));
 }
 
 
