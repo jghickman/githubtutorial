@@ -617,8 +617,8 @@ Channel<T>::Readable_waiter::notify(Mutex* mtxp) const
         If the waiting task has already awakened, it could be in the midst
         of dequeing itself from this channel.  To avoid a potential deadly
         embrace between an awakened task and the current thread, the channel
-        must be temporarily unlocked while notifying the task that it has
-        become readable.
+        must be temporarily unlocked while notifying the task that the
+        channel has become readable.
     */
     mtxp->unlock();
     select(taskh, chanpos);
@@ -749,12 +749,12 @@ Channel<T>::Buffer::push_silent(U&& value)
 {
     using std::move;
 
-    bool is_space = !is_full();
+    const bool is_capacity = !is_full();
 
-    if (is_space)
+    if (is_capacity)
         elemq.push(move(value));
 
-    return is_space;
+    return is_capacity;
 }
 
 
@@ -1228,8 +1228,8 @@ swap(Channel<T>& x, Channel<T>& y)
 */
 template<class T>
 inline
-Channel<T>::Impl::Impl(Channel_size n)
-    : buffer{n}
+Channel<T>::Impl::Impl(Channel_size bufsize)
+    : buffer{bufsize}
 {
 }
 
@@ -1258,7 +1258,7 @@ Channel<T>::Impl::blocking_receive()
     T       value;
     Lock    lock{mutex};
 
-    if (!read_element(&value, &buffer, &senders, &mutex))
+    if (!read(&value, &buffer, &senders, &mutex))
         wait_for_sender(&receivers, &value, &lock);
 
     return value;
@@ -1272,7 +1272,7 @@ Channel<T>::Impl::blocking_send(U* valuep)
 {
     Lock lock{mutex};
 
-    if (!write_element(valuep, &buffer, &receivers, &mutex))
+    if (!write(valuep, &buffer, &receivers, &mutex))
         wait_for_receiver(&senders, valuep, &lock);
 }
 
@@ -1469,14 +1469,14 @@ template<class T>
 void
 Channel<T>::Impl::read(void* valuep)
 {
-    read_element(static_cast<T*>(valuep), &buffer, &senders, &mutex);
+    read(static_cast<T*>(valuep), &buffer, &senders, &mutex);
 }
 
 
 template<class T>
 template<class U>
 inline bool
-Channel<T>::Impl::read_element(U* valuep, Buffer* bufp, Sender_queue* sendqp, Mutex* mtxp)
+Channel<T>::Impl::read(U* valuep, Buffer* bufp, Sender_queue* sendqp, Mutex* mtxp)
 {
     return bufp->pop(valuep) || dequeue(sendqp, valuep, mtxp);
 }
@@ -1566,7 +1566,7 @@ Channel<T>::Impl::write(void* lvaluep)
 template<class T>
 template<class U>
 inline bool
-Channel<T>::Impl::write_element(U* valuep, Buffer* bufp, Receiver_queue* recvqp, Mutex* mtxp)
+Channel<T>::Impl::write(U* valuep, Buffer* bufp, Receiver_queue* recvqp, Mutex* mtxp)
 {
     using std::move;
     return dequeue(recvqp, valuep, mtxp) || bufp->push(move(*valuep), mtxp);

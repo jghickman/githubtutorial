@@ -687,7 +687,7 @@ private:
         static void                     move(T* lvalp, const T* rvalp, Buffer* destp);
     
         // Data
-        mutable Task::Handle    taskh; // poor Handle const usage forces mutable
+        mutable Task::Handle    taskh; // Handle's poor const design forces mutable
         Channel_size            oper;
         const T*                rvalp;
         T*                      lvalp;
@@ -721,7 +721,7 @@ private:
         template<class U> static bool select(Task::Handle, Channel_size pos, T* valp, U* sendbufp);
 
         // Data
-        mutable Task::Handle    taskh; // poor Handle const usage forces mutable
+        mutable Task::Handle    taskh; // Handle's poor const design forces mutable
         Channel_size            oper;
         T*                      valp;
         Condition*              readyp;
@@ -735,8 +735,8 @@ private:
 
         struct waiter_eq {
             waiter_eq(Task::Handle h, Channel_size pos) : task{h}, oper{pos} {}
-            bool operator()(const U& waiter) const {
-                return waiter.task() == task && waiter.operation() == oper;
+            bool operator()(const U& waiting) const {
+                return waiting.task() == task && waiting.operation() == oper;
             }
             Task::Handle task;
             Channel_size oper;
@@ -771,7 +771,7 @@ private:
     class Impl final : public Channel_base {
     public:
         // Construct
-        explicit Impl(Channel_size);
+        explicit Impl(Channel_size bufsize);
 
         // Size and Capacity
         Channel_size    size() const;
@@ -817,8 +817,8 @@ private:
 
     private:
         // Non-Blocking I/O
-        template<class U> bool read_element(U* valuep, Buffer*, Sender_queue*, Mutex*);
-        template<class U> bool write_element(U* valp, Buffer*, Receiver_queue*, Mutex*);
+        template<class U> bool read(U* valuep, Buffer*, Sender_queue*, Mutex*);
+        template<class U> bool write(U* valuep, Buffer*, Receiver_queue*, Mutex*);
 
         // Blocking I/O
         void                            enqueue_read(Task::Handle, Channel_size pos, T* valuep);
@@ -1332,7 +1332,7 @@ private:
         using Size = Queue_vector::size_type;
     
         // Construct/Copy
-        explicit Task_queue_array(Size n);
+        explicit Task_queue_array(Size nqueues);
         Task_queue_array(const Task_queue_array&) = delete;
         Task_queue_array& operator=(const Task_queue_array&) = delete;
     
@@ -1367,9 +1367,9 @@ private:
     
     private:
         // Names/Types
-        struct handle_equal {
+        struct handle_eq {
             // Construct
-            explicit handle_equal(Task::Handle);
+            explicit handle_eq(Task::Handle);
             bool operator()(const Task&) const;
             Task::Handle h;
         };
@@ -1393,25 +1393,24 @@ private:
 
     private:
         /*
-            The clock definition is platform dependent; it should be
-            monotonic with adequate resolution.  std::chrono::steady_clock
-            has nanosecond resolution on Windows.
+            The clock should be monotonic with adequate resolution.
+            std::chrono::steady_clock has nanosecond resolution on Windows.
         */
         using Clock = std::chrono::steady_clock;
 
         class Request {
         public:
             // Construct
-            Request(Task::Handle, nanoseconds); // start
-            explicit Request(Task::Handle);     // cancel
-
-            // Observers
-            Task::Handle    task() const;
-            nanoseconds     time() const;
+            Request(Task::Handle, nanoseconds); // start wait
+            explicit Request(Task::Handle);     // cancel wait
 
             // Types
             bool is_start() const;
             bool is_cancel() const;
+
+            // Observers
+            Task::Handle    task() const;
+            nanoseconds     time() const;
 
         private:
             // Data
@@ -1502,13 +1501,13 @@ private:
 
         private:
             // Constants
-            static const int array_size{3};
+            static const int count{3};
 
             // Destroy
-            static void close(Windows_handle* hs, int n = array_size);
+            static void close(Windows_handle* hs, int n = count);
 
             // Data
-            Windows_handle hs[array_size];
+            Windows_handle hs[count];
         };
 
         // Execution
@@ -1545,7 +1544,7 @@ private:
     };
     
     // Execution
-    void run_tasks(unsigned qpos);
+    void run_tasks(unsigned q);
 
     // Data
     Task_queue_array    ready;

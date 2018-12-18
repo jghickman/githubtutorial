@@ -808,14 +808,14 @@ Channel_operation::is_ready() const
     Scheduler Suspended Tasks
 */
 inline
-Scheduler::Waiting_tasks::handle_equal::handle_equal(Task::Handle task)
+Scheduler::Waiting_tasks::handle_eq::handle_eq(Task::Handle task)
     : h{task}
 {
 }
 
 
 inline bool
-Scheduler::Waiting_tasks::handle_equal::operator()(const Task& task) const
+Scheduler::Waiting_tasks::handle_eq::operator()(const Task& task) const
 {
     return task.handle() == h;
 }
@@ -824,7 +824,7 @@ Scheduler::Waiting_tasks::handle_equal::operator()(const Task& task) const
 void
 Scheduler::Waiting_tasks::insert(Task&& task)
 {
-    Lock lock{mutex};
+    const Lock lock{mutex};
 
     tasks.push_back(move(task));
     tasks.back().unlock();
@@ -835,8 +835,8 @@ Task
 Scheduler::Waiting_tasks::release(Task::Handle h)
 {
     Task        task;
-    Lock        lock{mutex};
-    const auto  taskp = find_if(tasks.begin(), tasks.end(), handle_equal(h));
+    const Lock  lock{mutex};
+    const auto  taskp = find_if(tasks.begin(), tasks.end(), handle_eq(h));
 
     if (taskp != tasks.end()) {
         task = move(*taskp);
@@ -853,7 +853,7 @@ Scheduler::Waiting_tasks::release(Task::Handle h)
 void
 Scheduler::Task_queue::interrupt()
 {
-    Lock lock{mutex};
+    const Lock lock{mutex};
 
     is_interrupt = true;
     ready.notify_one();
@@ -889,7 +889,7 @@ Scheduler::Task_queue::pop_front(std::deque<Task>* tasksp)
 void
 Scheduler::Task_queue::push(Task&& task)
 {
-    Lock lock{mutex};
+    const Lock lock{mutex};
 
     tasks.push_back(move(task));
     ready.notify_one();
@@ -899,8 +899,8 @@ Scheduler::Task_queue::push(Task&& task)
 Task
 Scheduler::Task_queue::try_pop()
 {
-    Task task;
-    Lock lock{mutex, try_to_lock};
+    Task        task;
+    const Lock  lock{mutex, try_to_lock};
 
     if (lock && !tasks.empty())
         task = pop_front(&tasks);
@@ -912,13 +912,13 @@ Scheduler::Task_queue::try_pop()
 bool
 Scheduler::Task_queue::try_push(Task&& task)
 {
-    bool is_pushed{false};
-    Lock lock{mutex, try_to_lock};
+    bool        is_pushed{false};
+    const Lock  lock{mutex, try_to_lock};
 
     if (lock) {
         tasks.push_back(move(task));
-        is_pushed = true;
         ready.notify_one();
+        is_pushed = true;
     }
 
     return is_pushed;
@@ -945,11 +945,10 @@ Scheduler::Task_queue_array::interrupt()
 Task
 Scheduler::Task_queue_array::pop(Size qpref)
 {
-    const auto  nqs = qs.size();
-    Task        task;
+    Task task;
 
     // Try to dequeue a task without waiting.
-    for (Size i = 0; i < nqs && !task; ++i) {
+    for (Size i = 0, nqs = qs.size(); i < nqs && !task; ++i) {
         auto pos = (qpref + i) % nqs;
         task = qs[pos].try_pop();
     }
@@ -965,8 +964,8 @@ Scheduler::Task_queue_array::pop(Size qpref)
 inline void
 Scheduler::Task_queue_array::push(Task&& task)
 {
-    const auto  nqs     = qs.size();
-    const auto  qpref   = nextq++ % nqs;
+    const auto nqs      = qs.size();
+    const auto qpref    = nextq++ % nqs;
 
     push(&qs, qpref, move(task));
 }
@@ -984,17 +983,17 @@ Scheduler::Task_queue_array::push(Queue_vector* qvecp, Size qpref, Task&& task)
 {
     Queue_vector&   qs      = *qvecp;
     const auto      nqs     = qs.size();
-    bool            done    = false;
+    Size            i       = 0;
 
     // Try to enqueue the task without waiting.
-    for (Size i = 0; !done && i < nqs; ++i) {
+    for (; i < nqs; ++i) {
         auto pos = (qpref + i) % nqs;
         if (qs[pos].try_push(move(task)))
-            done = true;
+            break;
     }
 
-    // If we failed, wait on the preferred queue.
-    if (!done)
+    // If that failed, wait on the preferred queue.
+    if (i == nqs)
         qs[qpref].push(move(task));
 }
 
@@ -1150,7 +1149,7 @@ Scheduler::Timers::Windows_handles::Windows_handles()
         assert(interrupt_handle == n);
         hs[n++] = CreateEvent(NULL, FALSE, FALSE, NULL);
 
-        assert(n == array_size);
+        assert(n == count);
     }
     catch (...) {
         close(hs, n);
@@ -1197,12 +1196,9 @@ Scheduler::Timers::Windows_handles::timer() const
 inline int
 Scheduler::Timers::Windows_handles::wait_any(Lock* lockp) const 
 {
-    DWORD n;
-
     lockp->unlock();
-    n = WaitForMultipleObjects(array_size, hs, FALSE, INFINITE);
+    const DWORD n = WaitForMultipleObjects(count, hs, FALSE, INFINITE);
     lockp->lock();
-
     return static_cast<int>(n - WAIT_OBJECT_0);
 }
 
@@ -1461,13 +1457,13 @@ Scheduler::resume(Task::Handle task)
 
 
 void
-Scheduler::run_tasks(unsigned qpos)
+Scheduler::run_tasks(unsigned q)
 {
-    while (Task task = ready.pop(qpos)) {
+    while (Task task = ready.pop(q)) {
         try {
             switch(task.resume()) {
             case Task::State::ready:
-                ready.push(qpos, move(task));
+                ready.push(q, move(task));
                 break;
 
             case Task::State::waiting:
