@@ -2,25 +2,26 @@
 //  $CUSTOM_HEADER$
 
 //
-//  isptech/concurrency/task.inl
+//  isptech/coroutine/task.inl
 //
 
 //
 //  IAPPA CM Revision # : $Revision: 1.3 $
 //  IAPPA CM Tag        : $Name:  $
 //  Last user to change : $Author: hickmjg $
-//  Date of change      : $Date: 2008/12/23 12:43:48 $
-//  File Path           : $Source: //ftwgroups/data/IAPPA/CVSROOT/isptech/concurrency/task.inl,v $
+//  Date of change      : $Date: 2018/12/18 21:55:18 $
+//  File Path           : $Source: //ftwgroups/data/iappa/CVSROOT/isptech_cvs/isptech/coroutine/task.inl,v $
+//  Source of funding   : IAPPA
 //
 //  CAUTION:  CONTROLLED SOURCE.  DO NOT MODIFY ANYTHING ABOVE THIS LINE.
 //
 
 
 /*
-    Information and Sensor Processing Technology Concurrency Library
+    Information and Sensor Processing Technology Coroutine Library
 */
-namespace Isptech       {
-namespace Concurrency   {
+namespace Isptech   {
+namespace Coroutine {
 
 
 /*
@@ -383,26 +384,6 @@ Task::Promise::cancel_wait_timer()
 }
 
 
-inline Task::Select_status
-Task::Promise::complete_operation(Channel_size pos)
-{
-    const Handle    task{Handle::from_promise(*this)};
-    const Lock      lock{mutex};
-
-    return operations.complete(task, pos);
-}
-
-
-inline Task::Select_status
-Task::Promise::complete_readable(Channel_size pos)
-{
-    const Handle    task{Handle::from_promise(*this)};
-    const Lock      lock{mutex};
-
-    return futures.complete_readable(task, pos);
-}
-
-
 inline bool
 Task::Promise::complete_wait_timer(Time_point time)
 {
@@ -461,10 +442,30 @@ Task::Promise::selected_future() const
 }
 
 
+inline Task::Select_status
+Task::Promise::select_operation(Channel_size pos)
+{
+    const Handle    task{Handle::from_promise(*this)};
+    const Lock      lock{mutex};
+
+    return operations.select(task, pos);
+}
+
+
 inline Channel_size
 Task::Promise::selected_operation() const
 {
     return operations.selected();
+}
+
+
+inline Task::Select_status
+Task::Promise::select_readable(Channel_size pos)
+{
+    const Handle    task{Handle::from_promise(*this)};
+    const Lock      lock{mutex};
+
+    return futures.select_readable(task, pos);
 }
 
 
@@ -614,11 +615,10 @@ inline void
 Channel<T>::Readable_waiter::notify(Mutex* mtxp) const
 {
     /*
-        If the waiting task has already awakened, it could be in the midst
-        of dequeing itself from this channel.  To avoid a potential deadly
-        embrace between an awakened task and the current thread, the channel
-        must be temporarily unlocked while notifying the task that the
-        channel has become readable.
+        If the waiting task has already been awakened, it could be in the
+        midst of dequeing itself from this channel.  To avoid a deadly
+        embrace, the current thread unlocks the channel before notifying
+        the task that it has become readable.
     */
     mtxp->unlock();
     select(taskh, chanpos);
@@ -630,9 +630,9 @@ template<class T>
 void
 Channel<T>::Readable_waiter::select(Task::Handle task, Channel_size chan)
 {
-    const Task::Select_status select = task.promise().complete_readable(chan);
+    const Task::Select_status selection = task.promise().select_readable(chan);
 
-    if (select.is_complete())
+    if (selection.is_complete())
         scheduler.resume(task);
 }
 
@@ -878,9 +878,10 @@ Channel<T>::Receiver::dequeue(U* sendbufp, Mutex* mtxp) const
 
     if (taskh) {
         /*
-            The receiving task could be simultaneously trying to
-            dequeue this operation, so temporarily unlock the channel to
-            avoid a deadly embrace between sender and receiver.
+            If the receiving task already been awakened, it could be in the
+            midst of dequeing itself from this channel.  To avoid a deadly
+            embrace, the current thread unlocks the channel before notifying
+            the receiver that the operation can be completed.
         */
         mtxp->unlock();
         if (!select(taskh, oper, valp, sendbufp))
@@ -910,15 +911,15 @@ Channel<T>::Receiver::select(Task::Handle task, Channel_size pos, T* valp, U* se
 {
     using std::move;
 
-    const Task::Select_status   select      = task.promise().complete_operation(pos);
+    const Task::Select_status   selection   = task.promise().select_operation(pos);
     bool                        is_selected = false;
 
-    if (select.position() == pos) {
+    if (selection.position() == pos) {
         *valp = move(*sendbufp);
         is_selected = true;
     }
 
-    if (select.is_complete())
+    if (selection.is_complete())
         scheduler.resume(task);
 
     return is_selected;
@@ -997,9 +998,10 @@ Channel<T>::Sender::dequeue(U* recvbufp, Mutex* mtxp) const
 
     if (taskh) {
         /*
-            The sending task could be simultaneously trying to dequeue
-            this operation, so temporarily unlock the channel to avoid a
-            deadly embrace between sender and receiver.
+            If the sending task already been awakened, it could be in the
+            midst of dequeing itself from this channel.  To avoid a deadly
+            embrace, the current thread unlocks the channel before notifying
+            the sender that the operation can be completed.
         */
         mtxp->unlock();
         if (!select(taskh, oper, lvalp, rvalp, recvbufp))
@@ -1051,7 +1053,7 @@ template<class U>
 bool
 Channel<T>::Sender::select(Task::Handle task, Channel_size pos, T* lvalp, const T* rvalp, U* recvbufp)
 {
-    const Task::Select_status   select      = task.promise().complete_operation(pos);
+    const Task::Select_status   select      = task.promise().select_operation(pos);
     bool                        is_selected = false;
 
     if (select.position() == pos) {
@@ -1498,7 +1500,7 @@ Channel<T>::Impl::try_receive()
     optional<T> value;
     Lock        lock{mutex};
 
-    read_element(&value, &buffer, &senders, &mutex);
+    read(&value, &buffer, &senders, &mutex);
     return value;
 }
 
@@ -1508,7 +1510,7 @@ bool
 Channel<T>::Impl::try_send(const T& value)
 {
     Lock lock{mutex};
-    return write_element(&value, &buffer, &receivers, &mutex);
+    return write(&value, &buffer, &receivers, &mutex);
 }
 
 
@@ -1551,7 +1553,7 @@ template<class T>
 void
 Channel<T>::Impl::write(const void* rvaluep)
 {
-    write_element(static_cast<const T*>(rvaluep), &buffer, &receivers, &mutex);
+    write(static_cast<const T*>(rvaluep), &buffer, &receivers, &mutex);
 }
 
 
@@ -1559,7 +1561,7 @@ template<class T>
 void
 Channel<T>::Impl::write(void* lvaluep)
 {
-    write_element(static_cast<T*>(lvaluep), &buffer, &receivers, &mutex);
+    write(static_cast<T*>(lvaluep), &buffer, &receivers, &mutex);
 }
 
 
@@ -2128,11 +2130,11 @@ Future<T>::value() const
 
 
 /*
-    Future All Awaitable
+    All Futures Awaitable
 */
 template<class T>
 inline
-Future_all_awaitable<T>::Future_all_awaitable(const Future<T>* begin, const Future<T>* end)
+All_futures_awaitable<T>::All_futures_awaitable(const Future<T>* begin, const Future<T>* end)
     : first{begin}
     , last{end}
 {
@@ -2141,7 +2143,7 @@ Future_all_awaitable<T>::Future_all_awaitable(const Future<T>* begin, const Futu
 
 template<class T>
 inline bool
-Future_all_awaitable<T>::await_ready()
+All_futures_awaitable<T>::await_ready()
 {
     return false;
 }
@@ -2149,14 +2151,14 @@ Future_all_awaitable<T>::await_ready()
 
 template<class T>
 inline void
-Future_all_awaitable<T>::await_resume()
+All_futures_awaitable<T>::await_resume()
 {
 }
 
 
 template<class T>
 inline bool
-Future_all_awaitable<T>::await_suspend(Task::Handle task)
+All_futures_awaitable<T>::await_suspend(Task::Handle task)
 {
     task.promise().wait_all(first, last, time);
     return true;
@@ -2164,15 +2166,15 @@ Future_all_awaitable<T>::await_suspend(Task::Handle task)
 
 
 template<class T>
-inline Future_all_awaitable<T>
+inline All_futures_awaitable<T>
 wait_all(const Future<T>* first, const Future<T>* last)
 {
-    return Future_all_awaitable<T>(first, last);
+    return All_futures_awaitable<T>(first, last);
 }
 
 
 template<class T>
-inline Future_all_awaitable<T>
+inline All_futures_awaitable<T>
 wait_all(const vector<Future<T>>& fs)
 {
     const Future<T>* first{nullptr};
@@ -2192,7 +2194,7 @@ wait_all(const vector<Future<T>>& fs)
 */
 template<class T>
 inline
-Future_all_timed_awaitable<T>::Future_all_timed_awaitable(const Future<T>* begin, const Future<T>* end, nanoseconds maxtime)
+All_futures_timed_awaitable<T>::All_futures_timed_awaitable(const Future<T>* begin, const Future<T>* end, nanoseconds maxtime)
     : first{begin}
     , last{end}
     , time{maxtime}
@@ -2202,7 +2204,7 @@ Future_all_timed_awaitable<T>::Future_all_timed_awaitable(const Future<T>* begin
 
 template<class T>
 inline bool
-Future_all_timed_awaitable<T>::await_ready()
+All_futures_timed_awaitable<T>::await_ready()
 {
     return false;
 }
@@ -2210,7 +2212,7 @@ Future_all_timed_awaitable<T>::await_ready()
 
 template<class T>
 inline bool
-Future_all_timed_awaitable<T>::await_resume()
+All_futures_timed_awaitable<T>::await_resume()
 {
     return task.promise().selected_future() != wait_fail;
 }
@@ -2218,7 +2220,7 @@ Future_all_timed_awaitable<T>::await_resume()
 
 template<class T>
 inline bool
-Future_all_timed_awaitable<T>::await_suspend(Task::Handle taskh)
+All_futures_timed_awaitable<T>::await_suspend(Task::Handle taskh)
 {
     task = taskh;
     task.promise().wait_all(first, last, time);
@@ -2227,15 +2229,15 @@ Future_all_timed_awaitable<T>::await_suspend(Task::Handle taskh)
 
 
 template<class T>
-inline Future_all_timed_awaitable<T>
+inline All_futures_timed_awaitable<T>
 wait_all(const Future<T>* first, const Future<T>* last, nanoseconds maxtime)
 {
-    return Future_all_timed_awaitable<T>(first, last, maxtime);
+    return All_futures_timed_awaitable<T>(first, last, maxtime);
 }
 
 
 template<class T>
-inline Future_all_timed_awaitable<T>
+inline All_futures_timed_awaitable<T>
 wait_all(const vector<Future<T>>& fs, nanoseconds maxtime)
 {
     const Future<T>* first{nullptr};
@@ -2251,11 +2253,11 @@ wait_all(const vector<Future<T>>& fs, nanoseconds maxtime)
 
 
 /*
-    Future Any Awaitable
+    Any Future Awaitable
 */
 template<class T>
 inline
-Future_any_awaitable<T>::Future_any_awaitable(const Future<T>* begin, const Future<T>* end)
+Any_future_awaitable<T>::Any_future_awaitable(const Future<T>* begin, const Future<T>* end)
     : first{begin}
     , last{end}
 {
@@ -2264,7 +2266,7 @@ Future_any_awaitable<T>::Future_any_awaitable(const Future<T>* begin, const Futu
 
 template<class T>
 inline
-Future_any_awaitable<T>::Future_any_awaitable(const Future<T>* begin, const Future<T>* end, nanoseconds maxtime)
+Any_future_awaitable<T>::Any_future_awaitable(const Future<T>* begin, const Future<T>* end, nanoseconds maxtime)
     : first{begin}
     , last{end}
     , time{maxtime}
@@ -2274,7 +2276,7 @@ Future_any_awaitable<T>::Future_any_awaitable(const Future<T>* begin, const Futu
 
 template<class T>
 inline bool
-Future_any_awaitable<T>::await_ready()
+Any_future_awaitable<T>::await_ready()
 {
     return false;
 }
@@ -2282,7 +2284,7 @@ Future_any_awaitable<T>::await_ready()
 
 template<class T>
 inline Channel_size
-Future_any_awaitable<T>::await_resume()
+Any_future_awaitable<T>::await_resume()
 {
     return task.promise().selected_future();
 }
@@ -2290,7 +2292,7 @@ Future_any_awaitable<T>::await_resume()
 
 template<class T>
 inline bool
-Future_any_awaitable<T>::await_suspend(Task::Handle taskh)
+Any_future_awaitable<T>::await_suspend(Task::Handle taskh)
 {
     task = taskh;
     task.promise().wait_any(first, last, time);
@@ -2299,23 +2301,23 @@ Future_any_awaitable<T>::await_suspend(Task::Handle taskh)
 
 
 template<class T>
-inline Future_any_awaitable<T>
+inline Any_future_awaitable<T>
 wait_any(const Future<T>* first, const Future<T>* last)
 {
-    return Future_any_awaitable<T>(first, last);
+    return Any_future_awaitable<T>(first, last);
 }
 
 
 template<class T>
-inline Future_any_awaitable<T>
+inline Any_future_awaitable<T>
 wait_any(const Future<T>* first, const Future<T>* last, nanoseconds maxtime)
 {
-    return Future_any_awaitable<T>(first, last, maxtime);
+    return Any_future_awaitable<T>(first, last, maxtime);
 }
 
 
 template<class T>
-inline Future_any_awaitable<T>
+inline Any_future_awaitable<T>
 wait_any(const vector<Future<T>>& fs)
 {
     const Future<T>* first{nullptr};
@@ -2331,7 +2333,7 @@ wait_any(const vector<Future<T>>& fs)
 
 
 template<class T>
-inline Future_any_awaitable<T>
+inline Any_future_awaitable<T>
 wait_any(const vector<Future<T>>& fs, nanoseconds maxtime)
 {
     const Future<T>* first{nullptr};
@@ -2394,6 +2396,7 @@ async(Fun f, Args&&... args)
 }
 
 
-}  // Concurrency
+}  // Coroutine
 }  // Isptech
 
+//  $CUSTOM_FOOTER$

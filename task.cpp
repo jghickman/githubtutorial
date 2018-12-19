@@ -2,22 +2,21 @@
 //  $CUSTOM_HEADER$
 
 //
-//  isptech/concurrency/task.cpp
+//  isptech/coroutine/task.cpp
 //
 
 //
 //  IAPPA CM Revision # : $Revision: 1.3 $
 //  IAPPA CM Tag        : $Name:  $
 //  Last user to change : $Author: hickmjg $
-//  Date of change      : $Date: 2008/12/23 12:43:48 $
-//  File Path           : $Source: //ftwgroups/data/IAPPA/CVSROOT/isptech/concurrency/task.cpp,v $
+//  Date of change      : $Date: 2018/12/18 21:54:46 $
+//  File Path           : $Source: //ftwgroups/data/iappa/CVSROOT/isptech_cvs/src/isptech/coroutine/task.cpp,v $
+//  Source of funding   : IAPPA
 //
 //  CAUTION:  CONTROLLED SOURCE.  DO NOT MODIFY ANYTHING ABOVE THIS LINE.
 //
 
-
-#include "isptech/concurrency/task.hpp"
-#include <algorithm>
+#include "isptech/coroutine/task.hpp"
 #include <cstdint>
 #include <numeric>
 
@@ -26,10 +25,10 @@
 
 
 /*
-    Information and Sensor Processing Technology Concurrency Library
+    Information and Sensor Processing Technology Coroutine Library
 */
-namespace Isptech       {
-namespace Concurrency   {
+namespace Isptech   {
+namespace Coroutine {
 
 
 /*
@@ -201,19 +200,6 @@ Task::Operation_selection::Transform_unique::transform(const Channel_operation* 
 /*
     Task Operation Selection
 */
-Task::Select_status
-Task::Operation_selection::complete(Task::Handle task, Channel_size pos)
-{
-    --nenqueued;
-    if (!winner) {
-        winner = pos;
-        nenqueued -= dequeue(task, operations, pos);
-    }
-
-    return Select_status(*winner, nenqueued == 0);
-}
-
-
 Channel_size
 Task::Operation_selection::count_ready(const Operation_vector& ops)
 {
@@ -269,8 +255,8 @@ Task::Operation_selection::pick_ready(const Operation_vector& ops, Channel_size 
 bool
 Task::Operation_selection::select(Task::Handle task, const Channel_operation* first, const Channel_operation* last)
 {
-    Transform_unique    transform{first, last, &operations};
-    Channel_locks       lock{operations};
+    const Transform_unique  transform{first, last, &operations};
+    const Channel_locks     lock{operations};
 
     nenqueued = 0;
     winner = select_ready(operations);
@@ -278,6 +264,19 @@ Task::Operation_selection::select(Task::Handle task, const Channel_operation* fi
         nenqueued = enqueue(task, operations);
 
     return nenqueued == 0;
+}
+
+
+Task::Select_status
+Task::Operation_selection::select(Task::Handle task, Channel_size pos)
+{
+    --nenqueued;
+    if (!winner) {
+        winner = pos;
+        nenqueued -= dequeue(task, operations, pos);
+    }
+
+    return Select_status(*winner, nenqueued == 0);
 }
 
 
@@ -313,8 +312,8 @@ Task::Operation_selection::selected() const
 optional<Channel_size>
 Task::Operation_selection::try_select(const Channel_operation* first, const Channel_operation* last)
 {
-    Transform_unique    transform{first, last, &operations};
-    Channel_locks       lock{operations};
+    const Transform_unique  transform{first, last, &operations};
+    const Channel_locks     lock{operations};
 
     return select_ready(operations);
 }
@@ -382,17 +381,6 @@ Task::Future_selection::Channel_locks::sort(Channel_index* indexp, const Channel
 /*
     Task Future Selection Wait Set
 */
-Channel_size
-Task::Future_selection::Wait_set::complete_readable(Task::Handle task, Channel_size chan)
-{
-    const Channel_size future = channels[chan].future();
-
-    futures[future].complete(task, channels, chan);
-    --nenqueued;
-    return future;
-}
-
-
 Channel_size
 Task::Future_selection::Wait_set::count_ready(const Future_wait_index& index, const Future_wait_vector& futures, const Channel_wait_vector& chans)
 {
@@ -509,6 +497,17 @@ Task::Future_selection::Wait_set::remove_duplicates(Future_wait_index* indexp, c
 }
 
 
+Channel_size
+Task::Future_selection::Wait_set::select_readable(Task::Handle task, Channel_size chan)
+{
+    const Channel_size future = channels[chan].future();
+
+    futures[future].complete(task, channels, chan);
+    --nenqueued;
+    return future;
+}
+
+
 optional<Channel_size>
 Task::Future_selection::Wait_set::select_ready()
 {
@@ -600,24 +599,6 @@ Task::Future_selection::cancel_timer()
 }
 
 
-Task::Select_status
-Task::Future_selection::complete_readable(Task::Handle task, Channel_size chan)
-{
-    const Channel_size future = waits.complete_readable(task, chan);
-
-    if (!waits.enqueued() && timer.is_running())
-        timer.cancel(task);
-
-    if (!result) {
-        result = future;
-        if (waittype == Wait_type::any)
-            waits.dequeue_not_ready(task);
-    }
-
-    return Select_status(*result, is_ready(waits, timer));
-}
-
-
 bool
 Task::Future_selection::complete_timer(Task::Handle task, Time_point time)
 {
@@ -652,6 +633,24 @@ inline void
 Task::Promise::make_ready()
 {
     taskstate = State::ready;
+}
+
+
+Task::Select_status
+Task::Future_selection::select_readable(Task::Handle task, Channel_size chan)
+{
+    const Channel_size future = waits.select_readable(task, chan);
+
+    if (!waits.enqueued() && timer.is_running())
+        timer.cancel(task);
+
+    if (!result) {
+        result = future;
+        if (waittype== Wait_type::any)
+            waits.dequeue_not_ready(task);
+    }
+
+    return Select_status(*result, is_ready(waits, timer));
 }
 
 
@@ -964,8 +963,8 @@ Scheduler::Task_queue_array::pop(Size qpref)
 inline void
 Scheduler::Task_queue_array::push(Task&& task)
 {
-    const auto nqs      = qs.size();
-    const auto qpref    = nextq++ % nqs;
+    const auto nqs = qs.size();
+    const auto qpref = nextq++ % nqs;
 
     push(&qs, qpref, move(task));
 }
@@ -981,9 +980,9 @@ Scheduler::Task_queue_array::push(Size qpref, Task&& task)
 void
 Scheduler::Task_queue_array::push(Queue_vector* qvecp, Size qpref, Task&& task)
 {
-    Queue_vector&   qs      = *qvecp;
-    const auto      nqs     = qs.size();
-    Size            i       = 0;
+    Queue_vector&   qs  = *qvecp;
+    const auto      nqs = qs.size();
+    Size            i   = 0;
 
     // Try to enqueue the task without waiting.
     for (; i < nqs; ++i) {
@@ -1303,9 +1302,10 @@ Scheduler::Timers::notify_complete(const Alarm& alarm, Time_point now, Lock* loc
     Task::Handle task = alarm.task;
 
     /*
-        The task could be simultaneously attempting to cancel the timer,
-        so temporarily release the timer lock to avoid a deadly embrace
-        between the task and the timer thread.
+        If the waiting task has already been awakened, it could be in the
+        midst of cancelling the timer.  To avoid a deadly embrace, the current
+        thread unlocks the timers before notifying the waiter that the timer
+        has completed.
     */
     lockp->unlock();
     if (task.promise().complete_wait_timer(now))
@@ -1491,5 +1491,7 @@ Scheduler::submit(Task&& task)
 }
 
 
-}   // Concurrency
+}   // Coroutine
 }   // Isptech
+
+//  $CUSTOM_FOOTER$

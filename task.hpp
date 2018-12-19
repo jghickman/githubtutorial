@@ -2,21 +2,22 @@
 //  $CUSTOM_HEADER$
 
 //
-//  isptech/concurrency/task.hpp
+//  isptech/coroutine/task.hpp
 //
 
 //
 //  IAPPA CM Revision # : $Revision: 1.3 $
 //  IAPPA CM Tag        : $Name:  $
 //  Last user to change : $Author: hickmjg $
-//  Date of change      : $Date: 2008/12/23 12:43:48 $
-//  File Path           : $Source: //ftwgroups/data/IAPPA/CVSROOT/isptech/concurrency/task.hpp,v $
+//  Date of change      : $Date: 2018/12/18 21:55:18 $
+//  File Path           : $Source: //ftwgroups/data/iappa/CVSROOT/isptech_cvs/isptech/coroutine/task.hpp,v $
+//  Source of funding   : IAPPA
 //
 //  CAUTION:  CONTROLLED SOURCE.  DO NOT MODIFY ANYTHING ABOVE THIS LINE.
 //
 
-#ifndef ISPTECH_CONCURRENCY_TASK_HPP
-#define ISPTECH_CONCURRENCY_TASK_HPP
+#ifndef ISPTECH_COROUTINE_TASK_HPP
+#define ISPTECH_COROUTINE_TASK_HPP
 
 #include "isptech/config.hpp"
 #include "boost/operators.hpp"
@@ -40,15 +41,14 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-#define NOMINMAX
 #include <windows.h>
 
 
 /*
-    Information and Sensor Processing Technology Concurrency Library
+    Information and Sensor Processing Technology Coroutine Library
 */
-namespace Isptech       {
-namespace Concurrency   {
+namespace Isptech   {
+namespace Coroutine {
 
 
 /*
@@ -108,7 +108,7 @@ public:
         bool            iscomp;
     };
 
-    // Construct/Move/Destroy
+    // Construct/Copy/Destroy
     explicit Task(Handle = nullptr);
     Task(Task&&);
     Task& operator=(Task&&);
@@ -160,7 +160,7 @@ private:
 
         // Select
         bool                    select(Task::Handle, const Channel_operation*, const Channel_operation*);
-        Select_status           complete(Task::Handle, Channel_size pos);
+        Select_status           select(Task::Handle, Channel_size pos);
         Channel_size            selected() const;
         optional<Channel_size>  try_select(const Channel_operation*, const Channel_operation*);
 
@@ -247,7 +247,7 @@ private:
         // Select
         template<class T> bool  wait_any(Task::Handle, const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
         template<class T> bool  wait_all(Task::Handle, const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
-        Select_status           complete_readable(Task::Handle, Channel_size chan);
+        Select_status           select_readable(Task::Handle, Channel_size chan);
         bool                    complete_timer(Task::Handle, Time_point);
         bool                    cancel_timer();
         Channel_size            selected() const;
@@ -358,7 +358,7 @@ private:
 
             // Complete
             optional<Channel_size>  select_ready();
-            Channel_size            complete_readable(Task::Handle, Channel_size chan);
+            Channel_size            select_readable(Task::Handle, Channel_size chan);
 
             // Friends
             friend class Wait_setup;
@@ -411,8 +411,8 @@ private:
             void complete_cancel() const;
             void clear() const;
             bool is_running() const;    // active and neither cancelled nor expired
-            bool is_active() const;     // either running or cancel pending
-            bool is_cancelled() const;  // cancel either pending or complete
+            bool is_active() const;     // running or cancellation pending
+            bool is_cancelled() const;  // cancellation either pending or complete
 
         private:
             // Constants
@@ -455,14 +455,14 @@ public:
         // Channel Operations
         template<Channel_size N> void   select(const Channel_operation (&ops)[N]);
         void                            select(const Channel_operation*, const Channel_operation*);
-        Select_status                   complete_operation(Channel_size);
+        Select_status                   select_operation(Channel_size);
         Channel_size                    selected_operation() const;
         static optional<Channel_size>   try_select(const Channel_operation*, const Channel_operation*);
 
         // Future Operations
         template<class T> void  wait_all(const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
         template<class T> void  wait_any(const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
-        Select_status           complete_readable(Channel_size chan);
+        Select_status           select_readable(Channel_size chan);
         bool                    complete_wait_timer(Time_point);
         bool                    cancel_wait_timer();
         Channel_size            selected_future() const;
@@ -496,7 +496,6 @@ private:
 */
 template<class TaskFun, class... Args> void                                 start(TaskFun, Args&&...);
 template<class Fun, class... Args> Future<std::result_of_t<Fun(Args&&...)>> async(Fun, Args&&...);
-//template<class Fun> Future<std::result_of_t<Fun()>>                         async(Fun);
 
 
 /*
@@ -504,7 +503,7 @@ template<class Fun, class... Args> Future<std::result_of_t<Fun(Args&&...)>> asyn
 */
 class Channel_base {
 public:
-    // Copy/Move/Destory
+    // Copy/Destory
     Channel_base() = default;
     Channel_base(const Channel_base&) = delete;
     Channel_base& operator=(const Channel_base&) = delete;
@@ -551,7 +550,7 @@ public:
     class Receive_awaitable;
     using Value = T;
 
-    // Construct/Move
+    // Construct/Copy
     Channel() = default;
     Channel(Channel&&);
     Channel& operator=(Channel&&);
@@ -903,7 +902,7 @@ public:
     using Value     = typename Channel<T>::Value;
     using Awaitable = typename Channel<T>::Send_awaitable;
 
-    // Construct/Move/Copy
+    // Construct/Copy
     Send_channel();
     Send_channel& operator=(Send_channel);
     inline friend void swap(Send_channel& x, Send_channel& y) { swap(x.pimpl, y.pimpl); }
@@ -951,7 +950,7 @@ public:
     using Value     = typename Channel<T>::Value;
     using Awaitable = typename Channel<T>::Receive_awaitable;
 
-    // Construct/Move/Copy
+    // Construct/Copy
     Receive_channel();
     Receive_channel& operator=(Receive_channel);
     inline friend void swap(Receive_channel& x, Receive_channel& y) { swap(x.pimpl, y.pimpl);  }
@@ -994,9 +993,9 @@ private:
 
     Users can call select() or try_select() to choose an operation for
     execution from a set of alternatives.  If more than one alternative
-    is ready, a choice is made at random.  Selecting from a set of channels
+    is ready, a random choice is made.  Selecting from a set of channels
     with disparate element types requires an operation interface that is
-    independent element types, so perhaps the ideal design would involve
+    independent of element types, so perhaps the ideal design would involve
     channels which construct type-safe operation implementations using
     inheritance to hide the element type.  But that would imply dynamic
     memory allocation, so we temporarily avoid that approach in favor of
@@ -1009,7 +1008,7 @@ public:
     // Names/Types
     enum class Type : int { none, send, receive };
 
-    // Construct/Move/Copy/Destroy
+    // Construct/Copy
     Channel_operation();
     Channel_operation(Channel_base*, const void* rvaluep); // send copy
     Channel_operation(Channel_base*, void* lvaluep, Type); // send movable/receive
@@ -1077,9 +1076,10 @@ optional<Channel_size>                              try_select(const Channel_ope
 static const Channel_size select_fail{-1};
 
 
-
 /*
-    Future     
+    Future
+
+    TODO: Provide a non-member blocking_get()
 */
 template<class T>
 class Future : boost::equality_comparable<Future<T>> {
@@ -1090,7 +1090,7 @@ public:
     using Value_receiver    = Receive_channel<T>;
     using Error_receiver    = Receive_channel<exception_ptr>;
 
-    // Construct/Copy/Move
+    // Construct/Copy
     Future();
     Future(Value_receiver, Error_receiver);
     Future(const Future&) = delete;
@@ -1167,13 +1167,13 @@ private:
 
 
 /*
-    Future All Awaitable
+    All Futures Awaitable
 */
 template<class T>
-class Future_all_awaitable {
+class All_futures_awaitable {
 public:
     // Construct
-    Future_all_awaitable(const Future<T>*, const Future<T>*);
+    All_futures_awaitable(const Future<T>*, const Future<T>*);
 
     // Awaitable Operations
     bool await_ready();
@@ -1189,13 +1189,13 @@ private:
 
 
 /*
-    Future All Timed Awaitable
+    All Futures Timed Awaitable
 */
 template<class T>
-class Future_all_timed_awaitable {
+class All_futures_timed_awaitable {
 public:
     // Construct
-    Future_all_timed_awaitable(const Future<T>*, const Future<T>*, nanoseconds maxtime);
+    All_futures_timed_awaitable(const Future<T>*, const Future<T>*, nanoseconds maxtime);
 
     // Awaitable Operations
     bool await_ready();
@@ -1212,14 +1212,14 @@ private:
 
 
 /*
-    Future Any Awaitable
+    Any Future Awaitable
 */
 template<class T>
-class Future_any_awaitable {
+class Any_future_awaitable {
 public:
     // Construct
-    Future_any_awaitable(const Future<T>*, const Future<T>*);
-    Future_any_awaitable(const Future<T>*, const Future<T>*, nanoseconds maxtime);
+    Any_future_awaitable(const Future<T>*, const Future<T>*);
+    Any_future_awaitable(const Future<T>*, const Future<T>*, nanoseconds maxtime);
 
     // Awaitable Operations
     bool            await_ready();
@@ -1238,14 +1238,18 @@ private:
 /*
     Future Waiting
 */
-template<class T> Future_any_awaitable<T>       wait_any(const vector<Future<T>>&);
-template<class T> Future_any_awaitable<T>       wait_any(const vector<Future<T>>&, nanoseconds maxtime);
-template<class T> Future_any_awaitable<T>       wait_any(const Future<T>*, const Future<T>*);
-template<class T> Future_any_awaitable<T>       wait_any(const Future<T>*, const Future<T>*, nanoseconds maxtime);
-template<class T> Future_all_awaitable<T>       wait_all(const vector<Future<T>>&);
-template<class T> Future_all_awaitable<T>       wait_all(const Future<T>*, const Future<T>*);
-template<class T> Future_all_timed_awaitable<T> wait_all(const vector<Future<T>>&, nanoseconds maxtime);
-template<class T> Future_all_timed_awaitable<T> wait_all(const Future<T>*, const Future<T>*, nanoseconds maxtime);
+template<class T> Any_future_awaitable<T>           wait_any(const vector<Future<T>>&);
+template<class T, int N> Any_future_awaitable<T>    wait_any(const Future<T> (&fs)[N]);
+template<class T> Any_future_awaitable<T>           wait_any(const Future<T>*, const Future<T>*);
+template<class T> Any_future_awaitable<T>           wait_any(const vector<Future<T>>&, nanoseconds maxtime);
+template<class T, int N> Any_future_awaitable<T>    wait_any(const Future<T> (&fs)[N], nanoseconds maxtime);
+template<class T> Any_future_awaitable<T>           wait_any(const Future<T>*, const Future<T>*, nanoseconds maxtime);
+template<class T> All_futures_awaitable<T>          wait_all(const vector<Future<T>>&);
+template<class T> All_futures_awaitable<T>          wait_all(const vector<Future<T>>&);
+template<class T, int N> All_futures_awaitable<T>   wait_all(const Future<T> (&fs)[N]);
+template<class T> All_futures_timed_awaitable<T>    wait_all(const vector<Future<T>>&, nanoseconds maxtime);
+template<class T, int N> All_futures_awaitable<T>   wait_all(const Future<T> (&fs)[N], nanoseconds maxtime);
+template<class T> All_futures_timed_awaitable<T>    wait_all(const Future<T>*, const Future<T>*, nanoseconds maxtime);
 static const Channel_size wait_fail{-1};
 
 
@@ -1548,20 +1552,27 @@ private:
 
     // Data
     Task_queue_array    ready;
-    Waiting_tasks       waiting;
     std::vector<Thread> processors;
+    Waiting_tasks       waiting;
     Timers              timers;
 };
 
 
+/*
+    The Global Scheduler
+
+    TODO: Investigate the merits of supporting distinct scheduling
+    implementations.
+*/
 extern Scheduler scheduler;
 
 
-}   // Concurrency
+}   // Coroutine
 }   // Isptech
 
 
-#include "isptech/concurrency/task.inl"
+#include "isptech/coroutine/task.inl"
 
-#endif  // ISPTECH_CONCURRENCY_TASK_HPP
+#endif  // ISPTECH_COROUTINE_TASK_HPP
 
+//  $CUSTOM_FOOTER$
