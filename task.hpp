@@ -26,8 +26,8 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
-#include <cstddef>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdlib>
 #include <deque>
 #include <exception>
@@ -245,8 +245,8 @@ private:
         Future_selection& operator=(const Future_selection&) = delete;
 
         // Select
-        template<class T> bool  wait_any(Task::Handle, const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
-        template<class T> bool  wait_all(Task::Handle, const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
+        template<class T> bool  wait_any(Task::Handle, const Future<T>*, const Future<T>*, optional<nanoseconds>);
+        template<class T> bool  wait_all(Task::Handle, const Future<T>*, const Future<T>*, optional<nanoseconds>);
         Select_status           select_readable(Task::Handle, Channel_size chan);
         bool                    complete_timer(Task::Handle, Time_point);
         bool                    cancel_timer();
@@ -460,8 +460,8 @@ public:
         static optional<Channel_size>   try_select(const Channel_operation*, const Channel_operation*);
 
         // Future Operations
-        template<class T> void  wait_all(const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
-        template<class T> void  wait_any(const Future<T>*, const Future<T>*, const optional<nanoseconds>&);
+        template<class T> void  wait_all(const Future<T>*, const Future<T>*, optional<nanoseconds> = optional<nanoseconds>());
+        template<class T> void  wait_any(const Future<T>*, const Future<T>*, optional<nanoseconds> = optional<nanoseconds>());
         Select_status           select_readable(Channel_size chan);
         bool                    complete_wait_timer(Time_point);
         bool                    cancel_wait_timer();
@@ -552,6 +552,8 @@ public:
 
     // Construct/Copy
     Channel() = default;
+    Channel(const Channel&) = default;
+    Channel& operator=(const Channel&) = default;
     Channel(Channel&&);
     Channel& operator=(Channel&&);
     friend Channel make_channel<T>(Channel_size capacity);
@@ -1073,7 +1075,6 @@ template<Channel_size N> Channel_select_awaitable   select(const Channel_operati
 Channel_select_awaitable                            select(const Channel_operation*, const Channel_operation*);
 template<Channel_size N> optional<Channel_size>     try_select(const Channel_operation (&ops)[N]);
 optional<Channel_size>                              try_select(const Channel_operation*, const Channel_operation*);
-static const Channel_size select_fail{-1};
 
 
 /*
@@ -1182,9 +1183,8 @@ public:
 
 private:
     // Data
-    const Future<T>*        first;
-    const Future<T>*        last;
-    optional<nanoseconds>   time;
+    const Future<T>* first;
+    const Future<T>* last;
 };
 
 
@@ -1204,10 +1204,10 @@ public:
 
 private:
     // Data
-    const Future<T>*        first;
-    const Future<T>*        last;
-    optional<nanoseconds>   time;
-    Task::Handle            task;
+    const Future<T>*    first;
+    const Future<T>*    last;
+    nanoseconds         time;
+    Task::Handle        task;
 };
 
 
@@ -1230,7 +1230,7 @@ private:
     // Data
     const Future<T>*        first;
     const Future<T>*        last;
-    optional<nanoseconds>   time;
+    optional<nanoseconds>   timep;
     Task::Handle            task;
 };
 
@@ -1238,18 +1238,18 @@ private:
 /*
     Future Waiting
 */
-template<class T> Any_future_awaitable<T>           wait_any(const vector<Future<T>>&);
-template<class T, int N> Any_future_awaitable<T>    wait_any(const Future<T> (&fs)[N]);
-template<class T> Any_future_awaitable<T>           wait_any(const Future<T>*, const Future<T>*);
-template<class T> Any_future_awaitable<T>           wait_any(const vector<Future<T>>&, nanoseconds maxtime);
-template<class T, int N> Any_future_awaitable<T>    wait_any(const Future<T> (&fs)[N], nanoseconds maxtime);
-template<class T> Any_future_awaitable<T>           wait_any(const Future<T>*, const Future<T>*, nanoseconds maxtime);
-template<class T> All_futures_awaitable<T>          wait_all(const vector<Future<T>>&);
-template<class T> All_futures_awaitable<T>          wait_all(const vector<Future<T>>&);
-template<class T, int N> All_futures_awaitable<T>   wait_all(const Future<T> (&fs)[N]);
-template<class T> All_futures_timed_awaitable<T>    wait_all(const vector<Future<T>>&, nanoseconds maxtime);
-template<class T, int N> All_futures_awaitable<T>   wait_all(const Future<T> (&fs)[N], nanoseconds maxtime);
-template<class T> All_futures_timed_awaitable<T>    wait_all(const Future<T>*, const Future<T>*, nanoseconds maxtime);
+template<class T> Any_future_awaitable<T>                           wait_any(const vector<Future<T>>&);
+template<class T, Channel_size N> Any_future_awaitable<T>           wait_any(const Future<T> (&fs)[N]);
+template<class T> Any_future_awaitable<T>                           wait_any(const Future<T>*, const Future<T>*);
+template<class T> Any_future_awaitable<T>                           wait_any(const vector<Future<T>>&, nanoseconds maxtime);
+template<class T, Channel_size N> Any_future_awaitable<T>           wait_any(const Future<T> (&fs)[N], nanoseconds maxtime);
+template<class T> Any_future_awaitable<T>                           wait_any(const Future<T>*, const Future<T>*, nanoseconds maxtime);
+template<class T> All_futures_awaitable<T>                          wait_all(const vector<Future<T>>&);
+template<class T, Channel_size N> All_futures_awaitable<T>          wait_all(const Future<T> (&fs)[N]);
+template<class T> All_futures_awaitable<T>                          wait_all(const Future<T>*, const Future<T>*);
+template<class T> All_futures_timed_awaitable<T>                    wait_all(const vector<Future<T>>&, nanoseconds maxtime);
+template<class T, Channel_size N> All_futures_timed_awaitable<T>    wait_all(const Future<T> (&fs)[N], nanoseconds maxtime);
+template<class T> All_futures_timed_awaitable<T>                    wait_all(const Future<T>*, const Future<T>*, nanoseconds maxtime);
 static const Channel_size wait_fail{-1};
 
 
@@ -1258,11 +1258,21 @@ static const Channel_size wait_fail{-1};
 */
 class Timer : boost::totally_ordered<Timer> {
 public:
-    // Construct
-    explicit Timer(Time_receiver = Time_receiver());
+    // Construct/Copy/Destroy
+    Timer();
+    explicit Timer(nanoseconds);
+    Timer(const Timer&) = delete;
+    Timer& operator=(const Timer&) = delete;
+    Timer(Timer&&);
+    Timer& operator=(Timer&&);
+    ~Timer();
+
+    // Modifiers
+    bool stop();
+    bool reset(nanoseconds);
 
     // Channel
-    Time_receiver channel() const;
+    const Time_receiver& channel() const;
 
 private:
     // Data
@@ -1423,16 +1433,21 @@ private:
         };
 
         using Request_queue = std::queue<Request>;
+        using Time_channel  = Channel<Time_point>;
 
         struct Alarm : boost::totally_ordered<Alarm> {
             // Construct
             Alarm() = default;
             Alarm(Task::Handle h, Time_point t) : task{h}, expiry{t} {}
+            Alarm(Time_channel c, Time_point t, nanoseconds p = nanoseconds::zero())
+                : channel{std::move(c)} , expiry{t} , period{p} {}
 
             // Comparisons
             inline friend bool operator==(const Alarm& x, const Alarm& y) {
                 if (x.task != y.task) return false;
+                if (x.channel != y.channel) return false;
                 if (x.expiry != y.expiry) return false;
+                if (x.period != y.period) return false;
                 return true;
             }
 
@@ -1442,7 +1457,9 @@ private:
 
             // Data
             Task::Handle    task;
+            Time_channel    channel;
             Time_point      expiry;
+            nanoseconds     period;
         };
 
         class Alarm_queue {

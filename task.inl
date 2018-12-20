@@ -287,10 +287,10 @@ Task::Future_selection::Wait_set::transform(const Future<T>* first, const Future
         const Channel_size vpos = fpos * 2;
         const Channel_size epos = vpos + 1;
 
-        // TODO: Cheaper to modify an existing wait than copy a new one.
-        cwaits[vpos] = Channel_wait{futurep->value(), fpos};
-        cwaits[epos] = Channel_wait{futurep->error(), fpos};
-        fwaits[fpos] = Future_wait{futurep->ready(), vpos, epos};
+        // TODO: Cheaper to modify an existing wait than copy a new one?
+        cwaits[vpos] = {futurep->value(), fpos};
+        cwaits[epos] = {futurep->error(), fpos};
+        fwaits[fpos] = {futurep->ready(), vpos, epos};
     }
 }
 
@@ -325,7 +325,7 @@ Task::Future_selection::selected() const
 
 template<class T>
 bool
-Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
+Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Future<T>* last, optional<nanoseconds> maxtimep)
 {
     const Wait_setup setup{first, last, &waits};
 
@@ -335,9 +335,9 @@ Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Futu
 
     if (waits.enqueue_not_ready(task) == 0)
         result = wait_success;
-    else if (maxtime) {
-        if (*maxtime > 0ns)
-            timer.start(task, *maxtime);
+    else if (maxtimep) {
+        if (*maxtimep > 0ns)
+            timer.start(task, *maxtimep);
         else {
             waits.dequeue_all(task);
             result = wait_fail;
@@ -350,7 +350,7 @@ Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Futu
 
 template<class T>
 bool
-Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
+Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Future<T>* last, optional<nanoseconds> maxtimep)
 {
     const Wait_setup setup{first, last, &waits};
 
@@ -359,11 +359,11 @@ Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Futu
 
     result = waits.select_ready();
     if (!result) {
-        if (!maxtime) {
+        if (!maxtimep) {
             waits.enqueue_all(task);
-        } else if (*maxtime > 0ns) {
+        } else if (*maxtimep > 0ns) {
             waits.enqueue_all(task);
-            timer.start(task, *maxtime);
+            timer.start(task, *maxtimep);
         } else {
             result = wait_fail;
         }
@@ -486,24 +486,24 @@ Task::Promise::try_select(const Channel_operation* first, const Channel_operatio
 
 template<class T>
 void
-Task::Promise::wait_all(const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
+Task::Promise::wait_all(const Future<T>* first, const Future<T>* last, optional<nanoseconds> maxtimep)
 {
     const Handle    task{Handle::from_promise(*this)};
     Lock            lock{mutex};
 
-    if (!futures.wait_all(task, first, last, maxtime))
+    if (!futures.wait_all(task, first, last, maxtimep))
         suspend(&lock);
 }
 
 
 template<class T>
 void
-Task::Promise::wait_any(const Future<T>* first, const Future<T>* last, const optional<nanoseconds>& maxtime)
+Task::Promise::wait_any(const Future<T>* first, const Future<T>* last, optional<nanoseconds> maxtimep)
 {
     const Handle    task{Handle::from_promise(*this)};
     Lock            lock{mutex};
 
-    if (!futures.wait_any(task, first, last, maxtime))
+    if (!futures.wait_any(task, first, last, maxtimep))
         suspend(&lock);
 }
 
@@ -1371,8 +1371,7 @@ template<class T>
 inline void
 Channel<T>::Impl::enqueue_read(Task::Handle task, Channel_size pos, T* valuep)
 {
-    const Receiver r{task, pos, valuep};
-    receivers.push(r);
+    receivers.push({task, pos, valuep});
 }
 
 
@@ -1380,7 +1379,7 @@ template<class T>
 void
 Channel<T>::Impl::enqueue_readable_wait(Task::Handle task, Channel_size pos)
 {
-    buffer.enqueue(Readable_waiter(task, pos));
+    buffer.enqueue({task, pos});
 }
 
 
@@ -1405,8 +1404,7 @@ template<class U>
 inline void
 Channel<T>::Impl::enqueue_write(Task::Handle task, Channel_size pos, U* valuep)
 {
-    const Sender s{task, pos, valuep};
-    senders.push(s);
+    senders.push({task, pos, valuep});
 }
 
 
@@ -2058,16 +2056,16 @@ Future<T>::get_ready()
 {
     using std::move;
 
-    optional<T> v = vchan.try_receive();
+    optional<T> vp = vchan.try_receive();
 
-    if (v) {
+    if (vp) {
         isready = false;
-    } else if (optional<exception_ptr> ep = echan.try_receive()) {
+    } else if (optional<exception_ptr> epp = echan.try_receive()) {
         isready = false;
-        rethrow_exception(*ep);
+        rethrow_exception(*epp);
     }
 
-    return move(*v);
+    return move(*vp);
 }
 
 
@@ -2108,16 +2106,16 @@ template<class T>
 optional<T>
 Future<T>::try_get()
 {
-    optional<T> v = vchan.try_receive();
+    optional<T> vp = vchan.try_receive();
 
-    if (v) {
+    if (vp) {
         isready = false;
-    } else if (optional<exception_ptr> ep = echan.try_receive()) {
+    } else if (optional<exception_ptr> epp = echan.try_receive()) {
         isready = false;
-        rethrow_exception(*ep);
+        rethrow_exception(*epp);
     }
 
-    return v;
+    return vp;
 }
 
 
@@ -2160,7 +2158,7 @@ template<class T>
 inline bool
 All_futures_awaitable<T>::await_suspend(Task::Handle task)
 {
-    task.promise().wait_all(first, last, time);
+    task.promise().wait_all(first, last);
     return true;
 }
 
@@ -2173,19 +2171,20 @@ wait_all(const Future<T>* first, const Future<T>* last)
 }
 
 
+template<class T, Channel_size N>
+inline All_futures_awaitable<T>
+wait_all(const Future<T> (&fs)[N])
+{
+    return wait_all(fs, fs + N);
+}
+
+
 template<class T>
 inline All_futures_awaitable<T>
 wait_all(const vector<Future<T>>& fs)
 {
-    const Future<T>* first{nullptr};
-    const Future<T>* last{nullptr};
-
-    if (!fs.empty()) {
-        first = fs.data();
-        last = first + fs.size();
-    }
-
-    return wait_all(first, last);
+    auto first = fs.data();
+    return wait_all(first, first + fs.size());
 }
 
 
@@ -2236,19 +2235,20 @@ wait_all(const Future<T>* first, const Future<T>* last, nanoseconds maxtime)
 }
 
 
+template<class T, Channel_size N>
+inline All_futures_timed_awaitable<T>
+wait_all(const Future<T> (&fs)[N], nanoseconds maxtime)
+{
+    return wait_all(fs, fs + N, maxtime);
+}
+
+
 template<class T>
 inline All_futures_timed_awaitable<T>
 wait_all(const vector<Future<T>>& fs, nanoseconds maxtime)
 {
-    const Future<T>* first{nullptr};
-    const Future<T>* last{nullptr};
-
-    if (!fs.empty()) {
-        first = fs.data();
-        last = first + fs.size();
-    }
-
-    return wait_all(first, last, maxtime);
+    auto first = fs.data();
+    return wait_all(first, first + fs.size(), maxtime);
 }
 
 
@@ -2269,7 +2269,7 @@ inline
 Any_future_awaitable<T>::Any_future_awaitable(const Future<T>* begin, const Future<T>* end, nanoseconds maxtime)
     : first{begin}
     , last{end}
-    , time{maxtime}
+    , timep{maxtime}
 {
 }
 
@@ -2295,7 +2295,7 @@ inline bool
 Any_future_awaitable<T>::await_suspend(Task::Handle taskh)
 {
     task = taskh;
-    task.promise().wait_any(first, last, time);
+    task.promise().wait_any(first, last, timep);
     return true;
 }
 
@@ -2316,19 +2316,28 @@ wait_any(const Future<T>* first, const Future<T>* last, nanoseconds maxtime)
 }
 
 
+template<class T, Channel_size N>
+inline Any_future_awaitable<T>
+wait_any(const Future<T> (&fs)[N])
+{
+    return wait_any(fs, fs + N);
+}
+
+
+template<class T, Channel_size N>
+inline Any_future_awaitable<T>
+wait_any(const Future<T> (&fs)[N], nanoseconds maxtime)
+{
+    return wait_any(fs, fs + N, maxtime);
+}
+
+
 template<class T>
 inline Any_future_awaitable<T>
 wait_any(const vector<Future<T>>& fs)
 {
-    const Future<T>* first{nullptr};
-    const Future<T>* last{nullptr};
-
-    if (!fs.empty()) {
-        first = fs.data();
-        last = first + fs.size();
-    }
-
-    return wait_any(first, last);
+    auto first = fs.data();
+    return wait_any(first, first + fs.size());
 }
 
 
@@ -2336,15 +2345,8 @@ template<class T>
 inline Any_future_awaitable<T>
 wait_any(const vector<Future<T>>& fs, nanoseconds maxtime)
 {
-    const Future<T>* first{nullptr};
-    const Future<T>* last{nullptr};
-
-    if (!fs.empty()) {
-        first = fs.data();
-        last = first + fs.size();
-    }
-
-    return wait_any(first, last, maxtime);
+    auto first = fs.data();
+    return wait_any(first, first + fs.size(), maxtime);
 }
 
 

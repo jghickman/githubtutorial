@@ -140,7 +140,7 @@ Task::Operation_selection::Channel_locks::for_each_channel(const Operation_vecto
 {
     Channel_base* prevchanp{nullptr};
 
-    for (const Operation_view op : ops) {
+    for (const auto op : ops) {
         Channel_base* chanp = op.channel();
         if (chanp && chanp != prevchanp) {
             f(chanp);
@@ -189,9 +189,9 @@ Task::Operation_selection::Transform_unique::transform(const Channel_operation* 
     Operation_vector& out = *outp;
 
     out.resize(last - first);
-    for (const Channel_operation* p = first; p != last; ++p) {
-        const auto i = p - first;
-        out[i] = Operation_view(p, i);
+    for (const Channel_operation* cop = first; cop != last; ++cop) {
+        const auto i = cop - first;
+        out[i] = {cop, i};
     }
         
 }
@@ -203,7 +203,7 @@ Task::Operation_selection::Transform_unique::transform(const Channel_operation* 
 Channel_size
 Task::Operation_selection::count_ready(const Operation_vector& ops)
 {
-    return count_if(ops.begin(), ops.end(), [](auto op) {
+    return count_if(ops.begin(), ops.end(), [](const auto op) {
         return op.is_ready();
     });
 }
@@ -214,7 +214,7 @@ Task::Operation_selection::dequeue(Task::Handle task, const Operation_vector& op
 {
     Channel_size n = 0;
 
-    for (Operation_view op : ops) {
+    for (const auto op : ops) {
         if (op.position() != selected && op.dequeue(task))
             ++n;
     }
@@ -226,7 +226,7 @@ Task::Operation_selection::dequeue(Task::Handle task, const Operation_vector& op
 Channel_size
 Task::Operation_selection::enqueue(Task::Handle task, const Operation_vector& ops)
 {
-    for (Operation_view op : ops)
+    for (const auto op : ops)
         op.enqueue(task);
 
     return ops.size();
@@ -285,17 +285,12 @@ Task::Operation_selection::select_ready(const Operation_vector& ops)
 {
     optional<Channel_size> ready;
 
-    if (ops.empty())
-        ready = select_fail;
-    else {
-        const auto n = count_ready(ops);
-        if (n > 0) {
-            const auto i    = pick_ready(ops, n);
-            const auto op   = ops[i];
+    if (const auto n = count_ready(ops)) {
+        const auto i    = pick_ready(ops, n);
+        const auto op   = ops[i];
 
-            op.execute();
-            ready = op.position();
-        }
+        op.execute();
+        ready = op.position();
     }
 
     return ready;
@@ -620,6 +615,24 @@ Task::Future_selection::is_ready(const Wait_set& waits, Timer timer)
 
 
 
+Task::Select_status
+Task::Future_selection::select_readable(Task::Handle task, Channel_size chan)
+{
+    const Channel_size future = waits.select_readable(task, chan);
+
+    if (!waits.enqueued() && timer.is_running())
+        timer.cancel(task);
+
+    if (!result) {
+        result = future;
+        if (waittype == Wait_type::any)
+            waits.dequeue_not_ready(task);
+    }
+
+    return Select_status(*result, is_ready(waits, timer));
+}
+
+
 /*
     Task Promise
 */
@@ -633,24 +646,6 @@ inline void
 Task::Promise::make_ready()
 {
     taskstate = State::ready;
-}
-
-
-Task::Select_status
-Task::Future_selection::select_readable(Task::Handle task, Channel_size chan)
-{
-    const Channel_size future = waits.select_readable(task, chan);
-
-    if (!waits.enqueued() && timer.is_running())
-        timer.cancel(task);
-
-    if (!result) {
-        result = future;
-        if (waittype== Wait_type::any)
-            waits.dequeue_not_ready(task);
-    }
-
-    return Select_status(*result, is_ready(waits, timer));
 }
 
 
