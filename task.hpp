@@ -237,16 +237,16 @@ private:
         optional<Channel_size>  winner;
     };
 
-    class Future_selection {
+    class Future_selector {
     public:
         // Construct/Copy
-        Future_selection() = default;
-        Future_selection(const Future_selection&) = delete;
-        Future_selection& operator=(const Future_selection&) = delete;
+        Future_selector() = default;
+        Future_selector(const Future_selector&) = delete;
+        Future_selector& operator=(const Future_selector&) = delete;
 
-        // Select
-        template<class T> bool  wait_any(Task::Handle, const Future<T>*, const Future<T>*, optional<nanoseconds>);
-        template<class T> bool  wait_all(Task::Handle, const Future<T>*, const Future<T>*, optional<nanoseconds>);
+        // Selection
+        template<class T> bool  select_any(Task::Handle, const Future<T>*, const Future<T>*, optional<nanoseconds>);
+        template<class T> bool  select_all(Task::Handle, const Future<T>*, const Future<T>*, optional<nanoseconds>);
         Select_status           select_readable(Task::Handle, Channel_size chan);
         bool                    complete_timer(Task::Handle, Time_point);
         bool                    cancel_timer();
@@ -255,9 +255,6 @@ private:
     private:
         // Names/Types
         class Wait_setup;
-        enum class Wait_type : int { any, all };
-        static const Channel_size wait_success{0};
-        static const Channel_size wait_fail{-1};
 
         class Channel_wait {
         public:
@@ -351,7 +348,8 @@ private:
             Wait_set& operator=(const Wait_set&) = delete;
 
             // Size and Capacity
-            bool is_empty() const;
+            Channel_size    size() const;
+            bool            is_empty() const;
 
             // Enqueue/Dequeue
             void            enqueue_all(Task::Handle);
@@ -396,14 +394,14 @@ private:
         class Wait_setup {
         public:
             // Construct/Copy/Destroy
-            template<class T> Wait_setup(const Future<T>*, const Future<T>*, Wait_set*);
+            template<class T> Wait_setup(Wait_set*, const Future<T>*, const Future<T>*);
             Wait_setup(const Wait_setup&) = delete;
             Wait_setup& operator=(const Wait_setup&) = delete;
             ~Wait_setup();
 
         private:
             // Data
-            Wait_set* pwaits;
+            Wait_set* waitsp;
         };
 
         class Timer {
@@ -430,9 +428,9 @@ private:
         static bool is_ready(const Wait_set&, Timer);
 
         // Data
-        Wait_type               waittype;
-        Wait_set                futures;
+        Wait_set                waits;
         Timer                   timer;
+        Channel_size            npending;
         optional<Channel_size>  result;
     };
 
@@ -485,7 +483,7 @@ public:
         // Data
         mutable Mutex       mutex;
         Operation_selection operations;
-        Future_selection    futures;
+        Future_selector     futures;
         State               taskstate;
     };
 
