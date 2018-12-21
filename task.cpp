@@ -526,7 +526,7 @@ Task::Future_selection::Wait_set::sort(Future_wait_index* indexp, const Future_w
 inline void
 Task::Future_selection::Timer::cancel(Task::Handle task) const
 {
-    scheduler.cancel_wait_timer(task);
+    scheduler.cancel_timer(task);
     state = cancel_pending;
 }
 
@@ -590,7 +590,7 @@ bool
 Task::Future_selection::cancel_timer()
 {
     timer.complete_cancel();
-    return !waits.enqueued();
+    return !futures.enqueued();
 }
 
 
@@ -599,37 +599,84 @@ Task::Future_selection::complete_timer(Task::Handle task, Time_point time)
 {
     timer.expire(time);
     if (!timer.is_cancelled()) {
+        futures.dequeue_not_ready(task);
         result = wait_fail;
-        waits.dequeue_not_ready(task);
     }
 
-    return !waits.enqueued();
+    return !futures.enqueued();
 }
 
 
 inline bool
-Task::Future_selection::is_ready(const Wait_set& waits, Timer timer)
+Task::Future_selection::is_ready(const Wait_set& futures, Timer timer)
 {
-    return !(waits.enqueued() || timer.is_active());
+    return !(futures.enqueued() || timer.is_active());
 }
 
 
 
+#if 0
 Task::Select_status
 Task::Future_selection::select_readable(Task::Handle task, Channel_size chan)
 {
-    const Channel_size future = waits.select_readable(task, chan);
+    const Channel_size future = futures.select_readable(task, chan);
 
-    if (!waits.enqueued() && timer.is_running())
+    if (!futures.enqueued() && timer.is_running())
         timer.cancel(task);
 
     if (!result) {
         result = future;
         if (waittype == Wait_type::any)
-            waits.dequeue_not_ready(task);
+            futures.dequeue_not_ready(task);
     }
 
-    return Select_status(*result, is_ready(waits, timer));
+    return Select_status(*result, is_ready(futures, timer));
+}
+#endif
+
+
+Task::Select_status
+Task::Future_selection::select_readable(Task::Handle task, Channel_size chan)
+{
+    const Channel_size ready = futures.select_readable(task, chan);
+
+    if (waittype == Wait_type::all) {
+        if (!futures.enqueued()) {
+            result = wait_success;
+            if (timer.is_running())
+                timer.cancel(task);
+        }
+    } else { // Wait_type::any
+        if (!result) {
+        }
+    }
+
+
+    if (waittype == Wait_type::any) {
+        if (!result) {
+            result = ready;
+            futures.dequeue_not_ready(task);
+            if (timer.is_running())
+                timer.cancel(task);
+        }
+    } else { // Wait_type::all
+        if (!result)
+            result = wait_success;
+    }
+
+
+
+
+    if (!result) {
+        result = future;
+        if (waittype == Wait_type::any) {
+            futures.dequeue_not_ready(task);
+            if (timer.is_running())
+                timer.cancel(task);
+        }
+    }
+
+    return Select_status(*result, is_ready(futures, timer));
 }
 
 
@@ -1225,7 +1272,7 @@ Scheduler::Timers::activate_alarm(Windows_handle timer, const Request& request, 
 
 
 void
-Scheduler::Timers::cancel_wait(Task::Handle task)
+Scheduler::Timers::cancel(Task::Handle task)
 {
     const Lock lock{mutex}; 
 
@@ -1286,7 +1333,7 @@ Scheduler::Timers::notify_cancel(const Alarm& alarm)
 {
     Task::Handle task = alarm.task;
 
-    if (task.promise().cancel_wait_timer())
+    if (task.promise().cancel_timer())
         scheduler.resume(task);
 }
 
@@ -1303,7 +1350,7 @@ Scheduler::Timers::notify_complete(const Alarm& alarm, Time_point now, Lock* loc
         has completed.
     */
     lockp->unlock();
-    if (task.promise().complete_wait_timer(now))
+    if (task.promise().complete_timer(now))
         scheduler.resume(task);
     lockp->lock();
 }
@@ -1400,7 +1447,7 @@ Scheduler::Timers::set_timer(Windows_handle timer, const Alarm& alarm, Time_poin
 
 
 void
-Scheduler::Timers::start_wait(Task::Handle task, nanoseconds duration)
+Scheduler::Timers::start(Task::Handle task, nanoseconds duration)
 {
     const Lock lock{mutex};
 
@@ -1438,9 +1485,9 @@ Scheduler::~Scheduler()
 
 
 void
-Scheduler::cancel_wait_timer(Task::Handle task)
+Scheduler::cancel_timer(Task::Handle task)
 {
-    timers.cancel_wait(task);
+    timers.cancel(task);
 }
 
 
@@ -1473,9 +1520,9 @@ Scheduler::run_tasks(unsigned q)
 
 
 void
-Scheduler::start_wait_timer(Task::Handle task, nanoseconds duration)
+Scheduler::start_timer(Task::Handle task, nanoseconds duration)
 {
-    timers.start_wait(task, duration);
+    timers.start(task, duration);
 }
 
 

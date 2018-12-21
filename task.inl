@@ -148,9 +148,9 @@ Task::Future_selection::Future_wait::Future_wait(bool* readyp, Channel_size vpos
 
 
 inline void
-Task::Future_selection::Future_wait::complete(Task::Handle task, const Channel_wait_vector& chans, Channel_size pos) const
+Task::Future_selection::Future_wait::complete(Task::Handle task, const Channel_wait_vector& chans, Channel_size chan) const
 {
-    const Channel_size other = (pos == vchan) ? echan : vchan;
+    const Channel_size other = (chan == vchan) ? echan : vchan;
 
     chans[other].dequeue(task, other);
     *isreadyp = true;
@@ -271,6 +271,13 @@ Task::Future_selection::Wait_set::enqueued() const
 }
 
 
+inline bool
+Task::Future_selection::Wait_set::is_empty() const
+{
+    return futures.empty();
+}
+
+
 template<class T>
 void
 Task::Future_selection::Wait_set::transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
@@ -308,7 +315,7 @@ Task::Future_selection::Timer::clear() const
 inline void
 Task::Future_selection::Timer::start(Task::Handle task, nanoseconds duration) const
 {
-    scheduler.start_wait_timer(task, duration);
+    scheduler.start_timer(task, duration);
     state = running;
 }
 
@@ -327,24 +334,25 @@ template<class T>
 bool
 Task::Future_selection::wait_all(Handle task, const Future<T>* first, const Future<T>* last, optional<nanoseconds> maxtimep)
 {
-    const Wait_setup setup{first, last, &waits};
+    const Wait_setup setup{first, last, &futures};
 
     waittype = Wait_type::all;
     timer.clear();
     result.reset();
 
-    if (waits.enqueue_not_ready(task) == 0)
-        result = wait_success;
-    else if (maxtimep) {
-        if (*maxtimep > 0ns)
-            timer.start(task, *maxtimep);
-        else {
-            waits.dequeue_all(task);
-            result = wait_fail;
+    if (!futures.is_empty()) {
+        futures.enqueue_not_ready(task);
+        if (!futures.enqueued())
+            result = wait_success;
+        else if (maxtimep) {
+            if (*maxtimep > 0ns)
+                timer.start(task, *maxtimep);
+            else
+                futures.dequeue_all(task);
         }
     }
 
-    return !waits.enqueued();
+    return !futures.enqueued();
 }
 
 
@@ -352,24 +360,22 @@ template<class T>
 bool
 Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Future<T>* last, optional<nanoseconds> maxtimep)
 {
-    const Wait_setup setup{first, last, &waits};
+    const Wait_setup setup{first, last, &futures};
 
     waittype = Wait_type::any;
     timer.clear();
 
-    result = waits.select_ready();
+    result = futures.select_ready();
     if (!result) {
-        if (!maxtimep) {
-            waits.enqueue_all(task);
-        } else if (*maxtimep > 0ns) {
-            waits.enqueue_all(task);
+        if (!maxtimep)
+            futures.enqueue_all(task);
+        else if (*maxtimep > 0ns) {
+            futures.enqueue_all(task);
             timer.start(task, *maxtimep);
-        } else {
-            result = wait_fail;
         }
     }
 
-    return !waits.enqueued();
+    return !futures.enqueued();
 }
 
 
@@ -377,7 +383,7 @@ Task::Future_selection::wait_any(Handle task, const Future<T>* first, const Futu
     Task Promise
 */
 inline bool
-Task::Promise::cancel_wait_timer()
+Task::Promise::cancel_timer()
 {
     const Lock lock{mutex};
     return futures.cancel_timer();
@@ -385,7 +391,7 @@ Task::Promise::cancel_wait_timer()
 
 
 inline bool
-Task::Promise::complete_wait_timer(Time_point time)
+Task::Promise::complete_timer(Time_point time)
 {
     const Handle    task{Handle::from_promise(*this)};
     const Lock      lock{mutex};

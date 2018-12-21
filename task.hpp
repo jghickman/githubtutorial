@@ -256,7 +256,8 @@ private:
         // Names/Types
         class Wait_setup;
         enum class Wait_type : int { any, all };
-        static const Channel_size wait_success{1};
+        static const Channel_size wait_success{0};
+        static const Channel_size wait_fail{-1};
 
         class Channel_wait {
         public:
@@ -349,6 +350,9 @@ private:
             Wait_set(const Wait_set&) = delete;
             Wait_set& operator=(const Wait_set&) = delete;
 
+            // Size and Capacity
+            bool is_empty() const;
+
             // Enqueue/Dequeue
             void            enqueue_all(Task::Handle);
             Channel_size    enqueue_not_ready(Task::Handle);
@@ -427,7 +431,7 @@ private:
 
         // Data
         Wait_type               waittype;
-        Wait_set                waits;
+        Wait_set                futures;
         Timer                   timer;
         optional<Channel_size>  result;
     };
@@ -463,8 +467,8 @@ public:
         template<class T> void  wait_all(const Future<T>*, const Future<T>*, optional<nanoseconds> = optional<nanoseconds>());
         template<class T> void  wait_any(const Future<T>*, const Future<T>*, optional<nanoseconds> = optional<nanoseconds>());
         Select_status           select_readable(Channel_size chan);
-        bool                    complete_wait_timer(Time_point);
-        bool                    cancel_wait_timer();
+        bool                    complete_timer(Time_point);
+        bool                    cancel_timer();
         Channel_size            selected_future() const;
 
         // Execution
@@ -1250,7 +1254,6 @@ template<class T> All_futures_awaitable<T>                          wait_all(con
 template<class T> All_futures_timed_awaitable<T>                    wait_all(const vector<Future<T>>&, nanoseconds maxtime);
 template<class T, Channel_size N> All_futures_timed_awaitable<T>    wait_all(const Future<T> (&fs)[N], nanoseconds maxtime);
 template<class T> All_futures_timed_awaitable<T>                    wait_all(const Future<T>*, const Future<T>*, nanoseconds maxtime);
-static const Channel_size wait_fail{-1};
 
 
 /*
@@ -1301,8 +1304,8 @@ public:
     void resume(Task::Handle);
 
     // Timers
-    void start_wait_timer(Task::Handle, nanoseconds duration);
-    void cancel_wait_timer(Task::Handle);
+    void start_timer(Task::Handle, nanoseconds duration);
+    void cancel_timer(Task::Handle);
 
 private:
     // Names/Types
@@ -1402,8 +1405,8 @@ private:
         ~Timers();
 
         // Timer Operations
-        void start_wait(Task::Handle, nanoseconds duration);
-        void cancel_wait(Task::Handle);
+        void start(Task::Handle, nanoseconds duration);
+        void cancel(Task::Handle);
 
     private:
         /*
