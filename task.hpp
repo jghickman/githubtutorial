@@ -2,7 +2,7 @@
 //  $CUSTOM_HEADER$
 
 //
-//  isptech/coroutine/task.hpp
+//  isptech/concurrency/task.hpp
 //
 
 //
@@ -10,7 +10,7 @@
 //  IAPPA CM Tag        : $Name:  $
 //  Last user to change : $Author: hickmjg $
 //  Date of change      : $Date: 2018/12/18 21:55:18 $
-//  File Path           : $Source: //ftwgroups/data/iappa/CVSROOT/isptech_cvs/isptech/coroutine/task.hpp,v $
+//  File Path           : $Source: //ftwgroups/data/iappa/CVSROOT/isptech_cvs/isptech/concurrency/task.hpp,v $
 //  Source of funding   : IAPPA
 //
 //  CAUTION:  CONTROLLED SOURCE.  DO NOT MODIFY ANYTHING ABOVE THIS LINE.
@@ -47,8 +47,8 @@
 /*
     Information and Sensor Processing Technology Coroutine Library
 */
-namespace Isptech   {
-namespace Coroutine {
+namespace Isptech       {
+namespace Concurrency   {
 
 
 /*
@@ -247,10 +247,12 @@ private:
         // Selection
         template<class T> bool  select_any(Task::Handle, const Future<T>*, const Future<T>*, optional<nanoseconds>);
         template<class T> bool  select_all(Task::Handle, const Future<T>*, const Future<T>*, optional<nanoseconds>);
-        Select_status           select_readable(Task::Handle, Channel_size chan);
-        bool                    complete_timer(Task::Handle, Time_point);
-        bool                    cancel_timer();
-        Channel_size            selected() const;
+        Channel_size            selection() const;
+
+        // Event Processing
+        Select_status   notify_ready(Task::Handle, Channel_size chan);
+        bool            notify_timeout(Task::Handle, Time_point);
+        bool            notify_timer_cancel();
 
     private:
         // Names/Types
@@ -260,17 +262,20 @@ private:
         public:
             // Construct
             Channel_wait() = default;
-            Channel_wait(Channel_base*, Channel_size futpos);
+            Channel_wait(Channel_base*, Channel_size fpos);
 
             // Enqueue/Dequeue
             void enqueue(Task::Handle, Channel_size pos) const;
             bool dequeue(Task::Handle, Channel_size pos) const;
-            void dequeue_locked(Task::Handle, Channel_size pos) const;
+            bool is_enqueued() const;
+
+            // Completion
+            void complete(Task::Handle, Channel_size pos) const;
+            bool is_ready() const;
 
             // Observers
             Channel_base*   channel() const;
             Channel_size    future() const;
-            bool            is_ready() const;
 
             // Synchronization
             void lock_channel() const;
@@ -279,36 +284,10 @@ private:
         private:
             // Data
             Channel_base*   chanp;
-            Channel_size    fpos;
+            Channel_size    futpos;
         };
 
         using Channel_wait_vector = std::vector<Channel_wait>;
-
-        class Channel_locks {
-        public:
-            // Construct/Copy
-            Channel_locks() = default;
-            Channel_locks(const Channel_locks&) = delete;
-            Channel_locks& operator=(const Channel_locks&) = delete;
-
-            // Acquire/Release
-            void acquire(const Channel_wait_vector&);
-            void release(const Channel_wait_vector&);
-
-        private:
-            // Names/Types
-            using Wait_index    = Channel_wait_vector::size_type;
-            using Channel_index = std::vector<Wait_index>;
-
-            // Index Construction
-            static void index_unique(const Channel_wait_vector&, Channel_index*);
-            static void init(Channel_index*, Channel_size n);
-            static void sort(Channel_index*, const Channel_wait_vector&);
-            static void remove_duplicates(Channel_index*, const Channel_wait_vector&);
-            
-            // Data
-            Channel_index index;
-        };
 
         class Future_wait {
         public:
@@ -319,9 +298,10 @@ private:
             // Enqueue/Dequeue
             void enqueue(Task::Handle, const Channel_wait_vector&) const;
             bool dequeue(Task::Handle, const Channel_wait_vector&) const;
-            void dequeue_locked(Task::Handle, const Channel_wait_vector&) const;
+            bool is_enqueued(Task::Handle, const Channel_wait_vector&) const;
 
-            // Complete
+            // Completion
+            void select(Task::Handle, const Channel_wait_vector&, Channel_size pos) const;
             void complete(Task::Handle, const Channel_wait_vector&, Channel_size pos) const;
             bool is_ready(const Channel_wait_vector&) const;
 
@@ -329,15 +309,101 @@ private:
             Channel_size value() const;
             Channel_size error() const;
 
+            // Synchronization
+            void lock(const Channel_wait_vector&) const;
+            void unlock(const Channel_wait_vector&) const;
+
             // Comparisons
             bool operator==(const Future_wait&) const;
             bool operator< (const Future_wait&) const;
 
         private:
             // Data
+            bool*           signalp;
             Channel_size    vchan;
             Channel_size    echan;
-            bool*           isreadyp;
+        };
+
+        class Future_wait_lock {
+        public:
+            // Construct/Copy/Destroy
+            Future_wait_lock(const Future_wait&, const Channel_wait_vector&);
+            Future_wait_lock(const Future_wait_lock&) = delete;
+            Future_wait_lock& operator=(const Future_wait_lock&) = delete;
+            ~Future_wait_lock();
+
+        private:
+            // Data
+            const Future_wait&          future;
+            const Channel_wait_vector&  channels;
+        };
+
+        // Names/Types
+        using Future_wait_vector = std::vector<Future_wait>;
+        using Future_wait_index = std::vector<Future_wait_vector::size_type>;
+
+        class Channel_locks {
+        public:
+            // Construct/Copy
+            Channel_locks() = default;
+            Channel_locks(const Channel_locks&) = delete;
+            Channel_locks& operator=(const Channel_locks&) = delete;
+
+            // Lock/Unlock
+            void acquire(const Future_wait_vector&, const Channel_wait_vector&, const Future_wait_index&);
+            void release();
+
+            // Conversions
+            explicit operator bool() const;
+
+        private:
+            // Names/Types
+            using Channel_vector = std::vector<Channel_base*>;
+
+            // Channel Processing
+            static void                     transform(const Future_wait_vector&, const Channel_wait_vector&, const Future_wait_index&, Channel_vector*);
+            static void                     sort(Channel_vector*);
+            static void                     lock(const Channel_vector&);
+            static void                     unlock(const Channel_vector&);
+            static void                     lock_channel(Channel_base*);
+            static void                     unlock_channel(Channel_base*);
+            template<class F> static void   for_all(const Channel_vector&, F func);
+
+            // Data
+            Channel_vector channels;
+        };
+
+        struct Enqueue_not_ready {
+            // Construct/Apply
+            Enqueue_not_ready(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
+            Channel_size operator()(Channel_size n, Channel_size i) const;
+
+            // Data
+            Task::Handle                task;
+            const Future_wait_vector&   futures;
+            const Channel_wait_vector&  channels;
+        };
+
+        struct dequeue_locked {
+            // Construct/Apply
+            dequeue_locked(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
+            Channel_size operator()(Channel_size n, Channel_size i) const;
+
+            // Data
+            Task::Handle                task;
+            const Future_wait_vector&   futures;
+            const Channel_wait_vector&  channels;
+        };
+
+        struct dequeue_unlocked {
+            // Construct/Apply
+            dequeue_unlocked(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
+            Channel_size operator()(Channel_size n, Channel_size i) const;
+
+            // Data
+            Task::Handle                task;
+            const Future_wait_vector&   futures;
+            const Channel_wait_vector&  channels;
         };
 
         class Wait_set {
@@ -352,43 +418,43 @@ private:
             bool            is_empty() const;
 
             // Enqueue/Dequeue
-            void            enqueue_all(Task::Handle);
-            Channel_size    enqueue_not_ready(Task::Handle);
-            void            dequeue_all(Task::Handle);
-            void            dequeue_not_ready(Task::Handle);
-            Channel_size    enqueued() const;
+            Channel_size enqueue(Task::Handle);
+            Channel_size dequeue(Task::Handle);
+            Channel_size enqueued() const;
 
-            // Complete
+            // Completion
             optional<Channel_size>  select_ready();
-            Channel_size            select_readable(Task::Handle, Channel_size chan);
+            Channel_size            select(Task::Handle, Channel_size chan);
+            void                    complete(Task::Handle, Channel_size chan);
 
             // Friends
             friend class Wait_setup;
 
         private:
-            // Names/Types
-            using Future_wait_vector    = std::vector<Future_wait>;
-            using Future_wait_index     = std::vector<Future_wait_vector::size_type>;
+            // Setup
+            template<class T> void  begin_setup(const Future<T>*, const Future<T>*);
+            void                    end_setup();
 
             // Setup
-            template<class T> void          begin_setup(const Future<T>*, const Future<T>*);
             template<class T> static void   transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
-            static void                     init(Future_wait_index*, Channel_size n);
+            static void                     init(Future_wait_index*, const Future_wait_vector&);
             static void                     index_unique(const Future_wait_vector&, Future_wait_index*);
             static void                     sort(Future_wait_index*, const Future_wait_vector&);
             static void                     remove_duplicates(Future_wait_index*, const Future_wait_vector&);
-            void                            end_setup();
 
-            // Select
+            // Enqueue
+            static Enqueue_not_ready enqueue(Task::Handle, const Future_wait_vector&, const Channel_wait_vector&);
+
+            // Completion
             static Channel_size             count_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&);
             static optional<Channel_size>   pick_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
 
             // Data
-            Channel_wait_vector     channels;
-            Future_wait_vector      futures;
-            Future_wait_index       index;
-            Channel_size            nenqueued; // futures
-            Channel_locks           locks;
+            Channel_wait_vector channels;
+            Future_wait_vector  futures;
+            Channel_size        nenqueued; // futures
+            Future_wait_index   index;
+            Channel_locks       locks;
         };
 
         class Wait_setup {
@@ -408,13 +474,18 @@ private:
         public:
             // Execution
             void start(Task::Handle, nanoseconds duration) const;
-            void expire(Time_point) const;
             void cancel(Task::Handle) const;
-            void complete_cancel() const;
-            void clear() const;
-            bool is_running() const;    // active and neither cancelled nor expired
+            void reset() const;
+
+            // Event Handlers
+            void notify_expired(Time_point) const;
+            void notify_cancelled() const;
+
+            // Observers
+            bool is_running() const;    // clock is ticking
             bool is_active() const;     // running or cancellation pending
-            bool is_cancelled() const;  // cancellation either pending or complete
+            bool is_cancelled() const;  // cancellation pending or complete
+            bool is_expired() const;    // time is up
 
         private:
             // Constants
@@ -425,12 +496,12 @@ private:
         };
 
         // Selection
-        static bool is_ready(const Wait_set&, Timer);
+        static bool is_waiting(const Wait_set&, Timer);
 
         // Data
         Wait_set                waits;
         Timer                   timer;
-        Channel_size            npending;
+        Channel_size            quota; // number of futures to wait for
         optional<Channel_size>  result;
     };
 
@@ -462,8 +533,8 @@ public:
         static optional<Channel_size>   try_select(const Channel_operation*, const Channel_operation*);
 
         // Future Operations
-        template<class T> void  wait_all(const Future<T>*, const Future<T>*, optional<nanoseconds> = optional<nanoseconds>());
-        template<class T> void  wait_any(const Future<T>*, const Future<T>*, optional<nanoseconds> = optional<nanoseconds>());
+        template<class T> void  wait_all(const Future<T>*, const Future<T>*, optional<nanoseconds> deadline=optional<nanoseconds>());
+        template<class T> void  wait_any(const Future<T>*, const Future<T>*, optional<nanoseconds> deadline=optional<nanoseconds>());
         Select_status           select_readable(Channel_size chan);
         bool                    complete_timer(Time_point);
         bool                    cancel_timer();
@@ -1132,9 +1203,9 @@ private:
     T       get_ready();
 
     // Task Waiting
-    Channel_base*   value() const;
-    Channel_base*   error() const;
-    bool*           ready() const;
+    Channel_base*   value_channel() const;
+    Channel_base*   error_channel() const;
+    bool*           ready_flag() const;
 
     // Data
     Value_receiver  vchan;
@@ -1589,7 +1660,7 @@ extern Scheduler scheduler;
 }   // Isptech
 
 
-#include "isptech/coroutine/task.inl"
+#include "isptech/concurrency/task.inl"
 
 #endif  // ISPTECH_COROUTINE_TASK_HPP
 

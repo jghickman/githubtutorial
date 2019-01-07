@@ -2,7 +2,7 @@
 //  $CUSTOM_HEADER$
 
 //
-//  isptech/coroutine/task.cpp
+//  isptech/concurrency/task.cpp
 //
 
 //
@@ -10,13 +10,13 @@
 //  IAPPA CM Tag        : $Name:  $
 //  Last user to change : $Author: hickmjg $
 //  Date of change      : $Date: 2018/12/18 21:54:46 $
-//  File Path           : $Source: //ftwgroups/data/iappa/CVSROOT/isptech_cvs/src/isptech/coroutine/task.cpp,v $
+//  File Path           : $Source: //ftwgroups/data/iappa/CVSROOT/isptech_cvs/src/isptech/concurrency/task.cpp,v $
 //  Source of funding   : IAPPA
 //
 //  CAUTION:  CONTROLLED SOURCE.  DO NOT MODIFY ANYTHING ABOVE THIS LINE.
 //
 
-#include "isptech/coroutine/task.hpp"
+#include "isptech/concurrency/task.hpp"
 #include <cstdint>
 #include <numeric>
 
@@ -27,8 +27,8 @@
 /*
     Information and Sensor Processing Technology Coroutine Library
 */
-namespace Isptech   {
-namespace Coroutine {
+namespace Isptech       {
+namespace Concurrency   {
 
 
 /*
@@ -315,61 +315,186 @@ Task::Operation_selection::try_select(const Channel_operation* first, const Chan
 
 
 /*
+    Task Future Selector Future Wait Lock
+*/
+inline
+Task::Future_selector::Future_wait_lock::Future_wait_lock(const Future_wait& f, const Channel_wait_vector& cs)
+    : future{f}
+    , channels{cs}
+{
+    future.lock(channels);
+}
+
+
+inline
+Task::Future_selector::Future_wait_lock::~Future_wait_lock()
+{
+    future.unlock(channels);
+}
+
+
+/*
     Task Future Selector Channel Locks
 */
 void
-Task::Future_selector::Channel_locks::acquire(const Channel_wait_vector& waits)
+Task::Future_selector::Channel_locks::acquire(const Future_wait_vector& fws, const Channel_wait_vector& cws, const Future_wait_index& index)
 {
-    index_unique(waits, &index);
-    for (auto i : index)
-        waits[i].lock_channel();
+    transform(fws, cws, index, &channels);
+    sort(&channels);
+    lock(channels);
+}
+
+
+template<class T>
+void
+Task::Future_selector::Channel_locks::for_all(const Channel_vector& cs, T func)
+{
+    Channel_base* prev = nullptr;
+
+    for (auto pp = cs.begin(), end = cs.end(); pp != end; ++pp) {
+        Channel_base* p = *pp;
+        if (p && p != prev)
+            func(p);
+        prev = p;
+    }
+}
+
+
+inline void
+Task::Future_selector::Channel_locks::lock(const Channel_vector& chans)
+{
+    for_all(chans, lock_channel);
+}
+
+
+inline void
+Task::Future_selector::Channel_locks::lock_channel(Channel_base* chanp)
+{
+    chanp->lock();
+}
+
+
+inline
+Task::Future_selector::Channel_locks::operator bool() const
+{
+    return !channels.empty();
 }
 
 
 void
-Task::Future_selector::Channel_locks::index_unique(const Channel_wait_vector& waits, Channel_index* indexp)
+Task::Future_selector::Channel_locks::release()
 {
-    init(indexp, waits.size());
-    sort(indexp, waits);
-    remove_duplicates(indexp, waits);
+    unlock(channels);
+    channels.clear();
+}
+
+
+inline void
+Task::Future_selector::Channel_locks::sort(Channel_vector* chansp)
+{
+    std::sort(chansp->begin(), chansp->end());
 }
 
 
 void
-Task::Future_selector::Channel_locks::init(Channel_index* indexp, Channel_size n)
+Task::Future_selector::Channel_locks::transform(const Future_wait_vector& fws, const Channel_wait_vector& cws, const Future_wait_index& index, Channel_vector* chansp)
 {
-    indexp->resize(n);
-    iota(indexp->begin(), indexp->end(), 0);
+    chansp->reserve(cws.size());
+
+    for (auto i : index) {
+        const auto& fw = fws[i];
+        chansp->push_back(cws[fw.value()].channel());
+        chansp->push_back(cws[fw.error()].channel());
+    }
 }
 
 
-void
-Task::Future_selector::Channel_locks::release(const Channel_wait_vector& waits)
+inline void
+Task::Future_selector::Channel_locks::unlock(const Channel_vector& chans)
 {
-    for (auto i : index)
-        waits[i].unlock_channel();
+    for_all(chans, unlock_channel);
 }
 
 
-void
-Task::Future_selector::Channel_locks::remove_duplicates(Channel_index* indexp, const Channel_wait_vector& waits)
+inline void
+Task::Future_selector::Channel_locks::unlock_channel(Channel_base* chanp)
 {
-    const auto first    = indexp->begin();
-    const auto last     = indexp->end();
-    const auto dup      = unique(first, last, [&](auto x, auto y) {
-        return waits[x].channel() == waits[y].channel();
-    });
-
-    indexp->erase(dup, last);
+    chanp->unlock();
 }
 
 
-void
-Task::Future_selector::Channel_locks::sort(Channel_index* indexp, const Channel_wait_vector& waits)
+/*
+    Task Future Selector Enqueue Not Ready
+*/
+inline
+Task::Future_selector::Enqueue_not_ready::Enqueue_not_ready(Task::Handle t, const Future_wait_vector& fs, const Channel_wait_vector& cs)
+    : task{t}
+    , futures{fs}
+    , channels{cs}
 {
-    std::sort(indexp->begin(), indexp->end(), [&](auto x, auto y) {
-        return waits[x].channel() < waits[y].channel();
-    });
+}
+
+
+Channel_size
+Task::Future_selector::Enqueue_not_ready::operator()(Channel_size n, Channel_size i) const
+{
+    const auto& f = futures[i];
+
+    if (!f.is_ready(channels)) {
+        f.enqueue(task, channels);
+        ++n;
+    }
+
+    return n;
+}
+
+
+/*
+    Task Future Selector Dequeue Unlocked
+*/
+inline
+Task::Future_selector::dequeue_unlocked::dequeue_unlocked(Task::Handle t, const Future_wait_vector& fs, const Channel_wait_vector& cs)
+    : task{t}
+    , futures{fs}
+    , channels{cs}
+{
+}
+
+
+Channel_size
+Task::Future_selector::dequeue_unlocked::operator()(Channel_size n, Channel_size i) const
+{
+    const Future_wait&      f = futures[i];
+    const Future_wait_lock  lock{f, channels};
+
+    if (f.is_enqueued(task, channels) && f.dequeue(task, channels))
+        ++n;
+
+    return n;
+}
+
+
+/*
+    Task Future Selector Dequeue Locked
+*/
+inline
+Task::Future_selector::dequeue_locked::dequeue_locked(Task::Handle t, const Future_wait_vector& fs, const Channel_wait_vector& cs)
+    : task{t}
+    , futures{fs}
+    , channels{cs}
+{
+}
+
+
+Channel_size
+Task::Future_selector::dequeue_locked::operator()(Channel_size n, Channel_size i) const
+{
+    const auto& f = futures[i];
+
+    if (f.is_enqueued(task, channels) && f.dequeue(task, channels))
+        ++n;
+
+    return n;
 }
 
 
@@ -385,13 +510,38 @@ Task::Future_selector::Wait_set::count_ready(const Future_wait_index& index, con
 }
 
 
-void
-Task::Future_selector::Wait_set::dequeue_all(Task::Handle task)
+Channel_size
+Task::Future_selector::Wait_set::dequeue(Task::Handle task)
 {
-    for (auto i : index)
-        futures[i].dequeue_locked(task, channels);
+    Channel_size n;
 
-    nenqueued = 0;
+    if (locks)
+        n = accumulate(index.begin(), index.end(), dequeue_locked(task, futures, channels)); 
+    else
+        n = accumulate(index.begin(), index.end(), dequeue_unlocked(task, futures, channels));
+
+    nenqueued -= n;
+    return n;
+}
+
+`
+Channel_size
+Task::Future_selector::Wait_set::dequeue_unlocked(Task::Handle task, const Future_wait_index& findex, const Future_wait_vector& fs, const Channel_wait_vector& cs)
+{
+    Channel_size n = 0;
+
+    for (auto i : findex) {
+        const auto& f = fs[i];
+
+        f.lock(cs);
+
+        if (f.is_enqueued(task, cs) && f.dequeue(task, cs))
+            ++n;
+
+        f.unlock(cs);
+    }
+
+    return n;
 }
 
 
@@ -411,52 +561,60 @@ Task::Future_selector::Wait_set::dequeue_not_ready(Task::Handle task)
 }
 
 
-void
-Task::Future_selector::Wait_set::end_setup()
+Channel_size
+Task::Future_selector::Wait_set::dequeue(Task::Handle task)
 {
-    locks.release(channels);
+    if (nenqueued > 0) {
+        nenqueued -= accumulate(index.begin(), index.end(), 0, [&](auto accum, auto i) {
+            const auto& f = futures[i];
+            if (!f.is_ready(channels)) {
+                f.dequeue(task, channels);
+                ++accum;
+            }
+            return accum;
+        });
+    }
 }
 
 
 void
-Task::Future_selector::Wait_set::enqueue_all(Task::Handle task)
+Task::Future_selector::Wait_set::end_setup()
 {
-    for (auto i : index)
-        futures[i].enqueue(task, channels);
-
-    nenqueued = index.size();
+    locks.release(futures, channels, index);
 }
 
 
 Channel_size
-Task::Future_selector::Wait_set::enqueue_not_ready(Task::Handle task)
+Task::Future_selector::Wait_set::enqueue(Task::Handle task)
 {
-    const auto n = accumulate(index.begin(), index.end(), 0, [&](auto accum, auto i) {
-        const auto& f = futures[i];
-        if (!f.is_ready(channels)) {
-            f.enqueue(task, channels);
-            ++accum;
-        }
-        return accum;
-    });
+    const auto n = accumulate(index.begin(), index.end(), 0, enqueue(task, futures, channels)) {
 
     nenqueued += n;
     return n;
 }
 
 
+inline Task::Future_selector::Enqueue_not_ready
+Task::Future_selector::Wait_set::enqueue(Task::Handle task, const Future_wait_vector& fs, const Channel_wait_fector& cs)
+{
+    return Enqueue_not_ready(task, fs, cs);
+}
+
+
 void
 Task::Future_selector::Wait_set::index_unique(const Future_wait_vector& waits, Future_wait_index* indexp)
 {
-    init(indexp, waits.size());
+    init(indexp, waits);
     sort(indexp, waits);
     remove_duplicates(indexp, waits);
 }
 
 
 void
-Task::Future_selector::Wait_set::init(Future_wait_index* indexp, Channel_size n)
+Task::Future_selector::Wait_set::init(Future_wait_index* indexp, const Future_wait_vector& waits)
 {
+    const auto n = waits.size();
+
     indexp->resize(n);
     iota(indexp->begin(), indexp->end(), 0);
 }
@@ -495,11 +653,11 @@ Task::Future_selector::Wait_set::remove_duplicates(Future_wait_index* indexp, co
 Channel_size
 Task::Future_selector::Wait_set::select_readable(Task::Handle task, Channel_size chan)
 {
-    const Channel_size future = channels[chan].future();
+    const Channel_size i = channels[chan].future();
 
-    futures[future].complete(task, channels, chan);
+    futures[i].complete(task, channels, chan);
     --nenqueued;
-    return future;
+    return i;
 }
 
 
@@ -528,13 +686,6 @@ Task::Future_selector::Timer::cancel(Task::Handle task) const
 {
     scheduler.cancel_timer(task);
     state = cancel_pending;
-}
-
-
-inline void
-Task::Future_selector::Timer::complete_cancel() const
-{
-    state = cancel_complete;
 }
 
 
@@ -577,44 +728,39 @@ Task::Future_selector::Timer::is_cancelled() const
 
 
 inline bool
+Task::Future_selector::Timer::is_expired() const
+{
+    return state == expired;
+}
+
+
+inline bool
 Task::Future_selector::Timer::is_running() const
 {
     return state == running;
 }
 
 
+inline void
+Task::Future_selector::Timer::notify_cancel() const
+{
+    state = cancel_complete;
+}
+
+
 /*
     Task Future Selector
 */
-bool
-Task::Future_selector::cancel_timer()
-{
-    timer.complete_cancel();
-    return !waits.enqueued();
-}
-
-
-bool
-Task::Future_selector::complete_timer(Task::Handle task, Time_point time)
-{
-    timer.expire(time);
-    if (!timer.is_cancelled())
-        waits.dequeue_not_ready(task);
-
-    return !waits.enqueued();
-}
-
-
 inline bool
-Task::Future_selector::is_ready(const Wait_set& waits, Timer timer)
+Task::Future_selector::is_waiting(const Wait_set& waits, Timer timer)
 {
-    return !(waits.enqueued() || timer.is_active());
+    return waits.enqueued() || timer.is_active();
 }
 
 
 
 Task::Select_status
-Task::Future_selector::select_readable(Task::Handle task, Channel_size chan)
+Task::Future_selector::notify_ready(Task::Handle task, Channel_size chan)
 {
     const Channel_size future = waits.select_readable(task, chan);
 
@@ -624,9 +770,29 @@ Task::Future_selector::select_readable(Task::Handle task, Channel_size chan)
             waits.dequeue_not_ready(task);
             if (timer.is_running())
                 timer.cancel(task);
+        }
     }
 
-    return Select_status(*result, is_ready(waits, timer));
+    return Select_status(*result, !is_waiting(waits, timer));
+}
+
+
+bool
+Task::Future_selector::notify_timeout(Task::Handle task, Time_point time)
+{
+    timer.expire(time);
+    if (!timer.is_cancelled())
+        waits.dequeue_not_ready(task);
+
+    return !waits.enqueued();
+}
+
+
+bool
+Task::Future_selector::notify_timer_cancel()
+{
+    timer.notify_cancel();
+    return !waits.enqueued();
 }
 
 
