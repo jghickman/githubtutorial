@@ -2,7 +2,7 @@
 //  $CUSTOM_HEADER$
 
 //
-//  isptech/concurrency/task.hpp
+//  isptech/coroutine/task.hpp
 //
 
 //
@@ -10,7 +10,7 @@
 //  IAPPA CM Tag        : $Name:  $
 //  Last user to change : $Author: hickmjg $
 //  Date of change      : $Date: 2018/12/18 21:55:18 $
-//  File Path           : $Source: //ftwgroups/data/iappa/CVSROOT/isptech_cvs/isptech/concurrency/task.hpp,v $
+//  File Path           : $Source: //ftwgroups/data/iappa/CVSROOT/isptech_cvs/isptech/coroutine/task.hpp,v $
 //  Source of funding   : IAPPA
 //
 //  CAUTION:  CONTROLLED SOURCE.  DO NOT MODIFY ANYTHING ABOVE THIS LINE.
@@ -47,8 +47,8 @@
 /*
     Information and Sensor Processing Technology Coroutine Library
 */
-namespace Isptech       {
-namespace Concurrency   {
+namespace Isptech   {
+namespace Coroutine {
 
 
 /*
@@ -250,7 +250,7 @@ private:
         Channel_size            selection() const;
 
         // Event Processing
-        Select_status   notify_ready(Task::Handle, Channel_size chan);
+        Select_status   notify_readable(Task::Handle, Channel_size chan);
         bool            notify_timeout(Task::Handle, Time_point);
         bool            notify_timer_cancel();
 
@@ -262,15 +262,14 @@ private:
         public:
             // Construct
             Channel_wait() = default;
-            Channel_wait(Channel_base*, Channel_size fpos);
-
+            Channel_wait(Channel_base*, Channel_size future);
+    
             // Enqueue/Dequeue
             void enqueue(Task::Handle, Channel_size pos) const;
             bool dequeue(Task::Handle, Channel_size pos) const;
-            bool is_enqueued() const;
+            bool is_enqueued(Task::Handle, Channel_size pos) const;
 
             // Completion
-            void complete(Task::Handle, Channel_size pos) const;
             bool is_ready() const;
 
             // Observers
@@ -284,7 +283,8 @@ private:
         private:
             // Data
             Channel_base*   chanp;
-            Channel_size    futpos;
+            Channel_size    fpos;
+            mutable bool    is_enq{false};
         };
 
         using Channel_wait_vector = std::vector<Channel_wait>;
@@ -293,7 +293,7 @@ private:
         public:
             // Construct
             Future_wait() = default;
-            Future_wait(bool* readyp, Channel_size vpos, Channel_size epos);
+            Future_wait(bool* readyp, Channel_size vchan, Channel_size echan);
 
             // Enqueue/Dequeue
             void enqueue(Task::Handle, const Channel_wait_vector&) const;
@@ -301,8 +301,7 @@ private:
             bool is_enqueued(Task::Handle, const Channel_wait_vector&) const;
 
             // Completion
-            void select(Task::Handle, const Channel_wait_vector&, Channel_size pos) const;
-            void complete(Task::Handle, const Channel_wait_vector&, Channel_size pos) const;
+            void complete(Task::Handle, const Channel_wait_vector&, Channel_size chan) const;
             bool is_ready(const Channel_wait_vector&) const;
 
             // Observers
@@ -318,10 +317,13 @@ private:
             bool operator< (const Future_wait&) const;
 
         private:
+            // Dequeue
+            static void dequeue_unlocked(Task::Handle task, const Channel_wait_vector& chans, Channel_size chan);
+
             // Data
             bool*           signalp;
-            Channel_size    vchan;
-            Channel_size    echan;
+            Channel_size    vpos;
+            Channel_size    epos;
         };
 
         class Future_wait_lock {
@@ -406,12 +408,15 @@ private:
             const Channel_wait_vector&  channels;
         };
 
-        class Wait_set {
+        class Future_set {
         public:
             // Construct/Copy
-            Wait_set() = default;
-            Wait_set(const Wait_set&) = delete;
-            Wait_set& operator=(const Wait_set&) = delete;
+            Future_set() = default;
+            Future_set(const Future_set&) = delete;
+            Future_set& operator=(const Future_set&) = delete;
+
+            // Assignment
+            template<class T> void assign(const Future<T>*, const Future<T>*);
 
             // Size and Capacity
             Channel_size    size() const;
@@ -424,18 +429,14 @@ private:
 
             // Completion
             optional<Channel_size>  select_ready();
-            Channel_size            select(Task::Handle, Channel_size chan);
-            void                    complete(Task::Handle, Channel_size chan);
+            Channel_size            complete(Task::Handle, Channel_size chan);
 
-            // Friends
-            friend class Wait_setup;
+            // Synchronization
+            void lock_channels();
+            void unlock_channels();
 
         private:
-            // Setup
-            template<class T> void  begin_setup(const Future<T>*, const Future<T>*);
-            void                    end_setup();
-
-            // Setup
+            // Assignment
             template<class T> static void   transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
             static void                     init(Future_wait_index*, const Future_wait_vector&);
             static void                     index_unique(const Future_wait_vector&, Future_wait_index*);
@@ -452,22 +453,22 @@ private:
             // Data
             Channel_wait_vector channels;
             Future_wait_vector  futures;
-            Channel_size        nenqueued; // futures
             Future_wait_index   index;
+            Channel_size        nenqueued; // futures
             Channel_locks       locks;
         };
 
         class Wait_setup {
         public:
             // Construct/Copy/Destroy
-            template<class T> Wait_setup(Wait_set*, const Future<T>*, const Future<T>*);
+            template<class T> Wait_setup(const Future<T>*, const Future<T>*, Future_set*);
             Wait_setup(const Wait_setup&) = delete;
             Wait_setup& operator=(const Wait_setup&) = delete;
             ~Wait_setup();
 
         private:
             // Data
-            Wait_set* waitsp;
+            Future_set* futuresp;
         };
 
         class Timer {
@@ -485,7 +486,6 @@ private:
             bool is_running() const;    // clock is ticking
             bool is_active() const;     // running or cancellation pending
             bool is_cancelled() const;  // cancellation pending or complete
-            bool is_expired() const;    // time is up
 
         private:
             // Constants
@@ -496,12 +496,12 @@ private:
         };
 
         // Selection
-        static bool is_waiting(const Wait_set&, Timer);
+        static bool is_done(const Future_set&, Timer);
 
         // Data
-        Wait_set                waits;
+        Future_set              futures;
+        Channel_size            quota; // number to wait for
         Timer                   timer;
-        Channel_size            quota; // number of futures to wait for
         optional<Channel_size>  result;
     };
 
@@ -524,6 +524,11 @@ public:
         Task            get_return_object();
         Initial_suspend initial_suspend() const;
         Final_suspend   final_suspend();
+
+        /*
+            TODO:  Rename the Channel Operation/Future Wait even handlers
+            below using the notify_xxx() convention?
+        */
     
         // Channel Operations
         template<Channel_size N> void   select(const Channel_operation (&ops)[N]);
@@ -693,7 +698,7 @@ private:
 
     private:
         // Selection
-        static void select(Task::Handle task, Channel_size chan);
+        static void notify(Task::Handle task, Channel_size chan);
 
         // Data
         mutable Task::Handle    taskh;
@@ -952,7 +957,7 @@ public:
     // Awaitable Operations
     bool    await_ready();
     bool    await_suspend(Task::Handle);
-    T&&     await_resume();
+    T       await_resume();
 
 private:
     // Friends
@@ -1660,7 +1665,7 @@ extern Scheduler scheduler;
 }   // Isptech
 
 
-#include "isptech/concurrency/task.inl"
+#include "isptech/coroutine/task.inl"
 
 #endif  // ISPTECH_COROUTINE_TASK_HPP
 

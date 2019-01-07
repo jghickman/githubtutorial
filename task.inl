@@ -2,7 +2,7 @@
 //  $CUSTOM_HEADER$
 
 //
-//  isptech/concurrency/task.inl
+//  isptech/coroutine/task.inl
 //
 
 //
@@ -10,7 +10,7 @@
 //  IAPPA CM Tag        : $Name:  $
 //  Last user to change : $Author: hickmjg $
 //  Date of change      : $Date: 2018/12/18 21:55:18 $
-//  File Path           : $Source: //ftwgroups/data/iappa/CVSROOT/isptech_cvs/isptech/concurrency/task.inl,v $
+//  File Path           : $Source: //ftwgroups/data/iappa/CVSROOT/isptech_cvs/isptech/coroutine/task.inl,v $
 //  Source of funding   : IAPPA
 //
 //  CAUTION:  CONTROLLED SOURCE.  DO NOT MODIFY ANYTHING ABOVE THIS LINE.
@@ -20,8 +20,8 @@
 /*
     Information and Sensor Processing Technology Coroutine Library
 */
-namespace Isptech       {
-namespace Concurrency   {
+namespace Isptech   {
+namespace Coroutine {
 
 
 /*
@@ -71,9 +71,9 @@ Task::Select_status::position() const
     Task Future Selector Channel Wait
 */
 inline
-Task::Future_selector::Channel_wait::Channel_wait(Channel_base* channelp, Channel_size fpos)
+Task::Future_selector::Channel_wait::Channel_wait(Channel_base* channelp, Channel_size future)
     : chanp{channelp}
-    , futpos{fpos}
+    , fpos{future}
 {
 }
 
@@ -88,15 +88,15 @@ Task::Future_selector::Channel_wait::channel() const
 inline bool
 Task::Future_selector::Channel_wait::dequeue(Task::Handle task, Channel_size pos) const
 {
-    const Channel_lock lock(chanp);
-    return chanp->dequeue_readable_wait(task, pos);
-}
+    bool is_deq = false;
 
+    if (!is_enq) {
+        is_deq = chanp->dequeue_readable_wait(task, pos);
+        if (is_deq)
+            is_enq = false;
+    }
 
-inline void
-Task::Future_selector::Channel_wait::dequeue_locked(Task::Handle task, Channel_size pos) const
-{
-    chanp->dequeue_readable_wait(task, pos);
+    return is_deq;
 }
 
 
@@ -104,13 +104,21 @@ inline void
 Task::Future_selector::Channel_wait::enqueue(Task::Handle task, Channel_size pos) const
 {
     chanp->enqueue_readable_wait(task, pos);
+    isenq = true;
 }
 
 
 inline Channel_size
 Task::Future_selector::Channel_wait::future() const
 {
-    return futpos;
+    return fpos;
+}
+
+
+inline bool
+Task::Future_selector::Channel_wait::is_enqueued() const
+{
+    return is_enq;
 }
 
 
@@ -139,76 +147,40 @@ Task::Future_selector::Channel_wait::unlock_channel() const
     Task Future Selector Future Wait
 */
 inline
-Task::Future_selector::Future_wait::Future_wait(bool* readyp, Channel_size vpos, Channel_size epos)
+Task::Future_selector::Future_wait::Future_wait(bool* readyp, Channel_size vchan, Channel_size echan)
     : signalp{readyp}
-    , vchan{vpos}
-    , echan{epos}
+    , vpos{vchan}
+    , epos{echan}
 {
-}
-
-
-inline void
-Task::Future_selector::Future_wait::complete(Task::Handle task, const Channel_wait_vector& chans, Channel_size chan) const
-{
-    const Channel_size other = (chan == vchan) ? echan : vchan;
-
-    chans[other].dequeue(task, other);
-    *signalp = true;
-}
-
-
-inline void
-Task::Future_selector::Future_wait::complete(Task::Handle task, const Channel_wait_vector& chans, Channel_size chan) const
-{
-    const Channel_size other = (chan == vchan) ? echan : vchan;
-
-    chans[other].dequeue(task, other);
-    *signalp = true;
-}
-
-
-inline bool
-Task::Future_selector::Future_wait::dequeue(Task::Handle task, const Channel_wait_vector& chans) const
-{
-    bool is_dequeued = true;
-
-    if (!chans[vchan].dequeue(task, vchan))
-        is_dequeued = false;
-
-    if (!chans[echan].dequeue(task, echan))
-        is_dequeued = false;
-
-    return is_dequeued;
-}
-
-
-inline void
-Task::Future_selector::Future_wait::dequeue_locked(Task::Handle task, const Channel_wait_vector& chans) const
-{
-    chans[vchan].dequeue_locked(task, vchan);
-    chans[echan].dequeue_locked(task, echan);
 }
 
 
 inline Channel_size
 Task::Future_selector::Future_wait::error() const
 {
-    return echan;
+    return epos;
 }
 
 
 inline void
 Task::Future_selector::Future_wait::enqueue(Task::Handle task, const Channel_wait_vector& chans) const
 {
-    chans[vchan].enqueue(task, vchan);
-    chans[echan].enqueue(task, echan);
+    chans[vpos].enqueue(task, vpos);
+    chans[epos].enqueue(task, epos);
+}
+
+
+inline bool
+Task::Future_selector::Future_wait::is_enqueued(Task::Handle task, const Channel_wait_vector& chans) const
+{
+    return chans[vpos].is_enqueued(task, vpos) || chans[epos].is_enqueued(task, vpos);
 }
 
 
 inline bool
 Task::Future_selector::Future_wait::is_ready(const Channel_wait_vector& chans) const
 {
-    if (!*signalp && (chans[vchan].is_ready() || chans[echan].is_ready()))
+    if (!*signalp && (chans[vpos].is_ready() || chans[epos].is_ready()))
         *signalp = true;
 
     return *signalp;
@@ -218,8 +190,8 @@ Task::Future_selector::Future_wait::is_ready(const Channel_wait_vector& chans) c
 inline void
 Task::Future_selector::Future_wait::lock(const Channel_wait_vector& chans) const
 {
-    chans[vchan].lock_channel();
-    chans[echan].lock_channel();
+    chans[vpos].lock_channel();
+    chans[epos].lock_channel();
 }
 
 
@@ -235,9 +207,9 @@ Task::Future_selector::Future_wait::operator< (const Future_wait& other) const
 {
     if (this->signalp < other.signalp) return true;
     if (other.signalp < this->signalp) return false;
-    if (this->vchan < other.vchan) return true;
-    if (other.vchan < this->vchan) return false;
-    if (this->echan < other.echan) return true;
+    if (this->vpos < other.vpos) return true;
+    if (other.vpos < this->vpos) return false;
+    if (this->epos < other.epos) return true;
     return false;
 }
 
@@ -245,15 +217,15 @@ Task::Future_selector::Future_wait::operator< (const Future_wait& other) const
 inline void
 Task::Future_selector::Future_wait::unlock(const Channel_wait_vector& chans) const
 {
-    chans[vchan].unlock_channel();
-    chans[echan].unlock_channel();
+    chans[vpos].unlock_channel();
+    chans[epos].unlock_channel();
 }
 
 
 inline Channel_size
 Task::Future_selector::Future_wait::value() const
 {
-    return vchan;
+    return vpos;
 }
 
 
@@ -262,26 +234,27 @@ Task::Future_selector::Future_wait::value() const
 */
 template<class T>
 inline
-Task::Future_selector::Wait_setup::Wait_setup(Wait_set* wsp, const Future<T>* first, const Future<T>* last)
-    : waitsp(wsp)
+Task::Future_selector::Wait_setup::Wait_setup(const Future<T>* first, const Future<T>* last, Future_set* fsp)
+    : futuresp(fsp)
 {
-    waitsp->begin_setup(first, last);
+    futuresp->assign(first, last);
+    futuresp->lock_channels();
 }
 
 
 inline
 Task::Future_selector::Wait_setup::~Wait_setup()
 {
-    waitsp->end_setup();
+    futuresp->unlock_channels();
 }
 
 
 /*
-    Task Future Selector Wait Set
+    Task Future Selector Future Set
 */
 template<class T>
 void
-Task::Future_selector::Wait_set::begin_setup(const Future<T>* first, const Future<T>* last)
+Task::Future_selector::Future_set::assign(const Future<T>* first, const Future<T>* last)
 {
     nenqueued = 0;
     transform(first, last, &futures, &channels);
@@ -291,14 +264,14 @@ Task::Future_selector::Wait_set::begin_setup(const Future<T>* first, const Futur
 
 
 inline Channel_size
-Task::Future_selector::Wait_set::enqueued() const
+Task::Future_selector::Future_set::enqueued() const
 {
     return nenqueued;
 }
 
 
 inline bool
-Task::Future_selector::Wait_set::is_empty() const
+Task::Future_selector::Future_set::is_empty() const
 {
     return futures.empty();
 }
@@ -306,29 +279,29 @@ Task::Future_selector::Wait_set::is_empty() const
 
 template<class T>
 void
-Task::Future_selector::Wait_set::transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwsp, Channel_wait_vector* cwsp)
+Task::Future_selector::Future_set::transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwsp, Channel_wait_vector* cwsp)
 {
-    auto&       fws = *fwsp;
-    auto&       cws = *cwsp;
-    const auto  nfs = last - first;
+    auto&       fwaits  = *fwsp;
+    auto&       cwaits  = *cwsp;
+    const auto  nfs     = last - first;
 
-    fws.resize(nfs);
-    cws.resize(nfs * 2);
+    fwaits.resize(nfs);
+    cwaits.resize(nfs * 2);
 
     for (const Future<T>* fp = first; fp != last; ++fp) {
         const auto fpos = fp - first;
         const auto vpos = fpos * 2;
         const auto epos = vpos + 1;
 
-        cws[vpos] = {fp->value_channel(), fpos};
-        cws[epos] = {fp->error_channel(), fpos};
-        fws[fpos] = {fp->ready_flag(), vpos, epos};
+        cwaits[vpos] = {fp->value_channel(), fpos};
+        cwaits[epos] = {fp->error_channel(), fpos};
+        fwaits[fpos] = {fp->ready_flag(), vpos, epos};
     }
 }
 
 
 inline Channel_size
-Task::Future_selector::Wait_set::size() const
+Task::Future_selector::Future_set::size() const
 {
     return futures.size();
 }
@@ -359,18 +332,18 @@ template<class T>
 bool
 Task::Future_selector::select_all(Handle task, const Future<T>* first, const Future<T>* last, optional<nanoseconds> deadline)
 {
-    const Wait_setup setup{&waits, first, last};
+    const Wait_setup setup{first, last, &futures};
 
     result.clear();
-    quota = waits.enqueue(task);
+    quota = futures.enqueue(task);
     if (quota == 0) {
-        if (!waits.is_empty())
-            result = waits.size(); // all futures are ready
+        if (!futures.is_empty())
+            result = futures.size(); // all ready
     } else if (deadline) {
         if (*deadline > 0ns)
             timer.start(task, *deadline);
         else {
-            waits.dequeue(task);
+            futures.dequeue(task);
             quota = 0;
         }
     }
@@ -383,17 +356,17 @@ template<class T>
 bool
 Task::Future_selector::select_any(Handle task, const Future<T>* first, const Future<T>* last, optional<nanoseconds> deadline)
 {
-    const Wait_setup setup{&waits, first, last};
+    const Wait_setup setup{first, last, &futures};
 
     quota = 0;
-    result = waits.select_ready();
+    result = futures.select_ready();
     if (!result) {
         if (!deadline)
-            waits.enqueue(task);
-        else if (*deadline > 0ns && waits.enqueue(task))
+            futures.enqueue(task);
+        else if (*deadline > 0ns && futures.enqueue(task))
             timer.start(task, *deadline);
 
-        if (waits.enqueued())
+        if (futures.enqueued())
             quota = 1;
     }
 
@@ -656,14 +629,14 @@ Channel<T>::Readable_waiter::notify(Mutex* mtxp) const
         the task that it has become readable.
     */
     mtxp->unlock();
-    select(taskh, chanpos);
+    notify(taskh, chanpos);
     mtxp->lock();
 }
 
 
 template<class T>
 void
-Channel<T>::Readable_waiter::select(Task::Handle task, Channel_size chan)
+Channel<T>::Readable_waiter::notify(Task::Handle task, Channel_size chan)
 {
     const Task::Select_status selection = task.promise().select_readable(chan);
 
@@ -1628,7 +1601,7 @@ Channel<T>::Receive_awaitable::await_ready()
 
 
 template<class T>
-inline T&&
+inline T
 Channel<T>::Receive_awaitable::await_resume()
 {
     return std::move(value);
