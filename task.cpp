@@ -52,10 +52,10 @@ Scheduler scheduler;
 
 
 /*
-    Task Operation Selection Operation View
+    Task Operation Selector Operation View
 */
 inline
-Task::Operation_selection::Operation_view::Operation_view(const Channel_operation* cop, Channel_size pos)
+Task::Operation_selector::Operation_view::Operation_view(const Channel_operation* cop, Channel_size pos)
     : pop{cop}
     , index{pos}
 {
@@ -63,72 +63,72 @@ Task::Operation_selection::Operation_view::Operation_view(const Channel_operatio
 
 
 inline Channel_base*
-Task::Operation_selection::Operation_view::channel() const
+Task::Operation_selector::Operation_view::channel() const
 {
     return pop->channel();
 }
 
 
 inline bool
-Task::Operation_selection::Operation_view::dequeue(Task::Handle task) const
+Task::Operation_selector::Operation_view::dequeue(Task::Promise* taskp) const
 {
-    return pop->dequeue(task, index);
+    return pop->dequeue(taskp, index);
 }
 
 
 inline void
-Task::Operation_selection::Operation_view::enqueue(Task::Handle task) const
+Task::Operation_selector::Operation_view::enqueue(Task::Promise* taskp) const
 {
-    pop->enqueue(task, index);
+    pop->enqueue(taskp, index);
 }
 
 
 inline void
-Task::Operation_selection::Operation_view::execute() const
+Task::Operation_selector::Operation_view::execute() const
 {
     return pop->execute();
 }
 
 
 inline bool
-Task::Operation_selection::Operation_view::is_ready() const
+Task::Operation_selector::Operation_view::is_ready() const
 {
     return pop->is_ready();
 }
 
 
 inline Channel_size
-Task::Operation_selection::Operation_view::position() const
+Task::Operation_selector::Operation_view::position() const
 {
     return index;
 }
 
 
 inline bool
-Task::Operation_selection::Operation_view::operator==(Operation_view other) const
+Task::Operation_selector::Operation_view::operator==(Operation_view other) const
 {
     return *this->pop == *other.pop;
 }
 
 
 inline bool
-Task::Operation_selection::Operation_view::operator< (Operation_view other) const
+Task::Operation_selector::Operation_view::operator< (Operation_view other) const
 {
     return *this->pop < *other.pop;
 }
 
 
 /*
-    Task Operation Selection Channel Locks
+    Task Operation Selector Channel Locks
 */
-Task::Operation_selection::Channel_locks::Channel_locks(const Operation_vector& opers)
+Task::Operation_selector::Channel_locks::Channel_locks(const Operation_vector& opers)
     : ops{opers}
 {
     for_each_channel(ops, lock);
 }
 
 
-Task::Operation_selection::Channel_locks::~Channel_locks()
+Task::Operation_selector::Channel_locks::~Channel_locks()
 {
     for_each_channel(ops, unlock);
 }
@@ -136,7 +136,7 @@ Task::Operation_selection::Channel_locks::~Channel_locks()
 
 template<class T>
 void
-Task::Operation_selection::Channel_locks::for_each_channel(const Operation_vector& ops, T f)
+Task::Operation_selector::Channel_locks::for_each_channel(const Operation_vector& ops, T f)
 {
     Channel_base* prevchanp{nullptr};
 
@@ -151,23 +151,23 @@ Task::Operation_selection::Channel_locks::for_each_channel(const Operation_vecto
 
 
 inline void
-Task::Operation_selection::Channel_locks::lock(Channel_base* chanp)
+Task::Operation_selector::Channel_locks::lock(Channel_base* chanp)
 {
     chanp->lock();
 }
 
 
 inline void
-Task::Operation_selection::Channel_locks::unlock(Channel_base* chanp)
+Task::Operation_selector::Channel_locks::unlock(Channel_base* chanp)
 {
     chanp->unlock();
 }
 
 
 /*
-    Task Operation Selection Unique Operations
+    Task Operation Selector Unique Operations
 */
-Task::Operation_selection::Transform_unique::Transform_unique(const Channel_operation* first, const Channel_operation* last, Operation_vector* outp)
+Task::Operation_selector::Transform_unique::Transform_unique(const Channel_operation* first, const Channel_operation* last, Operation_vector* outp)
 {
     transform(first, last, outp);
     sort(outp->begin(), outp->end());
@@ -176,7 +176,7 @@ Task::Operation_selection::Transform_unique::Transform_unique(const Channel_oper
 
 
 void
-Task::Operation_selection::Transform_unique::remove_duplicates(Operation_vector* vp)
+Task::Operation_selector::Transform_unique::remove_duplicates(Operation_vector* vp)
 {
     const auto dup = unique(vp->begin(), vp->end());
     vp->erase(dup, vp->end());
@@ -184,7 +184,7 @@ Task::Operation_selection::Transform_unique::remove_duplicates(Operation_vector*
 
 
 void
-Task::Operation_selection::Transform_unique::transform(const Channel_operation* first, const Channel_operation* last, Operation_vector* outp)
+Task::Operation_selector::Transform_unique::transform(const Channel_operation* first, const Channel_operation* last, Operation_vector* outp)
 {
     Operation_vector& out = *outp;
 
@@ -198,10 +198,10 @@ Task::Operation_selection::Transform_unique::transform(const Channel_operation* 
 
 
 /*
-    Task Operation Selection
+    Task Operation Selector
 */
 Channel_size
-Task::Operation_selection::count_ready(const Operation_vector& ops)
+Task::Operation_selector::count_ready(const Operation_vector& ops)
 {
     return count_if(ops.begin(), ops.end(), [](const auto op) {
         return op.is_ready();
@@ -210,12 +210,12 @@ Task::Operation_selection::count_ready(const Operation_vector& ops)
 
 
 Channel_size
-Task::Operation_selection::dequeue(Task::Handle task, const Operation_vector& ops, Channel_size selected)
+Task::Operation_selector::dequeue(Task::Promise* taskp, const Operation_vector& ops, Channel_size selected)
 {
     Channel_size n = 0;
 
     for (const auto op : ops) {
-        if (op.position() != selected && op.dequeue(task))
+        if (op.position() != selected && op.dequeue(taskp))
             ++n;
     }
 
@@ -224,17 +224,30 @@ Task::Operation_selection::dequeue(Task::Handle task, const Operation_vector& op
 
 
 Channel_size
-Task::Operation_selection::enqueue(Task::Handle task, const Operation_vector& ops)
+Task::Operation_selector::enqueue(Task::Promise* taskp, const Operation_vector& ops)
 {
     for (const auto op : ops)
-        op.enqueue(task);
+        op.enqueue(taskp);
 
     return ops.size();
 }
 
 
+Task::Select_status
+Task::Operation_selector::notify_complete(Task::Promise* taskp, Channel_size pos)
+{
+    --nenqueued;
+    if (!winner) {
+        winner = pos;
+        nenqueued -= dequeue(taskp, operations, pos);
+    }
+
+    return Select_status(*winner, nenqueued == 0);
+}
+
+
 Channel_size
-Task::Operation_selection::pick_ready(const Operation_vector& ops, Channel_size nready)
+Task::Operation_selector::pick_ready(const Operation_vector& ops, Channel_size nready)
 {
     assert(ops.size() > 0 && nready > 0);
 
@@ -253,7 +266,7 @@ Task::Operation_selection::pick_ready(const Operation_vector& ops, Channel_size 
 
 
 bool
-Task::Operation_selection::select(Task::Handle task, const Channel_operation* first, const Channel_operation* last)
+Task::Operation_selector::select(Task::Promise* taskp, const Channel_operation* first, const Channel_operation* last)
 {
     const Transform_unique  transform{first, last, &operations};
     const Channel_locks     lock{operations};
@@ -261,27 +274,14 @@ Task::Operation_selection::select(Task::Handle task, const Channel_operation* fi
     nenqueued = 0;
     winner = select_ready(operations);
     if (!winner)
-        nenqueued = enqueue(task, operations);
+        nenqueued = enqueue(taskp, operations);
 
     return nenqueued == 0;
 }
 
 
-Task::Select_status
-Task::Operation_selection::select(Task::Handle task, Channel_size pos)
-{
-    --nenqueued;
-    if (!winner) {
-        winner = pos;
-        nenqueued -= dequeue(task, operations, pos);
-    }
-
-    return Select_status(*winner, nenqueued == 0);
-}
-
-
 optional<Channel_size>
-Task::Operation_selection::select_ready(const Operation_vector& ops)
+Task::Operation_selector::select_ready(const Operation_vector& ops)
 {
     optional<Channel_size> ready;
 
@@ -298,19 +298,37 @@ Task::Operation_selection::select_ready(const Operation_vector& ops)
 
    
 Channel_size
-Task::Operation_selection::selected() const
+Task::Operation_selector::selected() const
 {
     return *winner;
 }
 
 
 optional<Channel_size>
-Task::Operation_selection::try_select(const Channel_operation* first, const Channel_operation* last)
+Task::Operation_selector::try_select(const Channel_operation* first, const Channel_operation* last)
 {
     const Transform_unique  transform{first, last, &operations};
     const Channel_locks     lock{operations};
 
     return select_ready(operations);
+}
+
+
+/*
+    Task Future Selector Channel Wait Lock
+*/
+inline
+Task::Future_selector::Channel_wait_lock::Channel_wait_lock(const Channel_wait& cw)
+    : wait{cw}
+{
+    wait.lock_channel();
+}
+
+
+inline 
+Task::Future_selector::Channel_wait_lock::~Channel_wait_lock()
+{
+    wait.unlock_channel();
 }
 
 
@@ -347,7 +365,7 @@ Task::Future_selector::Channel_locks::acquire(const Future_wait_vector& fws, con
 
 template<class T>
 void
-Task::Future_selector::Channel_locks::for_all(const Channel_vector& cs, T func)
+Task::Future_selector::Channel_locks::for_each_unique(const Channel_vector& cs, T func)
 {
     Channel_base* prev = nullptr;
 
@@ -363,7 +381,7 @@ Task::Future_selector::Channel_locks::for_all(const Channel_vector& cs, T func)
 inline void
 Task::Future_selector::Channel_locks::lock(const Channel_vector& chans)
 {
-    for_all(chans, lock_channel);
+    for_each_unique(chans, lock_channel);
 }
 
 
@@ -412,7 +430,7 @@ Task::Future_selector::Channel_locks::transform(const Future_wait_vector& fws, c
 inline void
 Task::Future_selector::Channel_locks::unlock(const Channel_vector& chans)
 {
-    for_all(chans, unlock_channel);
+    for_each_unique(chans, unlock_channel);
 }
 
 
@@ -427,8 +445,8 @@ Task::Future_selector::Channel_locks::unlock_channel(Channel_base* chanp)
     Task Future Selector Enqueue Not Ready
 */
 inline
-Task::Future_selector::Enqueue_not_ready::Enqueue_not_ready(Task::Handle t, const Future_wait_vector& fs, const Channel_wait_vector& cs)
-    : task{t}
+Task::Future_selector::Enqueue_not_ready::Enqueue_not_ready(Task::Promise* tp, const Future_wait_vector& fs, const Channel_wait_vector& cs)
+    : taskp{tp}
     , futures{fs}
     , channels{cs}
 {
@@ -441,7 +459,7 @@ Task::Future_selector::Enqueue_not_ready::operator()(Channel_size n, Channel_siz
     const auto& f = futures[i];
 
     if (!f.is_ready(channels)) {
-        f.enqueue(task, channels);
+        f.enqueue(taskp, channels);
         ++n;
     }
 
@@ -453,8 +471,8 @@ Task::Future_selector::Enqueue_not_ready::operator()(Channel_size n, Channel_siz
     Task Future Selector Dequeue Locked
 */
 inline
-Task::Future_selector::dequeue_locked::dequeue_locked(Task::Handle t, const Future_wait_vector& fs, const Channel_wait_vector& cs)
-    : task{t}
+Task::Future_selector::dequeue_locked::dequeue_locked(Task::Promise* tp, const Future_wait_vector& fs, const Channel_wait_vector& cs)
+    : taskp{tp}
     , futures{fs}
     , channels{cs}
 {
@@ -466,7 +484,7 @@ Task::Future_selector::dequeue_locked::operator()(Channel_size n, Channel_size i
 {
     const auto& f = futures[i];
 
-    if (f.dequeue(task, channels))
+    if (f.dequeue(taskp, channels))
         ++n;
 
     return n;
@@ -477,8 +495,8 @@ Task::Future_selector::dequeue_locked::operator()(Channel_size n, Channel_size i
     Task Future Selector Dequeue Unlocked
 */
 inline
-Task::Future_selector::dequeue_unlocked::dequeue_unlocked(Task::Handle t, const Future_wait_vector& fs, const Channel_wait_vector& cs)
-    : task{t}
+Task::Future_selector::dequeue_unlocked::dequeue_unlocked(Task::Promise* tp, const Future_wait_vector& fs, const Channel_wait_vector& cs)
+    : taskp{tp}
     , futures{fs}
     , channels{cs}
 {
@@ -491,7 +509,7 @@ Task::Future_selector::dequeue_unlocked::operator()(Channel_size n, Channel_size
     const Future_wait&      f = futures[i];
     const Future_wait_lock  lock{f, channels};
 
-    if (f.dequeue(task, channels))
+    if (f.dequeue(taskp, channels))
         ++n;
 
     return n;
@@ -501,59 +519,45 @@ Task::Future_selector::dequeue_unlocked::operator()(Channel_size n, Channel_size
 /*
     Task Future Selector Future Wait
 */
-void
-Task::Future_selector::Future_wait::complete(Task::Handle task, const Channel_wait_vector& chans, Channel_size pos) const
+bool
+Task::Future_selector::Future_wait::complete(Task::Promise* taskp, const Channel_wait_vector& chans, Channel_size pos) const
 {
     const Channel_size other = (pos == vpos) ? epos : vpos;
 
-    dequeue_unlocked(task, chans, other);
     *signalp = true;
+    chans[pos].complete();
+    return dequeue_unlocked(taskp, chans, other);
 }
 
 
 bool
-Task::Future_selector::Future_wait::dequeue(Task::Handle task, const Channel_wait_vector& chans) const
+Task::Future_selector::Future_wait::dequeue(Task::Promise* taskp, const Channel_wait_vector& chans) const
 {
     bool was_enqueued = false;
 
-    if (chans[vpos].dequeue(task, vpos))
+    if (chans[vpos].dequeue(taskp, vpos))
         was_enqueued = true;
 
-    if (chans[epos].dequeue(task, epos))
+    if (chans[epos].dequeue(taskp, epos))
         was_enqueued = true;
 
-    return was_enqueued && !is_enqueued(task, chans);
+    return was_enqueued && !is_enqueued(taskp, chans);
 }
 
 
-void
-Task::Future_selector::Future_wait::dequeue_unlocked(Task::Handle task, const Channel_wait_vector& chans, Channel_size pos)
+bool
+Task::Future_selector::Future_wait::dequeue_unlocked(Task::Promise* taskp, const Channel_wait_vector& chans, Channel_size pos)
 {
-    const Channel_wait& wait = chans[pos];
+    const Channel_wait&     wait{chans[pos]};
+    const Channel_wait_lock lock{wait};
 
-    wait.lock_channel();
-    wait.dequeue(task, pos);
-    wait.unlock_channel();
+    return wait.dequeue(taskp, pos);
 }
 
 
 /*
     Task Future Selector Wait Set
 */
-Channel_size
-Task::Future_selector::Future_set::complete(Task::Handle task, Channel_size chan)
-{
-    const Channel_size i = channels[chan].future();
-    const Future_wait& f = futures[i];
-
-    f.complete(task, channels, chan);
-    if (!f.is_enqueued(task, channels))
-        --nenqueued;
-
-    return i;
-}
-
-
 Channel_size
 Task::Future_selector::Future_set::count_ready(const Future_wait_index& index, const Future_wait_vector& futures, const Channel_wait_vector& chans)
 {
@@ -564,15 +568,15 @@ Task::Future_selector::Future_set::count_ready(const Future_wait_index& index, c
 
 
 Channel_size
-Task::Future_selector::Future_set::dequeue(Task::Handle task)
+Task::Future_selector::Future_set::dequeue(Task::Promise* taskp)
 {
     Channel_size n = 0;
 
     if (nenqueued > 0) {
         if (locks)
-            n = accumulate(index.begin(), index.end(), dequeue_locked(task, futures, channels));
+            n = accumulate(index.begin(), index.end(), 0, dequeue_locked(taskp, futures, channels));
         else
-            n = accumulate(index.begin(), index.end(), dequeue_unlocked(task, futures, channels));
+            n = accumulate(index.begin(), index.end(), 0, dequeue_unlocked(taskp, futures, channels));
 
         nenqueued -= n;
     }
@@ -582,9 +586,9 @@ Task::Future_selector::Future_set::dequeue(Task::Handle task)
 
 
 Channel_size
-Task::Future_selector::Future_set::enqueue(Task::Handle task)
+Task::Future_selector::Future_set::enqueue(Task::Promise* taskp)
 {
-    const auto n = accumulate(index.begin(), index.end(), 0, enqueue(task, futures, channels));
+    const auto n = accumulate(index.begin(), index.end(), 0, enqueue(taskp, futures, channels));
 
     nenqueued += n;
     return n;
@@ -592,9 +596,9 @@ Task::Future_selector::Future_set::enqueue(Task::Handle task)
 
 
 inline Task::Future_selector::Enqueue_not_ready
-Task::Future_selector::Future_set::enqueue(Task::Handle task, const Future_wait_vector& fs, const Channel_wait_fector& cs)
+Task::Future_selector::Future_set::enqueue(Task::Promise* taskp, const Future_wait_vector& fs, const Channel_wait_vector& cs)
 {
-    return Enqueue_not_ready(task, fs, cs);
+    return Enqueue_not_ready(taskp, fs, cs);
 }
 
 
@@ -621,6 +625,19 @@ void
 Task::Future_selector::Future_set::lock_channels()
 {
     locks.acquire(futures, channels, index);
+}
+
+
+Channel_size
+Task::Future_selector::Future_set::notify_ready(Task::Promise* taskp, Channel_size chan)
+{
+    const Channel_size i = channels[chan].future();
+    const Future_wait& f = futures[i];
+
+    if (f.complete(taskp, channels, chan))
+        --nenqueued;
+
+    return i;
 }
 
 
@@ -674,7 +691,7 @@ Task::Future_selector::Future_set::sort(Future_wait_index* indexp, const Future_
 void
 Task::Future_selector::Future_set::unlock_channels()
 {
-    locks.release(futures, channels, index);
+    locks.release();
 }
 
 
@@ -682,9 +699,9 @@ Task::Future_selector::Future_set::unlock_channels()
     Task Future Selector Timer
 */
 inline void
-Task::Future_selector::Timer::cancel(Task::Handle task) const
+Task::Future_selector::Timer::cancel(Task::Promise* taskp) const
 {
-    scheduler.cancel_timer(task);
+    scheduler.cancel_timer(taskp);
     state = cancel_pending;
 }
 
@@ -692,28 +709,14 @@ Task::Future_selector::Timer::cancel(Task::Handle task) const
 inline bool
 Task::Future_selector::Timer::is_active() const
 {
-    switch(state) {
-    case running:
-    case cancel_pending:
-        return true;
-
-    default:
-        return false;
-    }
+    return state != inactive;
 }
 
 
 inline bool
 Task::Future_selector::Timer::is_cancelled() const
 {
-    switch(state) {
-    case cancel_pending:
-    case cancel_complete:
-        return true;
-
-    default:
-        return false;
-    }
+    return state == cancel_pending;
 }
 
 
@@ -727,17 +730,14 @@ Task::Future_selector::Timer::is_running() const
 inline void
 Task::Future_selector::Timer::notify_cancelled() const
 {
-    state = cancel_complete;
+    state = inactive;
 }
 
 
 inline void
 Task::Future_selector::Timer::notify_expired(Time_point /*when*/) const
 {
-    if (state == cancel_pending)
-        state = cancel_complete;
-    else
-        state = expired;
+    state = inactive;
 }
 
 
@@ -752,15 +752,15 @@ Task::Future_selector::is_done(const Future_set& futures, Timer timer)
 
 
 Task::Select_status
-Task::Future_selector::notify_readable(Task::Handle task, Channel_size chan)
+Task::Future_selector::notify_channel_readable(Task::Promise* taskp, Channel_size chan)
 {
-    const Channel_size f = futures.complete(task, chan);
+    const Channel_size f = futures.notify_ready(taskp, chan);
 
     if (quota > 0 && --quota == 0) {
         result = f;
-        futures.dequeue(task);
+        futures.dequeue(taskp);
         if (timer.is_running())
-            timer.cancel(task);
+            timer.cancel(taskp);
     }
 
     return Select_status(*result, is_done(futures, timer));
@@ -768,10 +768,10 @@ Task::Future_selector::notify_readable(Task::Handle task, Channel_size chan)
 
 
 bool
-Task::Future_selector::notify_timeout(Task::Handle task, Time_point time)
+Task::Future_selector::notify_timer_expired(Task::Promise* taskp, Time_point time)
 {
     /*
-        Timer cancellation can race with timer expiration, so ensure the
+        Timer expiration can race with timer cancellation, so ensure the
         timer hasn't already been cancelled before treating this as a
         timeout.
     */
@@ -779,7 +779,7 @@ Task::Future_selector::notify_timeout(Task::Handle task, Time_point time)
         timer.notify_cancelled();
     else {
         timer.notify_expired(time);
-        futures.dequeue(task);
+        futures.dequeue(taskp);
         quota = 0;
     }
 
@@ -788,7 +788,7 @@ Task::Future_selector::notify_timeout(Task::Handle task, Time_point time)
 
 
 bool
-Task::Future_selector::notify_timer_cancel()
+Task::Future_selector::notify_timer_cancelled()
 {
     timer.notify_cancelled();
     return !futures.enqueued();
@@ -885,7 +885,7 @@ Channel_operation::channel() const
 
 
 bool
-Channel_operation::dequeue(Task::Handle task, Channel_size pos) const
+Channel_operation::dequeue(Task::Promise* taskp, Channel_size pos) const
 {
     bool is_dequeued;
 
@@ -894,11 +894,11 @@ Channel_operation::dequeue(Task::Handle task, Channel_size pos) const
 
         switch(kind) {
         case Type::send:
-            is_dequeued = chanp->dequeue_write(task, pos);
+            is_dequeued = chanp->dequeue_write(taskp, pos);
             break;
 
         case Type::receive:
-            is_dequeued = chanp->dequeue_read(task, pos);
+            is_dequeued = chanp->dequeue_read(taskp, pos);
             break;
         }
     }
@@ -908,19 +908,19 @@ Channel_operation::dequeue(Task::Handle task, Channel_size pos) const
 
 
 void
-Channel_operation::enqueue(Task::Handle task, Channel_size pos) const
+Channel_operation::enqueue(Task::Promise* taskp, Channel_size pos) const
 {
     if (chanp) {
         switch(kind) {
         case Type::send:
             if (rvalp)
-                chanp->enqueue_write(task, pos, rvalp);
+                chanp->enqueue_write(taskp, pos, rvalp);
             else
-                chanp->enqueue_write(task, pos, lvalp);
+                chanp->enqueue_write(taskp, pos, lvalp);
             break;
 
         case Type::receive:
-            chanp->enqueue_read(task, pos, lvalp);
+            chanp->enqueue_read(taskp, pos, lvalp);
             break;
         }
     }
@@ -1165,16 +1165,16 @@ Scheduler::Task_queue_array::size() const
     Scheduler Timers Request
 */
 inline
-Scheduler::Timers::Request::Request(Task::Handle h)
-    : taskh{h}
+Scheduler::Timers::Request::Request(Task::Promise* tp)
+    : taskp{tp}
     , duration{}
 {
 }
 
 
 inline
-Scheduler::Timers::Request::Request(Task::Handle h, nanoseconds t)
-    : taskh{h}
+Scheduler::Timers::Request::Request(Task::Promise* tskp, nanoseconds t)
+    : taskp{tskp}
     , duration{t}
 {
 }
@@ -1196,10 +1196,10 @@ Scheduler::Timers::Request::is_start() const
 }
 
 
-inline Task::Handle
+inline Task::Promise*
 Scheduler::Timers::Request::task() const
 {
-    return taskh;
+    return taskp;
 }
 
 
@@ -1235,13 +1235,13 @@ Scheduler::Timers::Alarm_queue::erase(Iterator p)
 
 
 Scheduler::Timers::Alarm_queue::Iterator
-Scheduler::Timers::Alarm_queue::find(Task::Handle task) const
+Scheduler::Timers::Alarm_queue::find(Task::Promise* taskp) const
 {
     const auto first    = alarms.begin();
     const auto last     = alarms.end();
-    const auto p        = find_if(first, last, task_eq(task));
+    const auto p        = find_if(first, last, task_eq(taskp));
 
-    return (p != last && p->task == task) ? p : last;
+    return (p != last && p->taskp == taskp) ? p : last;
 }
 
 
@@ -1387,11 +1387,11 @@ Scheduler::Timers::activate_alarm(Windows_handle timer, const Request& request, 
 
 
 void
-Scheduler::Timers::cancel(Task::Handle task)
+Scheduler::Timers::cancel(Task::Promise* taskp)
 {
     const Lock lock{mutex}; 
 
-    requestq.push(make_cancel(task));
+    requestq.push(make_cancel(taskp));
     handles.signal_request();
 }
 
@@ -1430,43 +1430,43 @@ Scheduler::Timers::make_alarm(const Request& request, Time_point now)
 
 
 inline Scheduler::Timers::Request
-Scheduler::Timers::make_cancel(Task::Handle task)
+Scheduler::Timers::make_cancel(Task::Promise* taskp)
 {
-    return Request(task);
+    return Request(taskp);
 }
 
 
 inline Scheduler::Timers::Request
-Scheduler::Timers::make_start(Task::Handle task, nanoseconds duration)
+Scheduler::Timers::make_start(Task::Promise* taskp, nanoseconds duration)
 {
-    return Request(task, duration);
+    return Request(taskp, duration);
 }
 
 
 inline void
 Scheduler::Timers::notify_cancel(const Alarm& alarm)
 {
-    Task::Handle task = alarm.task;
+    Task::Promise* taskp = alarm.taskp;
 
-    if (task.promise().cancel_timer())
-        scheduler.resume(task);
+    if (taskp->notify_timer_cancelled())
+        scheduler.resume(taskp);
 }
 
 
 void
 Scheduler::Timers::notify_complete(const Alarm& alarm, Time_point now, Lock* lockp)
 {
-    Task::Handle task = alarm.task;
+    Task::Promise* taskp = alarm.taskp;
 
     /*
         If the waiting task has already been awakened, it could be in the
         midst of cancelling the timer.  To avoid a deadly embrace, the current
-        thread unlocks the timers before notifying the waiter that the timer
+        thread unlocks the timers while notifying the waiter that the timer
         has completed.
     */
     lockp->unlock();
-    if (task.promise().complete_timer(now))
-        scheduler.resume(task);
+    if (taskp->notify_timer_expired(now))
+        scheduler.resume(taskp);
     lockp->lock();
 }
 
@@ -1562,11 +1562,11 @@ Scheduler::Timers::set_timer(Windows_handle timer, const Alarm& alarm, Time_poin
 
 
 void
-Scheduler::Timers::start(Task::Handle task, nanoseconds duration)
+Scheduler::Timers::start(Task::Promise* taskp, nanoseconds duration)
 {
     const Lock lock{mutex};
 
-    requestq.push(make_start(task, duration));
+    requestq.push(make_start(taskp, duration));
     handles.signal_request();
 }
 
@@ -1600,15 +1600,16 @@ Scheduler::~Scheduler()
 
 
 void
-Scheduler::cancel_timer(Task::Handle task)
+Scheduler::cancel_timer(Task::Promise* taskp)
 {
-    timers.cancel(task);
+    timers.cancel(taskp);
 }
 
 
 void
-Scheduler::resume(Task::Handle task)
+Scheduler::resume(Task::Promise* taskp)
 {
+    auto task = Task::Handle::from_promise(*taskp);
     ready.push(waiting.release(task));
 }
 
@@ -1635,14 +1636,14 @@ Scheduler::run_tasks(unsigned q)
 
 
 void
-Scheduler::start_timer(Task::Handle task, nanoseconds duration)
+Scheduler::start_timer(Task::Promise* taskp, nanoseconds duration)
 {
-    timers.start(task, duration);
+    timers.start(taskp, duration);
 }
 
 
 void
-Scheduler::submit(Task&& task)
+Scheduler::submit(Task task)
 {
     ready.push(move(task));
 }
