@@ -51,6 +51,9 @@ namespace Isptech   {
 namespace Coroutine {
 
 
+void print(const char*);
+
+
 /*
     Names/Types
 */
@@ -253,9 +256,9 @@ private:
         bool                    is_selected() const;
 
         // Event Processing
-        Select_status   notify_channel_readable(Task::Promise*, Channel_size chan);
-        bool            notify_timer_expired(Task::Promise*, Time_point);
-        bool            notify_timer_cancelled();
+        bool notify_channel_readable(Task::Promise*, Channel_size chan);
+        bool notify_timer_expired(Task::Promise*, Time_point);
+        bool notify_timer_cancelled();
 
     private:
         // Names/Types
@@ -270,7 +273,7 @@ private:
             // Enqueue/Dequeue
             void enqueue(Task::Promise*, Channel_size pos) const;
             bool dequeue(Task::Promise*, Channel_size pos) const;
-            bool is_enqueued(Task::Promise*, Channel_size pos) const;
+            bool is_enqueued() const;
 
             // Selection and Event Handling
             void complete() const;
@@ -279,10 +282,6 @@ private:
             // Observers
             Channel_base*   channel() const;
             Channel_size    future() const;
-
-            // Synchronization
-            void lock_channel() const;
-            void unlock_channel() const;
 
         private:
             // Data
@@ -315,19 +314,15 @@ private:
             // Enqueue/Dequeue
             void enqueue(Task::Promise*, const Channel_wait_vector&) const;
             bool dequeue(Task::Promise*, const Channel_wait_vector&) const;
-            bool is_enqueued(Task::Promise*, const Channel_wait_vector&) const;
+            bool dequeue_unlocked(Task::Promise*, const Channel_wait_vector&) const;
 
             // Selection and Event Handling
-            bool complete(Task::Promise*, const Channel_wait_vector&, Channel_size chan) const;
+            bool complete(Task::Promise*, const Channel_wait_vector&, Channel_size pos) const;
             bool is_ready(const Channel_wait_vector&) const;
 
             // Observers
             Channel_size value() const;
             Channel_size error() const;
-
-            // Synchronization
-            void lock(const Channel_wait_vector&) const;
-            void unlock(const Channel_wait_vector&) const;
 
             // Comparisons
             bool operator==(const Future_wait&) const;
@@ -335,26 +330,13 @@ private:
 
         private:
             // Dequeue
-            static bool dequeue_unlocked(Task::Promise*, const Channel_wait_vector&, Channel_size chan);
+            static bool         dequeue_unlocked(Task::Promise*, const Channel_wait_vector&, Channel_size pos);
+            static Channel_size other(Channel_size pos, Channel_size pos1, Channel_size pos2);
 
             // Data
             bool*           signalp;
             Channel_size    vpos;
             Channel_size    epos;
-        };
-
-        class Future_wait_lock {
-        public:
-            // Construct/Copy/Destroy
-            Future_wait_lock(const Future_wait&, const Channel_wait_vector&);
-            Future_wait_lock(const Future_wait_lock&) = delete;
-            Future_wait_lock& operator=(const Future_wait_lock&) = delete;
-            ~Future_wait_lock();
-
-        private:
-            // Data
-            const Future_wait&          future;
-            const Channel_wait_vector&  channels;
         };
 
         // Names/Types
@@ -403,9 +385,9 @@ private:
             const Channel_wait_vector&  channels;
         };
 
-        struct dequeue_locked {
+        struct Dequeue_locked {
             // Construct/Apply
-            dequeue_locked(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
+            Dequeue_locked(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
             Channel_size operator()(Channel_size n, Channel_size i) const;
 
             // Data
@@ -460,8 +442,9 @@ private:
             static void                     sort(Future_wait_index*, const Future_wait_vector&);
             static void                     remove_duplicates(Future_wait_index*, const Future_wait_vector&);
 
-            // Enqueue
-            static Enqueue_not_ready enqueue(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
+            // Enqueue/Dequeue
+            static Enqueue_not_ready    enqueue(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
+            static Dequeue_locked       dequeue(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
 
             // Completion
             static Channel_size             count_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&);
@@ -512,7 +495,7 @@ private:
         };
 
         // Selection
-        static bool is_done(const Future_set&, Timer);
+        static bool is_ready(const Future_set&, Timer);
 
         // Data
         Future_set              futures;
@@ -549,10 +532,10 @@ public:
         bool                    selected_futures() const;
 
         // Event Processing
-        Select_status notify_operation_complete(Channel_size pos);
-        Select_status notify_channel_readable(Channel_size pos);
-        bool          notify_timer_expired(Time_point);
-        bool          notify_timer_cancelled();
+        Select_status   notify_operation_complete(Channel_size pos);
+        bool            notify_channel_readable(Channel_size pos);
+        bool            notify_timer_expired(Time_point);
+        bool            notify_timer_cancelled();
 
         // Execution
         void    make_ready();
@@ -607,6 +590,11 @@ public:
     virtual void write(const void* valuep) = 0;
     virtual bool is_readable() const = 0;
     virtual void read(void* valuep) = 0;
+
+    /*
+        TODO:  Is there better name than "pos" for the enqueue/dequeue
+        interfaces below (e.g., id, wait(er), read(er), or write(r))?
+    */
 
     // Blocking Send/Receive
     virtual void enqueue_write(Task::Promise*, Channel_size pos, void* valuep) = 0;

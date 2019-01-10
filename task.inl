@@ -95,15 +95,10 @@ Task::Future_selector::Channel_wait::complete() const
 inline bool
 Task::Future_selector::Channel_wait::dequeue(Task::Promise* taskp, Channel_size pos) const
 {
-    bool is_deq = false;
+    if (is_enq && chanp->dequeue_readable_wait(taskp, pos))
+        is_enq = false;
 
-    if (is_enq) {
-        is_deq = chanp->dequeue_readable_wait(taskp, pos);
-        if (is_deq)
-            is_enq = false;
-    }
-
-    return is_deq;
+    return !is_enq;
 }
 
 
@@ -123,7 +118,7 @@ Task::Future_selector::Channel_wait::future() const
 
 
 inline bool
-Task::Future_selector::Channel_wait::is_enqueued(Task::Promise*, Channel_size /*pos*/) const
+Task::Future_selector::Channel_wait::is_enqueued() const
 {
     return is_enq;
 }
@@ -136,22 +131,10 @@ Task::Future_selector::Channel_wait::is_ready() const
 }
 
 
-inline void
-Task::Future_selector::Channel_wait::lock_channel() const
-{
-    chanp->lock();
-}
-
-
-inline void
-Task::Future_selector::Channel_wait::unlock_channel() const
-{
-    chanp->unlock();
-}
-
-
 /*
     Task Future Selector Future Wait
+
+    TODO:  Change vchan/echan to vwait/ewait everywhere appropriate?
 */
 inline
 Task::Future_selector::Future_wait::Future_wait(bool* readyp, Channel_size vchan, Channel_size echan)
@@ -178,27 +161,12 @@ Task::Future_selector::Future_wait::enqueue(Task::Promise* taskp, const Channel_
 
 
 inline bool
-Task::Future_selector::Future_wait::is_enqueued(Task::Promise* taskp, const Channel_wait_vector& chans) const
-{
-    return chans[vpos].is_enqueued(taskp, vpos) || chans[epos].is_enqueued(taskp, vpos);
-}
-
-
-inline bool
 Task::Future_selector::Future_wait::is_ready(const Channel_wait_vector& chans) const
 {
     if (!*signalp && (chans[vpos].is_ready() || chans[epos].is_ready()))
         *signalp = true;
 
     return *signalp;
-}
-
-
-inline void
-Task::Future_selector::Future_wait::lock(const Channel_wait_vector& chans) const
-{
-    chans[vpos].lock_channel();
-    chans[epos].lock_channel();
 }
 
 
@@ -218,14 +186,6 @@ Task::Future_selector::Future_wait::operator< (const Future_wait& other) const
     if (other.vpos < this->vpos) return false;
     if (this->epos < other.epos) return true;
     return false;
-}
-
-
-inline void
-Task::Future_selector::Future_wait::unlock(const Channel_wait_vector& chans) const
-{
-    chans[vpos].unlock_channel();
-    chans[epos].unlock_channel();
 }
 
 
@@ -338,6 +298,7 @@ template<class T>
 bool
 Task::Future_selector::select_all(Task::Promise* taskp, const Future<T>* first, const Future<T>* last, optional<nanoseconds> deadline)
 {
+    using namespace std::literals::chrono_literals;
     const Wait_setup setup{first, last, &futures};
 
     result.reset();
@@ -362,6 +323,7 @@ template<class T>
 bool
 Task::Future_selector::select_any(Task::Promise* taskp, const Future<T>* first, const Future<T>* last, optional<nanoseconds> deadline)
 {
+    using namespace std::literals::chrono_literals;
     const Wait_setup setup{first, last, &futures};
 
     quota = 0;
@@ -412,7 +374,7 @@ Task::Promise::initial_suspend() const
 }
 
 
-inline Task::Select_status
+inline bool
 Task::Promise::notify_channel_readable(Channel_size pos)
 {
     const Lock lock{mutex};
@@ -646,9 +608,7 @@ template<class T>
 void
 Channel<T>::Readable_waiter::notify(Task::Promise* taskp, Channel_size pos)
 {
-    const Task::Select_status selection = taskp->notify_channel_readable(pos);
-
-    if (selection.is_complete())
+    if (taskp->notify_channel_readable(pos))
         scheduler.resume(taskp);
 }
 

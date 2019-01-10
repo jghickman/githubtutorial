@@ -18,6 +18,7 @@
 
 #include "isptech/coroutine/task.hpp"
 #include <cstdint>
+#include <iostream>
 #include <numeric>
 
 #pragma warning(disable: 4073)
@@ -29,6 +30,16 @@
 */
 namespace Isptech   {
 namespace Coroutine {
+
+
+void
+print(const char* s)
+{
+    static std::mutex mtx;
+
+    std::unique_lock<std::mutex> lock(mtx);
+    std::cout << s << std::endl;
+}
 
 
 /*
@@ -315,43 +326,6 @@ Task::Operation_selector::try_select(const Channel_operation* first, const Chann
 
 
 /*
-    Task Future Selector Channel Wait Lock
-*/
-inline
-Task::Future_selector::Channel_wait_lock::Channel_wait_lock(const Channel_wait& cw)
-    : wait{cw}
-{
-    wait.lock_channel();
-}
-
-
-inline 
-Task::Future_selector::Channel_wait_lock::~Channel_wait_lock()
-{
-    wait.unlock_channel();
-}
-
-
-/*
-    Task Future Selector Future Wait Lock
-*/
-inline
-Task::Future_selector::Future_wait_lock::Future_wait_lock(const Future_wait& f, const Channel_wait_vector& cs)
-    : future{f}
-    , channels{cs}
-{
-    future.lock(channels);
-}
-
-
-inline
-Task::Future_selector::Future_wait_lock::~Future_wait_lock()
-{
-    future.unlock(channels);
-}
-
-
-/*
     Task Future Selector Channel Locks
 */
 void
@@ -442,6 +416,123 @@ Task::Future_selector::Channel_locks::unlock_channel(Channel_base* chanp)
 
 
 /*
+    Task Future Selector Future Wait
+*/
+bool
+Task::Future_selector::Future_wait::complete(Task::Promise* taskp, const Channel_wait_vector& waits, Channel_size pos) const
+{
+    *signalp = true;
+    waits[pos].complete();
+    return dequeue_unlocked(taskp, waits, other(pos, vpos, epos));
+}
+
+
+bool
+Task::Future_selector::Future_wait::dequeue(Task::Promise* taskp, const Channel_wait_vector& waits) const
+{
+    const bool is_value_deq = waits[vpos].dequeue(taskp, vpos);
+    const bool is_error_deq = waits[epos].dequeue(taskp, epos);
+
+    return is_value_deq && is_error_deq;
+}
+
+
+bool
+Task::Future_selector::Future_wait::dequeue(Task::Promise* taskp, const Channel_wait_vector& waits) const
+{
+    const auto& v       = waits[vpos];
+    const auto& e       = waits[epos];
+    const bool  v_was   = v.is_enqueued();
+    const bool  e_was   = e.is_enqueued();
+
+    if (v_was) v.dequeue(taskp, vpos);
+    if (e_was) e.dequeue(taskp, epos);
+
+    /*
+        The task was dequeued from the future if it was enqueued on either
+        channel but no longer is.
+    */
+    return (v_was || e_was) && !(v.is_enqueued() || e.is_enqueued());
+}
+
+
+inline bool
+Task::Future_selector::Future_wait::dequeue_unlocked(Task::Promise* taskp, const Channel_wait_vector& waits) const
+{
+    const bool is_value_deq = dequeue_unlocked(taskp, waits, vpos);
+    const bool is_error_deq = dequeue_unlocked(taskp, waits, epos);
+
+    return is_value_deq && is_error_deq;
+}
+
+
+bool
+Task::Future_selector::Future_wait::dequeue_unlocked(Task::Promise* taskp, const Channel_wait_vector& waits, Channel_size pos)
+{
+    bool        is_dequeued = true;
+    const auto& wait = waits[pos];
+
+    if (wait.is_enqueued()) {
+        const Channel_lock lock{wait.channel()};
+        is_dequeued = wait.dequeue(taskp, pos);
+    }
+
+    return is_dequeued;
+}
+
+
+inline Channel_size
+Task::Future_selector::Future_wait::other(Channel_size pos, Channel_size pos1, Channel_size pos2)
+{
+    return pos == pos1 ? pos2 : pos1;
+}
+
+
+/*
+    Task Future Selector Dequeue Locked
+*/
+inline
+Task::Future_selector::Dequeue_locked::Dequeue_locked(Task::Promise* tp, const Future_wait_vector& fs, const Channel_wait_vector& cs)
+    : taskp{tp}
+    , futures{fs}
+    , channels{cs}
+{
+}
+
+
+Channel_size
+Task::Future_selector::Dequeue_locked::operator()(Channel_size n, Channel_size i) const
+{
+    if (futures[i].dequeue(taskp, channels))
+        ++n;
+
+    return n;
+}
+
+
+/*
+    Task Future Selector Dequeue Unlocked
+*/
+inline
+Task::Future_selector::dequeue_unlocked::dequeue_unlocked(Task::Promise* tp, const Future_wait_vector& fs, const Channel_wait_vector& cs)
+    : taskp{tp}
+    , futures{fs}
+    , channels{cs}
+{
+}
+
+
+Channel_size
+Task::Future_selector::dequeue_unlocked::operator()(Channel_size n, Channel_size i) const
+{
+    if (futures[i].dequeue_unlocked(taskp, channels))
+        ++n;
+
+    return n;
+}
+
+
+/*
     Task Future Selector Enqueue Not Ready
 */
 inline
@@ -468,101 +559,13 @@ Task::Future_selector::Enqueue_not_ready::operator()(Channel_size n, Channel_siz
 
 
 /*
-    Task Future Selector Dequeue Locked
-*/
-inline
-Task::Future_selector::dequeue_locked::dequeue_locked(Task::Promise* tp, const Future_wait_vector& fs, const Channel_wait_vector& cs)
-    : taskp{tp}
-    , futures{fs}
-    , channels{cs}
-{
-}
-
-
-Channel_size
-Task::Future_selector::dequeue_locked::operator()(Channel_size n, Channel_size i) const
-{
-    const auto& f = futures[i];
-
-    if (f.dequeue(taskp, channels))
-        ++n;
-
-    return n;
-}
-
-
-/*
-    Task Future Selector Dequeue Unlocked
-*/
-inline
-Task::Future_selector::dequeue_unlocked::dequeue_unlocked(Task::Promise* tp, const Future_wait_vector& fs, const Channel_wait_vector& cs)
-    : taskp{tp}
-    , futures{fs}
-    , channels{cs}
-{
-}
-
-
-Channel_size
-Task::Future_selector::dequeue_unlocked::operator()(Channel_size n, Channel_size i) const
-{
-    const Future_wait&      f = futures[i];
-    const Future_wait_lock  lock{f, channels};
-
-    if (f.dequeue(taskp, channels))
-        ++n;
-
-    return n;
-}
-
-
-/*
-    Task Future Selector Future Wait
-*/
-bool
-Task::Future_selector::Future_wait::complete(Task::Promise* taskp, const Channel_wait_vector& chans, Channel_size pos) const
-{
-    const Channel_size other = (pos == vpos) ? epos : vpos;
-
-    *signalp = true;
-    chans[pos].complete();
-    return dequeue_unlocked(taskp, chans, other);
-}
-
-
-bool
-Task::Future_selector::Future_wait::dequeue(Task::Promise* taskp, const Channel_wait_vector& chans) const
-{
-    bool was_enqueued = false;
-
-    if (chans[vpos].dequeue(taskp, vpos))
-        was_enqueued = true;
-
-    if (chans[epos].dequeue(taskp, epos))
-        was_enqueued = true;
-
-    return was_enqueued && !is_enqueued(taskp, chans);
-}
-
-
-bool
-Task::Future_selector::Future_wait::dequeue_unlocked(Task::Promise* taskp, const Channel_wait_vector& chans, Channel_size pos)
-{
-    const Channel_wait&     wait{chans[pos]};
-    const Channel_wait_lock lock{wait};
-
-    return wait.dequeue(taskp, pos);
-}
-
-
-/*
-    Task Future Selector Wait Set
+    Task Future Selector Future Set
 */
 Channel_size
-Task::Future_selector::Future_set::count_ready(const Future_wait_index& index, const Future_wait_vector& futures, const Channel_wait_vector& chans)
+Task::Future_selector::Future_set::count_ready(const Future_wait_index& index, const Future_wait_vector& fs, const Channel_wait_vector& cs)
 {
     return count_if(index.begin(), index.end(), [&](auto i) {
-        return futures[i].is_ready(chans);
+        return fs[i].is_ready(cs);
     });
 }
 
@@ -574,7 +577,7 @@ Task::Future_selector::Future_set::dequeue(Task::Promise* taskp)
 
     if (nenqueued > 0) {
         if (locks)
-            n = accumulate(index.begin(), index.end(), 0, dequeue_locked(taskp, futures, channels));
+            n = accumulate(index.begin(), index.end(), 0, dequeue(taskp, futures, channels));
         else
             n = accumulate(index.begin(), index.end(), 0, dequeue_unlocked(taskp, futures, channels));
 
@@ -582,6 +585,13 @@ Task::Future_selector::Future_set::dequeue(Task::Promise* taskp)
     }
 
     return n;
+}
+
+
+inline Task::Future_selector::Dequeue_locked
+Task::Future_selector::Future_set::dequeue(Task::Promise* taskp, const Future_wait_vector& fs, const Channel_wait_vector& cs)
+{
+    return Dequeue_locked(taskp, fs, cs);
 }
 
 
@@ -745,15 +755,17 @@ Task::Future_selector::Timer::notify_expired(Time_point /*when*/) const
     Task Future Selector
 */
 inline bool
-Task::Future_selector::is_done(const Future_set& futures, Timer timer)
+Task::Future_selector::is_ready(const Future_set& futures, Timer timer)
 {
     return !(futures.enqueued() || timer.is_active());
 }
 
 
-Task::Select_status
+bool
 Task::Future_selector::notify_channel_readable(Task::Promise* taskp, Channel_size chan)
 {
+    print("enter notify_channel_readable");
+
     const Channel_size f = futures.notify_ready(taskp, chan);
 
     if (quota > 0 && --quota == 0) {
@@ -763,26 +775,42 @@ Task::Future_selector::notify_channel_readable(Task::Promise* taskp, Channel_siz
             timer.cancel(taskp);
     }
 
-    return Select_status(*result, is_done(futures, timer));
+    if (is_ready(futures, timer))
+        print("task is ready");
+    else
+        print("task still waiting");
+
+    print("leaving notify_channel_readable");
+    return is_ready(futures, timer);
 }
 
 
 bool
 Task::Future_selector::notify_timer_expired(Task::Promise* taskp, Time_point time)
 {
+    print("enter notify_timer_expired");
+
     /*
         Timer expiration can race with timer cancellation, so ensure the
         timer hasn't already been cancelled before treating this as a
         timeout.
     */
-    if (timer.is_cancelled())
+    if (timer.is_cancelled()) {
+        print("timer was cancelled");
         timer.notify_cancelled();
-    else {
+    }  else {
+        print("timer has expired");
         timer.notify_expired(time);
         futures.dequeue(taskp);
         quota = 0;
     }
 
+    if (!futures.enqueued())
+        print("task is ready");
+    else
+        print("task still waiting");
+
+    print("leaving notify_timer_expired");
     return !futures.enqueued();
 }
 
@@ -790,7 +818,15 @@ Task::Future_selector::notify_timer_expired(Task::Promise* taskp, Time_point tim
 bool
 Task::Future_selector::notify_timer_cancelled()
 {
+    print("enter notify_timer_cancelled");
     timer.notify_cancelled();
+
+    if (!futures.enqueued())
+        print("task is ready");
+    else
+        print("task still waiting");
+
+    print("leaving notify_timer_cancelled");
     return !futures.enqueued();
 }
 
