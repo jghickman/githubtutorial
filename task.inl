@@ -92,13 +92,11 @@ Task::Future_selector::Channel_wait::complete() const
 }
 
 
-inline bool
+inline void
 Task::Future_selector::Channel_wait::dequeue(Task::Promise* taskp, Channel_size pos) const
 {
     if (is_enq && chanp->dequeue_readable_wait(taskp, pos))
         is_enq = false;
-
-    return !is_enq;
 }
 
 
@@ -296,9 +294,10 @@ Task::Future_selector::is_selected() const
 
 template<class T>
 bool
-Task::Future_selector::select_all(Task::Promise* taskp, const Future<T>* first, const Future<T>* last, optional<nanoseconds> deadline)
+Task::Future_selector::select_all(Task::Promise* taskp, const Future<T>* first, const Future<T>* last, optional<nanoseconds> maxtime)
 {
-    using namespace std::literals::chrono_literals;
+    using std::literals::chrono_literals::operator""ns;
+
     const Wait_setup setup{first, last, &futures};
 
     result.reset();
@@ -306,9 +305,9 @@ Task::Future_selector::select_all(Task::Promise* taskp, const Future<T>* first, 
     if (quota == 0) {
         if (!futures.is_empty())
             result = futures.size(); // all ready
-    } else if (deadline) {
-        if (*deadline > 0ns)
-            timer.start(taskp, *deadline);
+    } else if (maxtime) {
+        if (*maxtime > 0ns)
+            timer.start(taskp, *maxtime);
         else {
             futures.dequeue(taskp);
             quota = 0;
@@ -321,18 +320,19 @@ Task::Future_selector::select_all(Task::Promise* taskp, const Future<T>* first, 
 
 template<class T>
 bool
-Task::Future_selector::select_any(Task::Promise* taskp, const Future<T>* first, const Future<T>* last, optional<nanoseconds> deadline)
+Task::Future_selector::select_any(Task::Promise* taskp, const Future<T>* first, const Future<T>* last, optional<nanoseconds> maxtime)
 {
-    using namespace std::literals::chrono_literals;
+    using std::literals::chrono_literals::operator""ns;
+
     const Wait_setup setup{first, last, &futures};
 
     quota = 0;
     result = futures.select_ready();
     if (!result) {
-        if (!deadline)
+        if (!maxtime)
             futures.enqueue(taskp);
-        else if (*deadline > 0ns && futures.enqueue(taskp))
-            timer.start(taskp, *deadline);
+        else if (*maxtime > 0ns && futures.enqueue(taskp))
+            timer.start(taskp, *maxtime);
 
         if (futures.enqueued())
             quota = 1;
@@ -2145,8 +2145,8 @@ template<class T>
 inline bool
 All_futures_awaitable<T>::await_suspend(Task::Handle taskh)
 {
-    task.promise().wait_all(first, last, time);
     task = taskh;
+    task.promise().wait_all(first, last, time);
     return true;
 }
 

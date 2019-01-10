@@ -272,7 +272,7 @@ private:
     
             // Enqueue/Dequeue
             void enqueue(Task::Promise*, Channel_size pos) const;
-            bool dequeue(Task::Promise*, Channel_size pos) const;
+            void dequeue(Task::Promise*, Channel_size pos) const;
             bool is_enqueued() const;
 
             // Selection and Event Handling
@@ -288,19 +288,6 @@ private:
             Channel_base*   chanp;
             Channel_size    fpos;
             mutable bool    is_enq{false};
-        };
-
-        class Channel_wait_lock {
-        public:
-            // Construct/Copy/Destroy
-            explicit Channel_wait_lock(const Channel_wait&);
-            Channel_wait_lock(const Channel_wait_lock&) = delete;
-            Channel_wait_lock& operator=(const Channel_wait_lock&) = delete;
-            ~Channel_wait_lock();
-
-        private:
-            // Data
-            const Channel_wait& wait;
         };
 
         using Channel_wait_vector = std::vector<Channel_wait>;
@@ -330,8 +317,8 @@ private:
 
         private:
             // Dequeue
-            static bool         dequeue_unlocked(Task::Promise*, const Channel_wait_vector&, Channel_size pos);
-            static Channel_size other(Channel_size pos, Channel_size pos1, Channel_size pos2);
+            static void dequeue_unlocked(Task::Promise*, const Channel_wait&, Channel_size pos);
+            static bool is_enqueued(const Channel_wait&, const Channel_wait&);
 
             // Data
             bool*           signalp;
@@ -374,20 +361,9 @@ private:
             Channel_vector channels;
         };
 
-        struct Enqueue_not_ready {
+        struct dequeue_locked {
             // Construct/Apply
-            Enqueue_not_ready(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
-            Channel_size operator()(Channel_size n, Channel_size i) const;
-
-            // Data
-            Task::Promise*              taskp;
-            const Future_wait_vector&   futures;
-            const Channel_wait_vector&  channels;
-        };
-
-        struct Dequeue_locked {
-            // Construct/Apply
-            Dequeue_locked(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
+            dequeue_locked(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
             Channel_size operator()(Channel_size n, Channel_size i) const;
 
             // Data
@@ -399,6 +375,17 @@ private:
         struct dequeue_unlocked {
             // Construct/Apply
             dequeue_unlocked(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
+            Channel_size operator()(Channel_size n, Channel_size i) const;
+
+            // Data
+            Task::Promise*              taskp;
+            const Future_wait_vector&   futures;
+            const Channel_wait_vector&  channels;
+        };
+
+        struct enqueue_not_ready {
+            // Construct/Apply
+            enqueue_not_ready(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
             Channel_size operator()(Channel_size n, Channel_size i) const;
 
             // Data
@@ -442,10 +429,6 @@ private:
             static void                     sort(Future_wait_index*, const Future_wait_vector&);
             static void                     remove_duplicates(Future_wait_index*, const Future_wait_vector&);
 
-            // Enqueue/Dequeue
-            static Enqueue_not_ready    enqueue(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
-            static Dequeue_locked       dequeue(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
-
             // Completion
             static Channel_size             count_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&);
             static optional<Channel_size>   pick_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
@@ -482,7 +465,7 @@ private:
             bool is_cancelled() const;  // cancellation pending
             bool is_active() const;     // running or cancellation pending
 
-            // Event Handlers
+            // Event Handling
             void notify_expired(Time_point) const;
             void notify_cancelled() const;
 
@@ -499,7 +482,7 @@ private:
 
         // Data
         Future_set              futures;
-        Channel_size            quota; // # currently being waited on
+        Channel_size            quota; // # currently being waiting for
         Timer                   timer;
         optional<Channel_size>  result;
     };
@@ -526,8 +509,8 @@ public:
         Channel_size                    selected_operation() const;
 
         // Future Selection
-        template<class T> void  wait_all(const Future<T>*, const Future<T>*, optional<nanoseconds> deadline=optional<nanoseconds>());
-        template<class T> void  wait_any(const Future<T>*, const Future<T>*, optional<nanoseconds> deadline=optional<nanoseconds>());
+        template<class T> void  wait_all(const Future<T>*, const Future<T>*, optional<nanoseconds> maxtime);
+        template<class T> void  wait_any(const Future<T>*, const Future<T>*, optional<nanoseconds> maxtime);
         optional<Channel_size>  selected_future() const;
         bool                    selected_futures() const;
 
@@ -1264,10 +1247,10 @@ public:
 
 private:
     // Data
-    const Future<T>*    first;
-    const Future<T>*    last;
-    nanoseconds         time;
-    Task::Handle        task;
+    const Future<T>*        first;
+    const Future<T>*        last;
+    optional<nanoseconds>   time;
+    Task::Handle            task;
 };
 
 
