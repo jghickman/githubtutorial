@@ -415,7 +415,7 @@ private:
 
             // Selection and Event Handling
             optional<Channel_size>  select_ready();
-            Channel_size            notify_ready(Task::Promise*, Channel_size chan);
+            Channel_size            notify_readable(Task::Promise*, Channel_size chan);
 
             // Synchronization
             void lock_channels();
@@ -1301,8 +1301,8 @@ template<class T> All_futures_awaitable<T>                  wait_all(const Futur
 class Timer : boost::totally_ordered<Timer> {
 public:
     // Construct/Copy/Destroy
-    Timer();
-    explicit Timer(nanoseconds);
+    Timer() = default;
+    friend void make_timer(nanoseconds);
     Timer(const Timer&) = delete;
     Timer& operator=(const Timer&) = delete;
     Timer(Timer&&);
@@ -1310,13 +1310,16 @@ public:
     ~Timer();
 
     // Modifiers
-    bool stop();
-    bool reset(nanoseconds);
+    bool stop() const;
+    bool reset(nanoseconds) const;
 
     // Channel
     const Time_receiver& channel() const;
 
 private:
+    // Construct
+    explicit Timer(nanoseconds);
+
     // Data
     Time_receiver chan;
 };
@@ -1342,9 +1345,20 @@ public:
     void submit(Task);
     void resume(Task::Promise*);
 
-    // Timers
-    void start_timer(Task::Promise*, nanoseconds duration);
-    void cancel_timer(Task::Promise*);
+    /*
+        Timers
+
+        TODO:  These functions are used by the Future wait APIs but don't
+        seem appropriate as a public interface, and making them private would
+        require circular dependencies beween the Task and the Scheduler. If
+        it's possible to find a better overall design which decouples basic
+        Task functionality (resume/suspend) from components requiring
+        synchronization (e.g., channel I/O, channel operation selection,
+        future waiting), that could be a big help.
+    */
+    void    start_timer(Task::Promise*, nanoseconds duration);
+    void    cancel_timer(Task::Promise*);
+    Timer   make_timer(nanoseconds duration);
 
 private:
     // Names/Types
@@ -1591,7 +1605,7 @@ private:
         static void     remove_alarm(Windows_handle timer, Alarm_queue*, Alarm_queue::Iterator, Time_point now);
         static void     cancel_alarm(Windows_handle timer, const Request&, Alarm_queue*, Time_point now);
         static void     notify_cancel(const Alarm&);
-
+ 
         // Alarm Processing
         static void process_alarms(Windows_handle timer, Alarm_queue*, Lock*);
         static void notify_complete(const Alarm&, Time_point now, Lock*);

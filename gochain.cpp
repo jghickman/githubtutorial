@@ -1,7 +1,6 @@
 
 #include "stdafx.h"
-#include "isptech/concurrency/task.hpp"
-#include "boost/variant.hpp"
+#include "isptech/coroutine/task.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
@@ -10,7 +9,7 @@
 
 
 
-using namespace Isptech::Concurrency;
+using namespace Isptech::Coroutine;
 using namespace std;
 
 
@@ -153,22 +152,20 @@ add_one(int n)
 int
 two()
 {
-    Sleep(1*seconds);
+    Sleep(3*seconds);
     return 2;
 }
 
 int
 four()
 {
-    Sleep(1*seconds);
+    Sleep(3*seconds);
     return 4;
 }
 
 
 const int done = 0;
 const int error = -1;
-
-using namespace std::literals::chrono_literals;
 
 
 Task
@@ -180,45 +177,48 @@ wait_all_task(int n, Send_channel<int> results)
     fs.push_back(async(two));
     fs.push_back(async(four));
 
-#if 0
     if (!co_await wait_all(fs))
         co_await results.send(error);
     else {
-#endif
-        co_await wait_all(fs);
         int r = done;
-        for (int i = 0; i < fs.size() && r != error; ++i) {
+
+        for (unsigned i = 0; i < fs.size() && r != error; ++i) {
             try {
                 r = co_await fs[i].get();
-            } catch (...) {
+            }
+            catch (...) {
                 r = error;
             }
 
             co_await results.send(r);
         }
-#if 0
-}
-#endif
 
-    co_await results.send(done);
+        co_await results.send(done);
+    }
+
 }
+
+
+using namespace std::literals::chrono_literals;
+
 
 
 Task
 wait_any_task(int n, Send_channel<int> results)
 {
+    using namespace std::literals::chrono_literals;
     using Future_vector = std::vector<Future<int>>;
     Future_vector fs;
 
     fs.push_back(async(two));
     fs.push_back(async(four));
 
-    const Channel_size  i = co_await wait_any(fs, 0s);
-    int                 r = error;
+    const optional<Channel_size>    i = co_await wait_any(fs, 4s);
+    int                             r = error;
 
-    if (i != wait_fail) {
+    if (i) {
         try {
-            r = co_await fs[i].get();
+            r = co_await fs[*i].get();
         } catch (...) {
             r = error;
         }
@@ -235,14 +235,15 @@ main(int argc, char* argv[])
     
     Channel<int> results = make_channel<int>(1);
 
-    start(wait_any_task, 0, results);
+    start(wait_all_task, 0, results);
 
-    cout << "results = {" << blocking_receive(results);
+    cout << "results = {";
 
-    int n = blocking_receive(results);
-    while (n != done && n != error) {
-        cout << ", " << n;
-        n = blocking_receive(results);
+    for (int x = blocking_receive(results), n=0; x != done; x = blocking_receive(results), n++) {
+        if (n > 0) cout << ", ";
+        cout << x;
+        if (x == error)
+            break;
     }
 
     cout << '}' << endl;

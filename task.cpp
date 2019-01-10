@@ -32,16 +32,6 @@ namespace Isptech   {
 namespace Coroutine {
 
 
-void
-print(const char* s)
-{
-    static std::mutex mtx;
-
-    std::unique_lock<std::mutex> lock(mtx);
-    std::cout << s << std::endl;
-}
-
-
 /*
     Names/Types
 */
@@ -50,6 +40,7 @@ using std::count_if;
 using std::find_if;
 using std::iota;
 using std::move;
+using std::next;
 using std::sort;
 using std::try_to_lock;
 using std::unique;
@@ -614,7 +605,7 @@ Task::Future_selector::Future_set::lock_channels()
 
 
 Channel_size
-Task::Future_selector::Future_set::notify_ready(Task::Promise* taskp, Channel_size chan)
+Task::Future_selector::Future_set::notify_readable(Task::Promise* taskp, Channel_size chan)
 {
     const Channel_size i = channels[chan].future();
     const Future_wait& f = futures[i];
@@ -739,7 +730,7 @@ Task::Future_selector::is_ready(const Future_set& futures, Timer timer)
 bool
 Task::Future_selector::notify_channel_readable(Task::Promise* taskp, Channel_size chan)
 {
-    const Channel_size f = futures.notify_ready(taskp, chan);
+    const Channel_size f = futures.notify_readable(taskp, chan);
 
     if (quota > 0 && --quota == 0) {
         result = f;
@@ -756,13 +747,13 @@ bool
 Task::Future_selector::notify_timer_expired(Task::Promise* taskp, Time_point time)
 {
     /*
-        Timer expiration can race with timer cancellation, so ensure the
-        timer hasn't already been cancelled before treating this as a
-        timeout.
+        Timer expiration can race with timer cancellation, so treat the
+        expiration as a cancellation event if timer cancellation was
+        requested.
     */
-    if (timer.is_cancelled()) {
+    if (timer.is_cancelled())
         timer.notify_cancelled();
-    }  else {
+    else {
         timer.notify_expired(time);
         futures.dequeue(taskp);
         quota = 0;
@@ -1496,7 +1487,7 @@ Scheduler::Timers::remove_alarm(Windows_handle timer, Alarm_queue* queuep, Alarm
 {
     // If the alarm is the next to fire, update the timer.
     if (p == queuep->begin()) {
-        const auto nextp = std::next(p);
+        const auto nextp = next(p);
         if (nextp == queuep->end())
             cancel_timer(timer);
         else if (*p < *nextp)
