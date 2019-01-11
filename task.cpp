@@ -1138,6 +1138,24 @@ Scheduler::Task_queue_array::size() const
 
 
 /*
+    Scheduler Temporary Unlock
+*/
+inline
+Scheduler::Temporary_unlock::Temporary_unlock(Lock* lp)
+    : lockp{lp}
+{
+    lockp->unlock();
+}
+
+
+inline
+Scheduler::Temporary_unlock::~Temporary_unlock()
+{
+    lockp->lock();
+}
+
+
+/*
     Scheduler Timers Request
 */
 inline
@@ -1328,9 +1346,9 @@ Scheduler::Timers::Windows_handles::timer() const
 inline int
 Scheduler::Timers::Windows_handles::wait_any(Lock* lockp) const 
 {
-    lockp->unlock();
-    const DWORD n = WaitForMultipleObjects(count, hs, FALSE, INFINITE);
-    lockp->lock();
+    const Temporary_unlock  unlock{lockp};
+    const DWORD             n = WaitForMultipleObjects(count, hs, FALSE, INFINITE);
+
     return static_cast<int>(n - WAIT_OBJECT_0);
 }
 
@@ -1373,13 +1391,14 @@ Scheduler::Timers::cancel(Task::Promise* taskp)
 
 
 void
-Scheduler::Timers::cancel_alarm(Windows_handle timer, const Request& request, Alarm_queue* queuep, Time_point now)
+Scheduler::Timers::cancel_alarm(Windows_handle timer, const Request& request, Alarm_queue* queuep, Time_point now, Lock* lockp)
 {
     const auto alarmp = queuep->find(request.task());
 
     if (alarmp != queuep->end()) {
-        notify_cancel(*alarmp);
+        const Alarm alarm = *alarmp;
         remove_alarm(timer, queuep, alarmp, now);
+        notify_cancel(alarm, lockp);
     }
 }
 
@@ -1388,6 +1407,14 @@ inline void
 Scheduler::Timers::cancel_timer(Windows_handle handle)
 {
     CancelWaitableTimer(handle);
+}
+
+
+void
+Scheduler::Timers::dequeue_expired(Alarm_queue* qp, Time_point now, Lock* lockp)
+{
+    while (!qp->is_empty() && is_expired(qp->front(), now))
+        notify_expired(qp->pop(), now, lockp);
 }
 
 
@@ -1419,31 +1446,75 @@ Scheduler::Timers::make_start(Task::Promise* taskp, nanoseconds duration)
 }
 
 
-inline void
-Scheduler::Timers::notify_cancel(const Alarm& alarm)
+inline Scheduler::Timers::Request
+Scheduler::Timers::make_start(const Time_channel& chan, nanoseconds duration)
 {
-    Task::Promise* taskp = alarm.taskp;
-
-    if (taskp->notify_timer_cancelled())
-        scheduler.resume(taskp);
+    return Request(chan, duration);
 }
 
 
 void
-Scheduler::Timers::notify_complete(const Alarm& alarm, Time_point now, Lock* lockp)
+Scheduler::Timers::start(const Time_channel& chan, nanoseconds duration)
 {
-    Task::Promise* taskp = alarm.taskp;
+    const Lock lock{mutex};
 
+    requestq.push(make_start(chan, duration));
+    handles.signal_request();
+}
+
+
+inline void
+Scheduler::Timers::notify_cancel(const Alarm& alarm, Lock* lockp)
+{
+    if (notify_timer_cancelled(alarm.taskp, lockp))
+        scheduler.resume(alarm.taskp);
+}
+
+
+void
+Scheduler::Timers::notify_expired(Task::Promise* taskp, Time_point now, Lock* lockp)
+{
+    if (notify_timer_expired(taskp, now, lockp))
+        scheduler.resume(taskp);
+}
+
+
+inline void
+Scheduler::Timers::notify_expired(const Time_channel& chan, Time_point now)
+{
+    chan.try_send(now);
+}
+
+
+inline void
+Scheduler::Timers::notify_expired(const Alarm& alarm, Time_point now, Lock* lockp)
+{
+    if (alarm.taskp)
+        notify_expired(alarm.taskp, now, lockp);
+    else
+        notify_expired(alarm.channel, now);
+}
+
+
+inline bool
+Scheduler::Timers::notify_timer_cancelled(Task::Promise* taskp, Lock* lockp)
+{
+    const Temporary_unlock unlock{lockp};
+    return taskp->notify_timer_cancelled();
+}
+
+
+inline bool
+Scheduler::Timers::notify_timer_expired(Task::Promise* taskp, Time_point now, Lock* lockp)
+{
     /*
         If the waiting task has already been awakened, it could be in the
         midst of cancelling the timer.  To avoid a deadly embrace, the current
         thread unlocks the timers while notifying the waiter that the timer
-        has completed.
+        has expired.
     */
-    lockp->unlock();
-    if (taskp->notify_timer_expired(now))
-        scheduler.resume(taskp);
-    lockp->lock();
+    const Temporary_unlock unlock{lockp};
+    return taskp->notify_timer_expired(now);
 }
 
 
@@ -1452,31 +1523,29 @@ Scheduler::Timers::process_alarms(Windows_handle timer, Alarm_queue* queuep, Loc
 {
     const Time_point now = Clock::now();
 
-    while (!queuep->is_empty() && is_expired(queuep->front(), now))
-        notify_complete(queuep->pop(), now, lockp);
-
+    dequeue_expired(queuep, now, lockp);
     if (!queuep->is_empty())
         set_timer(timer, queuep->front(), now);
 }
 
 
 void
-Scheduler::Timers::process_request(Windows_handle timer, const Request& request, Alarm_queue* queuep, Time_point now)
+Scheduler::Timers::process_request(Windows_handle timer, const Request& request, Alarm_queue* queuep, Time_point now, Lock* lockp)
 {
     if (request.is_start())
         activate_alarm(timer, request, queuep, now);
     else if (request.is_cancel())
-        cancel_alarm(timer, request, queuep, now);
+        cancel_alarm(timer, request, queuep, now, lockp);
 }
 
 
 void
-Scheduler::Timers::process_requests(Windows_handle timer, Request_queue* requestqp, Alarm_queue* queuep)
+Scheduler::Timers::process_requests(Windows_handle timer, Request_queue* requestqp, Alarm_queue* queuep, Lock* lockp)
 {
     const Time_point now = Clock::now();
 
     while (!requestqp->empty()) {
-        process_request(timer, requestqp->front(), queuep, now);
+        process_request(timer, requestqp->front(), queuep, now, lockp);
         requestqp->pop();
     }
 }
@@ -1507,7 +1576,7 @@ Scheduler::Timers::run_thread()
     while (!done) {
         switch(handles.wait_any(&lock)) {
         case request_handle:
-            process_requests(handles.timer(), &requestq, &alarmq);
+            process_requests(handles.timer(), &requestq, &alarmq, &lock);
             break;
 
         case timer_handle:

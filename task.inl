@@ -569,6 +569,26 @@ swap(Task& x, Task& y)
 
 
 /*
+    Channel Temporary Lock
+*/
+template<class T>
+inline
+Channel<T>::Temporary_unlock::Temporary_unlock(Mutex* mp)
+    : mutexp{mp}
+{
+    mutexp->unlock();
+}
+
+
+template<class T>
+inline
+Channel<T>::Temporary_unlock::~Temporary_unlock()
+{
+    mutexp->lock();
+}
+
+
+/*
     Channel Readable Waiter
 */
 template<class T>
@@ -592,24 +612,23 @@ template<class T>
 inline void
 Channel<T>::Readable_waiter::notify(Mutex* mutexp) const
 {
+    if (notify_channel_readable(taskp, chanpos, mutexp))
+        scheduler.resume(taskp);
+}
+
+
+template<class T>
+bool
+Channel<T>::Readable_waiter::notify_channel_readable(Task::Promise* taskp, Channel_size pos, Mutex* mutexp)
+{
     /*
         If the waiting task has already been awakened, it could be in the
         midst of dequeing itself from this channel.  To avoid a deadly
         embrace, the current thread unlocks the channel while notifying
         the task that it has become readable.
     */
-    mutexp->unlock();
-    notify(taskp, chanpos);
-    mutexp->lock();
-}
-
-
-template<class T>
-void
-Channel<T>::Readable_waiter::notify(Task::Promise* taskp, Channel_size pos)
-{
-    if (taskp->notify_channel_readable(pos))
-        scheduler.resume(taskp);
+    const Temporary_unlock unlock{mutexp};
+    return taskp->notify_channel_readable(pos);
 }
 
 
@@ -853,16 +872,8 @@ Channel<T>::Receiver::dequeue(U* sendbufp, Mutex* mutexp) const
     bool is_dequeued = true;
 
     if (taskp) {
-        /*
-            If the receiving task already been awakened, it could be in the
-            midst of dequeing itself from this channel.  To avoid a deadly
-            embrace, the current thread unlocks the channel while notifying
-            the receiver that the operation can be completed.
-        */
-        mutexp->unlock();
-        if (!select(taskp, oper, valp, sendbufp))
+        if (!select(taskp, oper, valp, sendbufp, mutexp))
             is_dequeued = false;
-        mutexp->lock();
     } else {
         *valp = move(*sendbufp);
         readyp->notify_one();
@@ -883,11 +894,11 @@ Channel<T>::Receiver::operation() const
 template<class T>
 template<class U>
 bool
-Channel<T>::Receiver::select(Task::Promise* taskp, Channel_size pos, T* valp, U* sendbufp)
+Channel<T>::Receiver::select(Task::Promise* taskp, Channel_size pos, T* valp, U* sendbufp, Mutex* mutexp)
 {
     using std::move;
 
-    const Task::Select_status   selection   = taskp->notify_operation_complete(pos);
+    const Task::Select_status   selection   = notify_operation_complete(taskp, pos, mutexp);
     bool                        is_selected = false;
 
     if (selection.position() == pos) {
@@ -973,16 +984,8 @@ Channel<T>::Sender::dequeue(U* recvbufp, Mutex* mutexp) const
     bool is_dequeued = true;
 
     if (taskp) {
-        /*
-            If the sending task already been awakened, it could be in the
-            midst of dequeing itself from this channel.  To avoid a deadly
-            embrace, the current thread unlocks the channel while notifying
-            the sender that the operation can be completed.
-        */
-        mutexp->unlock();
-        if (!select(taskp, oper, lvalp, rvalp, recvbufp))
+        if (!select(taskp, oper, lvalp, rvalp, recvbufp, mutexp))
             is_dequeued = false;
-        mutexp->lock();
     } else {
         move(lvalp, rvalp, recvbufp);
         readyp->notify_one();
@@ -1027,9 +1030,9 @@ Channel<T>::Sender::operation() const
 template<class T>
 template<class U>
 bool
-Channel<T>::Sender::select(Task::Promise* taskp, Channel_size pos, T* lvalp, const T* rvalp, U* recvbufp)
+Channel<T>::Sender::select(Task::Promise* taskp, Channel_size pos, T* lvalp, const T* rvalp, U* recvbufp, Mutex* mutexp)
 {
-    const Task::Select_status   select      = taskp->notify_operation_complete(pos);
+    const Task::Select_status   select      = notify_operation_complete(taskp, pos, mutexp);
     bool                        is_selected = false;
 
     if (select.position() == pos) {
@@ -1108,6 +1111,21 @@ inline Channel_operation
 Channel<T>::make_send(T&& value) const
 {
     return pimpl->make_send(&value);
+}
+
+
+template<class T>
+inline Task::Select_status
+Channel<T>::notify_operation_complete(Task::Promise* taskp, Channel_size pos, Mutex* mutexp)
+{
+    /*
+        If the waiting task already been awakened, it could be in the
+        midst of dequeing itself from this channel.  To avoid a deadly
+        embrace, the current thread unlocks the channel while notifying
+        the receiver that the operation can be completed.
+    */
+    const Temporary_unlock unlock{mutexp};
+    return taskp->notify_operation_complete(pos);
 }
 
 
@@ -1271,7 +1289,7 @@ Channel<T>::Impl::dequeue(Receiver_queue* qp, U* sendbufp, Mutex* mutexp)
 {
     bool is_sent = false;
 
-    while (!(is_sent || qp->is_empty())) {
+    while (!(qp->is_empty() || is_sent)) {
         const Receiver receiver = qp->pop();
         is_sent = receiver.dequeue(sendbufp, mutexp);
     }
@@ -1287,7 +1305,7 @@ Channel<T>::Impl::dequeue(Sender_queue* qp, U* recvbufp, Mutex* mutexp)
 {
     bool is_received = false;
 
-    while (!(is_received || qp->is_empty())) {
+    while (!(qp->is_empty() || is_received)) {
         const Sender sender = qp->pop();
         is_received = sender.dequeue(recvbufp, mutexp);
     }
