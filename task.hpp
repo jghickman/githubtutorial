@@ -1368,16 +1368,23 @@ public:
     /*
         Timers
 
-        TODO:  These functions are used by the Future wait APIs but don't
-        seem appropriate as a public interface, and making them private would
-        probably circular dependencies beween the Task and the Scheduler. If
-        it's possible to find a better overall design which decouples basic
-        Task functionality (resume/suspend) from components requiring
-        synchronization (e.g., channel I/O, channel operation selection,
-        future waiting), that could be a big help.
+        TODO:  Resource allocation errors related to timer construction are
+        not returned to callers of start_timer() and make_timer() in the
+        current implementation.  This could be fixed by allocating those
+        resources eagerly and sending them to the timer thread in the request
+        queue.
 
-        Should probably evaluate the feasability of making them private as a
-        temporary solution.
+        TODO:  Get rid of explicit locking by moving it into the request
+        queue.
+
+        TODO:  The timer functions don't feel appropriate as a public
+        interface on the , and making them private would might create circular
+        dependencies beween the Task and the Scheduler (although this should
+        probably be evaluated as temporary solution). If it's possible to
+        find a better overall design (e.g., perhaps using task-specific data?)
+        which decouples basic Task  functionality (resume/suspend) from
+        components requiring  synchronization (e.g., channel I/O, future
+        waiting), that could be a big help.
     */
     void start_timer(Task::Promise*, nanoseconds duration);
     void cancel_timer(Task::Promise*);
@@ -1664,19 +1671,19 @@ private:
         static Request  make_cancel(Task::Promise*);
         static Request  make_start(const Time_channel& chan, nanoseconds duration);
         static Request  make_reset(const Time_channel& chan, nanoseconds duration);
-        static void     process_requests(Windows_handle timer, Request_queue*, Alarm_queue*, Lock*);
-        static void     process_request(Windows_handle timer, const Request&, Alarm_queue*, Time_point now, Lock*);
+        static void     process(Request_queue*, Alarm_queue*, Windows_handle timer, Lock*);
+        static void     process(const Request&, Alarm_queue*, Windows_handle timer, Time_point now, Lock*);
 
         // Alarm Activation/Cancellation
         static Alarm    make_alarm(const Request&, Time_point now);
-        static void     activate_alarm(Windows_handle timer, const Request&, Alarm_queue*, Time_point now);
-        static void     remove_alarm(Windows_handle timer, Alarm_queue*, Alarm_queue::Iterator, Time_point now);
-        static void     cancel_alarm(Windows_handle timer, const Request&, Alarm_queue*, Time_point now, Lock*);
+        static void     activate(const Alarm&, Alarm_queue*, Time_point now, Windows_handle timer);
+        static void     remove_alarm(Alarm_queue*, Alarm_queue::Iterator, Time_point now, Windows_handle timer);
+        static void     cancel_alarm(const Request&, Alarm_queue*, Time_point now, Windows_handle timer, Lock*);
         static void     notify_cancel(const Alarm&, Lock*);
  
         // Alarm Processing
-        static void process_alarms(Windows_handle timer, Alarm_queue*, Lock*);
-        static void dequeue_expired(Alarm_queue*, Time_point now, Lock*);
+        static void process(Alarm_queue*, Windows_handle timer, Lock*);
+        static void process_expired(Alarm_queue*, Time_point now, Windows_handle timer, Lock*);
         static void notify_expired(const Alarm&, Time_point now, Lock*);
         static void notify_expired(Task::Promise*, Time_point now, Lock*);
         static void notify_expired(const Time_channel&, Time_point now);
@@ -1685,8 +1692,12 @@ private:
         static bool is_expired(const Alarm&, Time_point now);
 
         // Timer Functions
-        static void set_timer(Windows_handle timer, const Alarm&, Time_point now);
+        void        start_timer(const Time_channel&, nanoseconds duration);
+        bool        stop_timer(const Time_channel&);
+        bool        reset_timer(const Time_channel&);
+        static void set_timer(Windows_handle timer, nanoseconds duration);
         static void cancel_timer(Windows_handle timer);
+
 
         // Data
         Request_queue   requestq;

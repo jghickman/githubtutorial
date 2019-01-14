@@ -1370,10 +1370,8 @@ Scheduler::Timers::~Timers()
 
 
 void
-Scheduler::Timers::activate_alarm(Windows_handle timer, const Request& request, Alarm_queue* queuep, Time_point now)
+Scheduler::Timers::activate(const Alarm& alarm, Alarm_queue* queuep, Time_point now, Windows_handle timer)
 {
-    const Alarm alarm = make_alarm(request, now);
-
     queuep->push(alarm);
     if (alarm == queuep->front())
         set_timer(timer, alarm, now);
@@ -1391,13 +1389,13 @@ Scheduler::Timers::cancel(Task::Promise* taskp)
 
 
 void
-Scheduler::Timers::cancel_alarm(Windows_handle timer, const Request& request, Alarm_queue* queuep, Time_point now, Lock* lockp)
+Scheduler::Timers::cancel_alarm(const Request& request, Alarm_queue* queuep, Time_point now, Windows_handle timer, Lock* lockp)
 {
     const auto alarmp = queuep->find(request.task());
 
     if (alarmp != queuep->end()) {
         const Alarm alarm = *alarmp;
-        remove_alarm(timer, queuep, alarmp, now);
+        remove_alarm(queuep, alarmp, now, timer);
         notify_cancel(alarm, lockp);
     }
 }
@@ -1407,14 +1405,6 @@ inline void
 Scheduler::Timers::cancel_timer(Windows_handle handle)
 {
     CancelWaitableTimer(handle);
-}
-
-
-void
-Scheduler::Timers::dequeue_expired(Alarm_queue* qp, Time_point now, Lock* lockp)
-{
-    while (!qp->is_empty() && is_expired(qp->front(), now))
-        notify_expired(qp->pop(), now, lockp);
 }
 
 
@@ -1428,7 +1418,10 @@ Scheduler::Timers::is_expired(const Alarm& alarm, Time_point now)
 inline Scheduler::Timers::Alarm
 Scheduler::Timers::make_alarm(const Request& request, Time_point now)
 {
-    return Alarm(request.task(), now + request.time());
+    if (request.task())
+        return Alarm(request.task(), now + duration);
+    else
+        return Alarm(request.channel(), now + duration);
 }
 
 
@@ -1450,16 +1443,6 @@ inline Scheduler::Timers::Request
 Scheduler::Timers::make_start(const Time_channel& chan, nanoseconds duration)
 {
     return Request(chan, duration);
-}
-
-
-void
-Scheduler::Timers::start(const Time_channel& chan, nanoseconds duration)
-{
-    const Lock lock{mutex};
-
-    requestq.push(make_start(chan, duration));
-    handles.signal_request();
 }
 
 
@@ -1519,40 +1502,48 @@ Scheduler::Timers::notify_timer_expired(Task::Promise* taskp, Time_point now, Lo
 
 
 void
-Scheduler::Timers::process_alarms(Windows_handle timer, Alarm_queue* queuep, Lock* lockp)
+Scheduler::Timers::process(Alarm_queue* queuep, Windows_handle timer, Lock* lockp)
 {
     const Time_point now = Clock::now();
 
-    dequeue_expired(queuep, now, lockp);
+    process_expired(queuep, now, lockp);
     if (!queuep->is_empty())
         set_timer(timer, queuep->front(), now);
 }
 
 
 void
-Scheduler::Timers::process_request(Windows_handle timer, const Request& request, Alarm_queue* queuep, Time_point now, Lock* lockp)
+Scheduler::Timers::process(const Request& request, Alarm_queue* queuep, Windows_handle timer, Time_point now, Lock* lockp)
 {
     if (request.is_start())
-        activate_alarm(timer, request, queuep, now);
+        activate_alarm(request, queuep, now, timer);
     else if (request.is_cancel())
-        cancel_alarm(timer, request, queuep, now, lockp);
+        cancel_alarm(request, queuep, timer, now, lockp);
 }
 
 
 void
-Scheduler::Timers::process_requests(Windows_handle timer, Request_queue* requestqp, Alarm_queue* queuep, Lock* lockp)
+Scheduler::Timers::process(Request_queue* requestqp, Alarm_queue* queuep, Windows_handle timer, Lock* lockp)
 {
     const Time_point now = Clock::now();
 
     while (!requestqp->empty()) {
-        process_request(timer, requestqp->front(), queuep, now, lockp);
+        process(requestqp->front(), queuep, now, timer, lockp);
         requestqp->pop();
     }
 }
 
 
 void
-Scheduler::Timers::remove_alarm(Windows_handle timer, Alarm_queue* queuep, Alarm_queue::Iterator p, Time_point now)
+Scheduler::Timers::process_expired(Alarm_queue* qp, Time_point now, Windows_handle timer, Lock* lockp)
+{
+    while (!qp->is_empty() && is_expired(qp->front(), now))
+        notify_expired(qp->pop(), now, lockp);
+}
+
+
+void
+Scheduler::Timers::remove_alarm(Alarm_queue* queuep, Alarm_queue::Iterator p, Time_point now, Windows_handle timer)
 {
     // If the alarm is the next to fire, update the timer.
     if (p == queuep->begin()) {
@@ -1567,6 +1558,16 @@ Scheduler::Timers::remove_alarm(Windows_handle timer, Alarm_queue* queuep, Alarm
 }
 
 
+bool
+Scheduler::Timers::reset(const Time_channel& chan, nanoseconds duration)
+{
+    const Lock lock{mutex};
+
+    requestq.push(make_start(chan, duration));
+    handles.signal_request();
+}
+
+
 void
 Scheduler::Timers::run_thread()
 {
@@ -1576,11 +1577,11 @@ Scheduler::Timers::run_thread()
     while (!done) {
         switch(handles.wait_any(&lock)) {
         case request_handle:
-            process_requests(handles.timer(), &requestq, &alarmq, &lock);
+            process(&requestq, &alarmq, handles.timer(), &lock);
             break;
 
         case timer_handle:
-            process_alarms(handles.timer(), &alarmq, &lock);
+            process_expired(&alarmq, Clock::now(), handles.timer(), &lock);
             break;
 
         default:
@@ -1592,12 +1593,11 @@ Scheduler::Timers::run_thread()
 
 
 void
-Scheduler::Timers::set_timer(Windows_handle timer, const Alarm& alarm, Time_point now)
+Scheduler::Timers::set_timer(Windows_handle timer, nanoseconds duration)
 {
     static const int nanosecs_per_tick = 100;
 
-    const nanoseconds   dt      =  alarm.expiry - now;
-    const std::int64_t  timerdt = -(dt.count() / nanosecs_per_tick);
+    const std::int64_t  timerdt = -(duration.count() / nanosecs_per_tick);
     LARGE_INTEGER       timebuf;
 
     timebuf.LowPart = static_cast<DWORD>(timerdt & 0xFFFFFFFF);
@@ -1609,9 +1609,20 @@ Scheduler::Timers::set_timer(Windows_handle timer, const Alarm& alarm, Time_poin
 void
 Scheduler::Timers::start(Task::Promise* taskp, nanoseconds duration)
 {
+    const Lock  lock{mutex};
+    const auto  now{Clock::now()};
+    const Alarm alarm{taskp, now + duration};
+
+    activate(alarm, queuep, now, timer);
+}
+
+
+void
+Scheduler::Timers::start(const Time_channel& chan, nanoseconds duration)
+{
     const Lock lock{mutex};
 
-    requestq.push(make_start(taskp, duration));
+    requestq.push(make_start(chan, duration));
     handles.signal_request();
 }
 
