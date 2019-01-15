@@ -258,7 +258,7 @@ private:
         // Event Processing
         bool notify_channel_readable(Task::Promise*, Channel_size chan);
         bool notify_timer_expired(Task::Promise*, Time_point);
-        bool notify_timer_cancelled();
+        bool notify_timer_canceled();
 
     private:
         // Names/Types
@@ -462,12 +462,12 @@ private:
 
             // Observers
             bool is_running() const;    // clock is ticking
-            bool is_cancelled() const;  // cancellation pending
-            bool is_active() const;     // running or cancellation pending
+            bool is_canceled() const;   // cancelation pending
+            bool is_active() const;     // running or cancelation pending
 
             // Event Handling
             void notify_expired(Time_point) const;
-            void notify_cancelled() const;
+            void notify_canceled() const;
 
         private:
             // Constants
@@ -518,7 +518,7 @@ public:
         Select_status   notify_operation_complete(Channel_size pos);
         bool            notify_channel_readable(Channel_size pos);
         bool            notify_timer_expired(Time_point);
-        bool            notify_timer_cancelled();
+        bool            notify_timer_canceled();
 
         // Execution
         void    make_ready();
@@ -1519,7 +1519,7 @@ private:
         // User Timers
         void start(const Time_channel&, nanoseconds duration);
         bool reset(const Time_channel&, nanoseconds duration);
-        bool stop(const Time_channel&);
+        bool cancel(const Time_channel&);
 
     private:
         /*
@@ -1527,38 +1527,6 @@ private:
             std::chrono::steady_clock has nanosecond resolution on Windows.
         */
         using Clock = std::chrono::steady_clock;
-
-        /*
-            TODO:  Requests could be improved with virtual functions and the
-            small object optimization:
-
-                Request r = make_request(xxx);
-                r.execute();
-        */
-        class Request {
-        public:
-            // Construct
-            Request(Task::Promise*, nanoseconds);   // start task timer
-            explicit Request(Task::Promise*);       // cancel task timer
-            Request(Time_channel, nanoseconds);     // create user Timer
-
-            // Types
-            bool is_start() const;
-            bool is_cancel() const;
-
-            // Observers
-            Task::Promise*      task() const;
-            const Time_channel& channel() const;
-            nanoseconds         time() const;
-
-        private:
-            // Data
-            Task::Promise*  taskp;
-            Time_channel    chan;
-            nanoseconds     duration;
-        };
-
-        using Request_queue = std::queue<Request>;
 
         /*
             TODO:  Alarms could benefit from virtual functions and the small
@@ -1623,18 +1591,19 @@ private:
             bool    is_empty() const;
 
             // Queue Functions
-            void    push(const Alarm&);
-            Alarm   pop();
-            void    erase(Iterator);
+            Iterator    push(const Alarm&);
+            Alarm       pop();
+            void        erase(Iterator);
 
             // Element Access
             const Alarm&    front() const;
             Iterator        find(Task::Promise*) const;
+            Iterator        find(const Time_channel&) const;
         };
 
         using Windows_handle = HANDLE;
 
-        enum : int { request_handle, timer_handle, interrupt_handle };
+        enum : int { timer_handle, interrupt_handle };
 
         class Windows_handles {
         public:
@@ -1646,7 +1615,6 @@ private:
 
             // Synchronization
             int     wait_any(Lock*) const;
-            void    signal_request() const;
             void    signal_interrupt() const;
 
             // Observers
@@ -1654,7 +1622,7 @@ private:
 
         private:
             // Constants
-            static const int count{3};
+            static const int count{2};
 
             // Destroy
             static void close(Windows_handle* hs, int n = count);
@@ -1666,41 +1634,31 @@ private:
         // Execution
         void run_thread();
 
-        // Request Processing
-        static Request  make_start(Task::Promise*, nanoseconds duration);
-        static Request  make_cancel(Task::Promise*);
-        static Request  make_start(const Time_channel& chan, nanoseconds duration);
-        static Request  make_reset(const Time_channel& chan, nanoseconds duration);
-        static void     process(Request_queue*, Alarm_queue*, Windows_handle timer, Lock*);
-        static void     process(const Request&, Alarm_queue*, Windows_handle timer, Time_point now, Lock*);
+        // Alarm Activation/Cancelation/Reset
+        template<class T> void          sync_start(const T& id, nanoseconds duration);
+        template<class T> static void   start(const T& alarmid, nanoseconds duration, Alarm_queue* queuep, Windows_handle timer);
+        template<class T> bool          sync_cancel(const T& alarmid);
+        static bool                     cancel(Task::Promise*, Alarm_queue::Iterator, Alarm_queue*, Windows_handle timer, Lock*);
+        static bool                     cancel(Time_channel, Alarm_queue::Iterator, Alarm_queue*, Windows_handle timer, Lock*);
+        static void                     notify_cancel(Task::Promise*, Lock*);
+        static void                     remove_canceled(Alarm_queue::Iterator, Alarm_queue*, Windows_handle timer);
+        static bool                     reset(Alarm_queue::Iterator, Alarm_queue*, Windows_handle timer);
 
-        // Alarm Activation/Cancellation
-        static Alarm    make_alarm(const Request&, Time_point now);
-        static void     activate(const Alarm&, Alarm_queue*, Time_point now, Windows_handle timer);
-        static void     remove_alarm(Alarm_queue*, Alarm_queue::Iterator, Time_point now, Windows_handle timer);
-        static void     cancel_alarm(const Request&, Alarm_queue*, Time_point now, Windows_handle timer, Lock*);
-        static void     notify_cancel(const Alarm&, Lock*);
- 
-        // Alarm Processing
-        static void process(Alarm_queue*, Windows_handle timer, Lock*);
-        static void process_expired(Alarm_queue*, Time_point now, Windows_handle timer, Lock*);
-        static void notify_expired(const Alarm&, Time_point now, Lock*);
-        static void notify_expired(Task::Promise*, Time_point now, Lock*);
-        static void notify_expired(const Time_channel&, Time_point now);
-        static bool notify_timer_expired(Task::Promise*, Time_point now, Lock*);
-        static bool notify_timer_cancelled(Task::Promise*, Lock*);
+         // Alarm Processing
+        static void process_timer(Alarm_queue*, Windows_handle timer, Lock*);
+        static void process_expired(Alarm_queue*, Time_point now, Lock*);
+        static void process_expired(const Alarm&, Time_point now, Lock*);
+        static void process_expired(Task::Promise*, Time_point now, Lock*);
+        static void process_expired(const Time_channel&, Time_point now);
+        static bool notify_expired(Task::Promise*, Time_point now, Lock*);
+        static bool notify_canceled(Task::Promise*, Lock*);
         static bool is_expired(const Alarm&, Time_point now);
 
         // Timer Functions
-        void        start_timer(const Time_channel&, nanoseconds duration);
-        bool        stop_timer(const Time_channel&);
-        bool        reset_timer(const Time_channel&);
-        static void set_timer(Windows_handle timer, nanoseconds duration);
+        static void set_timer(Windows_handle timer, const Alarm&, Time_point now);
         static void cancel_timer(Windows_handle timer);
 
-
         // Data
-        Request_queue   requestq;
         Alarm_queue     alarmq;
         Windows_handles handles;
         mutable Mutex   mutex;

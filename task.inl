@@ -393,11 +393,11 @@ Task::Promise::notify_operation_complete(Channel_size pos)
 
 
 inline bool
-Task::Promise::notify_timer_cancelled()
+Task::Promise::notify_timer_canceled()
 {
     const Lock lock{mutex};
 
-    return futures.notify_timer_cancelled();
+    return futures.notify_timer_canceled();
 }
 
 
