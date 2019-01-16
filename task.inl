@@ -569,11 +569,11 @@ swap(Task& x, Task& y)
 
 
 /*
-    Channel Temporary Lock
+    Channel Unlock Sentry
 */
 template<class T>
 inline
-Channel<T>::Temporary_unlock::Temporary_unlock(Mutex* mp)
+Channel<T>::Unlock_sentry::Unlock_sentry(Mutex* mp)
     : mutexp{mp}
 {
     mutexp->unlock();
@@ -582,7 +582,7 @@ Channel<T>::Temporary_unlock::Temporary_unlock(Mutex* mp)
 
 template<class T>
 inline
-Channel<T>::Temporary_unlock::~Temporary_unlock()
+Channel<T>::Unlock_sentry::~Unlock_sentry()
 {
     mutexp->lock();
 }
@@ -624,10 +624,10 @@ Channel<T>::Readable_waiter::notify_channel_readable(Task::Promise* taskp, Chann
     /*
         If the waiting task has already been awakened, it could be in the
         midst of dequeing itself from this channel.  To avoid a deadly
-        embrace, the current thread unlocks the channel while notifying
-        the task that it has become readable.
+        embrace, unlock the channel while notifying the task that it has
+        become readable.
     */
-    const Temporary_unlock unlock{mutexp};
+    const Unlock_sentry unlock{mutexp};
     return taskp->notify_channel_readable(pos);
 }
 
@@ -1121,10 +1121,10 @@ Channel<T>::notify_operation_complete(Task::Promise* taskp, Channel_size pos, Mu
     /*
         If the waiting task already been awakened, it could be in the
         midst of dequeing itself from this channel.  To avoid a deadly
-        embrace, the current thread unlocks the channel while notifying
-        the receiver that the operation can be completed.
+        embrace, unlock the channel while notifying the task that the
+        operation can be completed.
     */
-    const Temporary_unlock unlock{mutexp};
+    const Unlock_sentry unlock{mutexp};
     return taskp->notify_operation_complete(pos);
 }
 
@@ -1423,7 +1423,7 @@ template<class T>
 bool
 Channel<T>::Impl::is_writable() const
 {
-    return !(receivers.is_empty() && buffer.is_full());
+    return !(buffer.is_full() && receivers.is_empty());
 }
 
 
@@ -2362,6 +2362,67 @@ async(Fun f, Args&&... args)
 
     start(move(task), r, e, move(f), forward<Args>(args)...);
     return Future<Result>{r, e};
+}
+
+
+/*
+    Timer
+*/
+inline
+Timer::Timer(Timer&& other)
+    : chan{std::move(other.chan)}
+{
+}
+
+
+inline
+Timer::~Timer()
+{
+    stop();
+}
+
+
+inline const Time_receiver&
+Timer::channel()
+{
+    return chan;
+}
+
+
+inline Timer&
+Timer::operator=(Timer&& other)
+{
+    chan = std::move(other.chan);
+    return *this;
+}
+
+
+inline bool
+Timer::stop()
+{
+    return chan ? scheduler.stop(chan) : false;
+}
+
+
+inline bool
+operator==(const Timer& x, const Timer& y)
+{
+    return x.chan == y.chan;
+}
+
+
+inline bool
+operator< (const Timer& x, const Timer& y)
+{
+    return x.chan < y.chan;
+}
+
+
+inline void
+swap(Timer& x, Timer& y)
+{
+    using std::swap;
+    swap(x.chan, y.chan);
 }
 
 

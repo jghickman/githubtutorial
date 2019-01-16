@@ -66,7 +66,9 @@ class Channel_operation;
 using Channel_size = std::ptrdiff_t;
 class Scheduler;
 using Time_point = std::chrono::steady_clock::time_point;
+using Time_channel  = Channel<Time_point>;
 using Time_receiver = Receive_channel<Time_point>;
+using Time_sender   = Send_channel<Time_point>;
 class Timer;
 using boost::optional;
 using std::exception_ptr;
@@ -620,7 +622,7 @@ public:
     Channel(Channel&&);
     Channel& operator=(Channel&&);
     friend Channel make_channel<T>(Channel_size capacity);
-    inline friend void swap(Channel& x, Channel& y) { swap(x.pimpl, y.pimpl;); }
+    inline friend void swap(Channel& x, Channel& y) { swap(x.pimpl, y.pimpl); }
 
     // Size and Capacity
     Channel_size    size() const;
@@ -832,13 +834,13 @@ private:
         TODO:  Should be a resusable internal library component parameterized
         on the lock type.
     */
-    class Temporary_unlock {
+    class Unlock_sentry {
     public:
         // Construct/Copy/Destroy
-        explicit Temporary_unlock(Mutex*);
-        Temporary_unlock(const Temporary_unlock&) = delete;
-        Temporary_unlock& operator=(const Temporary_unlock&) = delete;
-        ~Temporary_unlock();
+        explicit Unlock_sentry(Mutex*);
+        Unlock_sentry(const Unlock_sentry&) = delete;
+        Unlock_sentry& operator=(const Unlock_sentry&) = delete;
+        ~Unlock_sentry();
 
     private:
         // Data
@@ -1322,26 +1324,32 @@ class Timer : boost::totally_ordered<Timer> {
 public:
     // Construct/Copy/Destroy
     Timer() = default;
-    friend Timer make_timer(nanoseconds);
+    explicit Timer(nanoseconds);
     Timer(const Timer&) = delete;
     Timer& operator=(const Timer&) = delete;
     Timer(Timer&&);
     Timer& operator=(Timer&&);
+    friend void swap(Timer&, Timer&);
     ~Timer();
 
-    // Modifiers
-    bool stop() const;
-    bool reset(nanoseconds) const;
+    // Timer Functions
+    bool stop();
+    bool reset(nanoseconds);
 
     // Channel
-    const Time_receiver& channel() const;
+    const Time_receiver& channel();
+
+    // Comparisons
+    friend bool operator==(const Timer&, const Timer&);
+    friend bool operator< (const Timer&, const Timer&);
 
 private:
-    // Construct
-    explicit Timer(nanoseconds);
+    // Channel Construction
+    static Time_channel make_channel();
+    static Time_channel make_channel(nanoseconds duration);
 
     // Data
-    Time_receiver chan;
+    Time_channel chan;
 };
 
 
@@ -1368,15 +1376,6 @@ public:
     /*
         Timers
 
-        TODO:  Resource allocation errors related to timer construction are
-        not returned to callers of start_timer() and make_timer() in the
-        current implementation.  This could be fixed by allocating those
-        resources eagerly and sending them to the timer thread in the request
-        queue.
-
-        TODO:  Get rid of explicit locking by moving it into the request
-        queue.
-
         TODO:  The timer functions don't feel appropriate as a public
         interface on the , and making them private would might create circular
         dependencies beween the Task and the Scheduler (although this should
@@ -1391,7 +1390,6 @@ public:
 
     // Friends
     friend class Timer;
-    friend Timer make_timer(nanoseconds);
 
 private:
     // Names/Types
@@ -1404,13 +1402,13 @@ private:
         TODO:  Should be a resusable internal library component parameterized
         on the lock type.
     */
-    class Temporary_unlock {
+    class Unlock_sentry {
     public:
         // Construct/Copy/Destroy
-        explicit Temporary_unlock(Lock*);
-        Temporary_unlock(const Temporary_unlock&) = delete;
-        Temporary_unlock& operator=(const Temporary_unlock&) = delete;
-        ~Temporary_unlock();
+        explicit Unlock_sentry(Lock*);
+        Unlock_sentry(const Unlock_sentry&) = delete;
+        Unlock_sentry& operator=(const Unlock_sentry&) = delete;
+        ~Unlock_sentry();
 
     private:
         // Data
@@ -1501,9 +1499,6 @@ private:
         mutable Mutex       mutex;
     };
 
-    using Time_channel  = Channel<Time_point>;
-    using Time_sender   = Send_channel<Time_point>;
-
     class Timers {
     public:
         // Construct/Copy/Destroy
@@ -1565,26 +1560,39 @@ private:
         class Alarm_queue {
         private:
             // Names/Types
-            using Alarm_vector = std::vector<Alarm>;
+            using Alarm_deque = std::deque<Alarm>;
 
-            struct task_eq {
-                explicit task_eq(Task::Promise* tp) : taskp{tp} {}
+            struct Task_eq {
+                explicit Task_eq(Task::Promise* tp) : taskp{tp} {}
                 bool operator()(const Alarm& a) const {
                     return a.taskp == taskp;
                 }
                 Task::Promise* taskp;
             };
 
+            struct Channel_eq {
+                explicit Channel_eq(const Time_channel& c) : chan{c} {}
+                bool operator()(const Alarm& a) const {
+                    return a.channel == chan;
+                }
+                const Time_channel& chan;
+            };
+
+            // Alarm Comparison
+            static Task_eq      id_eq(Task::Promise*);
+            static Channel_eq   id_eq(const Time_channel&);
+
             // Data
-            Alarm_vector alarms;
+            Alarm_deque alarms;
 
         public:
             // Names/Types
-            using Iterator = Alarm_vector::const_iterator;
+            using Iterator          = Alarm_deque::iterator;
+            using Const_iterator    = Alarm_deque::const_iterator;
 
             // Iterators
-            Iterator begin() const;
-            Iterator end() const;
+            Iterator begin();
+            Iterator end();
 
             // Size
             int     size() const;
@@ -1592,13 +1600,16 @@ private:
 
             // Queue Functions
             Iterator    push(const Alarm&);
+            void        reschedule(Iterator, Time_point expiry);
             Alarm       pop();
             void        erase(Iterator);
 
             // Element Access
-            const Alarm&    front() const;
-            Iterator        find(Task::Promise*) const;
-            Iterator        find(const Time_channel&) const;
+            const Alarm&                front() const;
+            template<class T> Iterator  find(const T& alarmid);
+
+            // Observers
+            Time_point next_expiry() const;
         };
 
         using Windows_handle = HANDLE;
@@ -1638,11 +1649,11 @@ private:
         template<class T> void          sync_start(const T& id, nanoseconds duration);
         template<class T> static void   start(const T& alarmid, nanoseconds duration, Alarm_queue* queuep, Windows_handle timer);
         template<class T> bool          sync_cancel(const T& alarmid);
-        static bool                     cancel(Task::Promise*, Alarm_queue::Iterator, Alarm_queue*, Windows_handle timer, Lock*);
-        static bool                     cancel(Time_channel, Alarm_queue::Iterator, Alarm_queue*, Windows_handle timer, Lock*);
-        static void                     notify_cancel(Task::Promise*, Lock*);
+        static bool                     cancel(Task::Promise*, Alarm_queue::Iterator, Alarm_queue*, Windows_handle timer);
+        static bool                     cancel(Time_channel, Alarm_queue::Iterator, Alarm_queue*, Windows_handle timer);
         static void                     remove_canceled(Alarm_queue::Iterator, Alarm_queue*, Windows_handle timer);
-        static bool                     reset(Alarm_queue::Iterator, Alarm_queue*, Windows_handle timer);
+        static bool                     reset(Alarm_queue::Iterator, nanoseconds duration, Alarm_queue*, Windows_handle timer);
+        static void                     reschedule(Alarm_queue::Iterator, nanoseconds duration, Alarm_queue*, Windows_handle timer);
 
          // Alarm Processing
         static void process_timer(Alarm_queue*, Windows_handle timer, Lock*);
@@ -1651,7 +1662,6 @@ private:
         static void process_expired(Task::Promise*, Time_point now, Lock*);
         static void process_expired(const Time_channel&, Time_point now);
         static bool notify_expired(Task::Promise*, Time_point now, Lock*);
-        static bool notify_canceled(Task::Promise*, Lock*);
         static bool is_expired(const Alarm&, Time_point now);
 
         // Timer Functions
@@ -1668,11 +1678,16 @@ private:
     // Execution
     void run_tasks(unsigned q);
 
+    // User Timers
+    void start(const Time_channel&, nanoseconds duration);
+    bool stop(const Time_channel&);
+    bool reset(const Time_channel&, nanoseconds duration);
+
     // Data
     Task_queue_array    ready;
-    std::vector<Thread> processors;
     Waiting_tasks       waiting;
     Timers              timers;
+    std::vector<Thread> processors;
 };
 
 

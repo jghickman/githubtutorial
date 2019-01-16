@@ -748,9 +748,8 @@ bool
 Task::Future_selector::notify_timer_expired(Task::Promise* taskp, Time_point time)
 {
     /*
-        Timer expiration can race with timer cancelation, so treat the
-        expiration as a cancelation event if timer cancelation was
-        requested.
+        Timer cancellation can race with timer expiration, so treat
+        expiration as a cancellation event if cancellation was requested.
     */
     if (timer.is_canceled())
         timer.notify_canceled();
@@ -1139,10 +1138,10 @@ Scheduler::Task_queue_array::size() const
 
 
 /*
-    Scheduler Temporary Unlock
+    Scheduler Unlock Sentry
 */
 inline
-Scheduler::Temporary_unlock::Temporary_unlock(Lock* lp)
+Scheduler::Unlock_sentry::Unlock_sentry(Lock* lp)
     : lockp{lp}
 {
     lockp->unlock();
@@ -1150,7 +1149,7 @@ Scheduler::Temporary_unlock::Temporary_unlock(Lock* lp)
 
 
 inline
-Scheduler::Temporary_unlock::~Temporary_unlock()
+Scheduler::Unlock_sentry::~Unlock_sentry()
 {
     lockp->lock();
 }
@@ -1160,14 +1159,14 @@ Scheduler::Temporary_unlock::~Temporary_unlock()
     Scheduler Timers Alarm Queue
 */
 inline Scheduler::Timers::Alarm_queue::Iterator
-Scheduler::Timers::Alarm_queue::begin() const
+Scheduler::Timers::Alarm_queue::begin()
 {
     return alarms.begin();
 }
 
 
 inline Scheduler::Timers::Alarm_queue::Iterator
-Scheduler::Timers::Alarm_queue::end() const
+Scheduler::Timers::Alarm_queue::end()
 {
     return alarms.end();
 }
@@ -1180,14 +1179,15 @@ Scheduler::Timers::Alarm_queue::erase(Iterator p)
 }
 
 
+template<class T>
 Scheduler::Timers::Alarm_queue::Iterator
-Scheduler::Timers::Alarm_queue::find(Task::Promise* taskp) const
+Scheduler::Timers::Alarm_queue::find(const T& id)
 {
     const auto first    = alarms.begin();
     const auto last     = alarms.end();
-    const auto p        = find_if(first, last, task_eq(taskp));
+    const auto p        = find_if(first, last, id_eq(id));
 
-    return (p != last && p->taskp == taskp) ? p : last;
+    return (p != last) ? p : last;
 }
 
 
@@ -1198,6 +1198,20 @@ Scheduler::Timers::Alarm_queue::front() const
 }
 
 
+inline Scheduler::Timers::Alarm_queue::Task_eq
+Scheduler::Timers::Alarm_queue::id_eq(Task::Promise* taskp)
+{
+    return Task_eq{taskp};
+}
+
+
+inline Scheduler::Timers::Alarm_queue::Channel_eq
+Scheduler::Timers::Alarm_queue::id_eq(const Time_channel& chan)
+{
+    return Channel_eq{chan};
+}
+
+
 inline bool
 Scheduler::Timers::Alarm_queue::is_empty() const
 {
@@ -1205,12 +1219,19 @@ Scheduler::Timers::Alarm_queue::is_empty() const
 }
 
 
+inline Time_point
+Scheduler::Timers::Alarm_queue::next_expiry() const
+{
+    return alarms.front().expiry;
+}
+
+
 inline Scheduler::Timers::Alarm
 Scheduler::Timers::Alarm_queue::pop()
 {
-    Alarm a = alarms.front();
+    Alarm a = move(alarms.front());
 
-    alarms.erase(alarms.begin());
+    alarms.pop_front();
     return a;
 }
 
@@ -1220,6 +1241,14 @@ Scheduler::Timers::Alarm_queue::push(const Alarm& a)
 {
     const auto p = upper_bound(alarms.begin(), alarms.end(), a);
     return alarms.insert(p, a);
+}
+
+
+void
+Scheduler::Timers::Alarm_queue::reschedule(Iterator p, Time_point expiry)
+{
+    p->expiry = expiry;
+    sort(alarms.begin(), alarms.end());
 }
 
 
@@ -1260,7 +1289,7 @@ inline
 Scheduler::Timers::Windows_handles::~Windows_handles()
 {
     close(hs);
-}
+}   
 
 
 void
@@ -1288,8 +1317,8 @@ Scheduler::Timers::Windows_handles::timer() const
 inline int
 Scheduler::Timers::Windows_handles::wait_any(Lock* lockp) const 
 {
-    const Temporary_unlock  unlock{lockp};
-    const DWORD             n = WaitForMultipleObjects(count, hs, FALSE, INFINITE);
+    const Unlock_sentry unlock{lockp};
+    const DWORD         n = WaitForMultipleObjects(count, hs, FALSE, INFINITE);
 
     return static_cast<int>(n - WAIT_OBJECT_0);
 }
@@ -1325,19 +1354,19 @@ Scheduler::Timers::cancel(const Time_channel& chan)
 }
 
 
-inline bool
-Scheduler::Timers::cancel(Task::Promise* taskp, Alarm_queue::Iterator alarmp, Alarm_queue* queuep, Windows_handle timer, Lock* lockp)
+bool
+Scheduler::Timers::cancel(Task::Promise* taskp, Alarm_queue::Iterator alarmp, Alarm_queue* queuep, Windows_handle timer)
 {
     remove_canceled(alarmp, queuep, timer);
-    if (notify_canceled(taskp, lockp))
+    if (taskp->notify_timer_canceled())
         scheduler.resume(taskp);
 
     return true;
 }
 
 
-inline bool
-Scheduler::Timers::cancel(Time_channel chan, Alarm_queue::Iterator alarmp, Alarm_queue* queuep, Windows_handle timer, Lock*)
+bool
+Scheduler::Timers::cancel(Time_channel chan, Alarm_queue::Iterator alarmp, Alarm_queue* queuep, Windows_handle timer)
 {
     remove_canceled(alarmp, queuep, timer);
     return chan.is_empty();
@@ -1359,28 +1388,19 @@ Scheduler::Timers::is_expired(const Alarm& alarm, Time_point now)
 
 
 inline bool
-Scheduler::Timers::notify_canceled(Task::Promise* taskp, Lock* lockp)
-{
-    const Temporary_unlock unlock{lockp};
-    return taskp->notify_timer_canceled();
-}
-
-
-inline bool
 Scheduler::Timers::notify_expired(Task::Promise* taskp, Time_point now, Lock* lockp)
 {
     /*
-        If the waiting task has already been awakened, it could be in the
-        midst of cancelling the timer.  To avoid a deadly embrace, the current
-        thread unlocks the timers while notifying the waiter that the timer
-        has expired.
+        Timer cancellation can race with timer expiration.  To avoid a
+        deadly embrace, unlock the timers while notifying the task that its
+        timer has expired.
     */
-    const Temporary_unlock unlock{lockp};
+    const Unlock_sentry unlock{lockp};
     return taskp->notify_timer_expired(now);
 }
 
 
-void
+inline void
 Scheduler::Timers::process_expired(Task::Promise* taskp, Time_point now, Lock* lockp)
 {
     if (notify_expired(taskp, now, lockp))
@@ -1395,7 +1415,7 @@ Scheduler::Timers::process_expired(const Time_channel& chan, Time_point now)
 }
 
 
-inline void
+void
 Scheduler::Timers::process_expired(const Alarm& alarm, Time_point now, Lock* lockp)
 {
     if (alarm.taskp)
@@ -1432,11 +1452,23 @@ Scheduler::Timers::remove_canceled(Alarm_queue::Iterator alarmp, Alarm_queue* qu
         const auto nextp = next(alarmp);
         if (nextp == queuep->end())
             cancel_timer(timer);
-        else if (*alarmp < *nextp)
+        else if (alarmp->expiry < nextp->expiry)
             set_timer(timer, *nextp, Clock::now());
     }
 
     queuep->erase(alarmp);
+}
+
+
+void
+Scheduler::Timers::reschedule(Alarm_queue::Iterator alarmp, nanoseconds duration, Alarm_queue* queuep, Windows_handle timer)
+{
+    const auto old = queuep->next_expiry();
+    const auto now = Clock::now();
+    
+    queuep->reschedule(alarmp, now + duration);
+    if (queuep->next_expiry() != old)
+        set_timer(timer, queuep->front(), now);
 }
 
 
@@ -1447,19 +1479,15 @@ Scheduler::Timers::reset(const Time_channel& chan, nanoseconds duration)
     const Lock  lock{mutex};
     const auto  alarmp{alarmq.find(chan)};
 
-    if (alarmp != alarmq.end())
-        is_reset = reset(alarmp, &alarmq, handles.timer());
-    else
+    if (alarmp == alarmq.end())
         start(chan, duration, &alarmq, handles.timer());
-
+    else {
+        reschedule(alarmp, duration, &alarmq, handles.timer());
+        if (!chan.try_receive())
+            is_reset = true;
+    }
+ 
     return is_reset;
-}
-
-
-bool
-Scheduler::Timers::reset(Alarm_queue::Iterator alarmp, Alarm_queue* queuep, Windows_handle timer)
-{
-
 }
 
 
@@ -1498,43 +1526,17 @@ Scheduler::Timers::set_timer(Windows_handle timer, const Alarm& alarm, Time_poin
 }
 
 
-void
+inline void
 Scheduler::Timers::start(Task::Promise* taskp, nanoseconds duration)
 {
     sync_start(taskp, duration);
 }
 
 
-void
+inline void
 Scheduler::Timers::start(const Time_channel& chan, nanoseconds duration)
 {
     sync_start(chan, duration);
-}
-
-
-template<class T>
-inline bool
-Scheduler::Timers::sync_cancel(const T& alarmid)
-{
-    bool        is_canceled{false};
-    Lock        lock{mutex};
-    const auto  alarmp{alarmq.find(alarmid)};
-
-    if (alarmp != alarmq.end())
-        is_canceled = cancel(alarmid, alarmp, &alarmq, handles.timer(), &lock);
-
-    return is_canceled;
-}
-
-
-template<class T>
-inline void
-Scheduler::Timers::sync_start(const T& alarmid, nanoseconds duration)
-{
-    if (duration >= 0ns) {
-        const Lock lock{mutex};
-        start(alarmid, duration, &alarmq, handles.timer());
-    }
 }
 
 
@@ -1548,6 +1550,32 @@ Scheduler::Timers::start(const T& alarmid, nanoseconds duration, Alarm_queue* qu
 
     if (alarmp == queuep->begin())
         set_timer(timer, *alarmp, now);
+}
+
+
+template<class T>
+inline bool
+Scheduler::Timers::sync_cancel(const T& alarmid)
+{
+    bool        is_cancel{false};
+    const Lock  lock{mutex};
+    const auto  alarmp{alarmq.find(alarmid)};
+
+    if (alarmp != alarmq.end())
+        is_cancel = cancel(alarmid, alarmp, &alarmq, handles.timer());
+
+    return is_cancel;
+}
+
+
+template<class T>
+inline void
+Scheduler::Timers::sync_start(const T& alarmid, nanoseconds duration)
+{
+    if (duration >= 0ns) {
+        const Lock lock{mutex};
+        start(alarmid, duration, &alarmq, handles.timer());
+    }
 }
 
 
@@ -1626,6 +1654,49 @@ void
 Scheduler::submit(Task task)
 {
     ready.push(move(task));
+}
+
+
+/*
+    Timer
+*/
+Timer::Timer(nanoseconds duration)
+    : chan{make_channel(duration)}
+{
+    if (chan)
+        scheduler.start(chan, duration);
+}
+
+
+inline Time_channel
+Timer::make_channel()
+{
+    return Coroutine::make_channel<Time_point>(1);
+}
+
+
+inline Time_channel
+Timer::make_channel(nanoseconds duration)
+{
+    return duration >= 0ns ? make_channel() : Time_channel();
+}
+
+
+bool
+Timer::reset(nanoseconds duration)
+{
+    bool is_reset{false};
+
+    if (duration >= 0ns) {
+        if (chan) 
+            is_reset = scheduler.reset(chan, duration);
+        else {
+            chan = make_channel();
+            scheduler.start(chan, duration);
+        } 
+    }
+
+    return is_reset;
 }
 
 
