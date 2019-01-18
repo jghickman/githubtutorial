@@ -6,10 +6,10 @@
 //
 
 //
-//  IAPPA CM Revision # : $Revision: 1.3 $
+//  IAPPA CM Revision # : $Revision: 1.5 $
 //  IAPPA CM Tag        : $Name:  $
 //  Last user to change : $Author: hickmjg $
-//  Date of change      : $Date: 2018/12/18 21:55:18 $
+//  Date of change      : $Date: 2019/01/18 18:39:52 $
 //  File Path           : $Source: //ftwgroups/data/iappa/CVSROOT/isptech_cvs/isptech/coroutine/task.inl,v $
 //  Source of funding   : IAPPA
 //
@@ -275,7 +275,7 @@ Task::Future_selector::Future_set::size() const
     Task Future Selector Timer
 */
 inline void
-Task::Future_selector::Timer::start(Task::Promise* taskp, nanoseconds duration) const
+Task::Future_selector::Timer::start(Task::Promise* taskp, Duration duration) const
 {
     scheduler.start_timer(taskp, duration);
     state = running;
@@ -294,7 +294,7 @@ Task::Future_selector::is_selected() const
 
 template<class T>
 bool
-Task::Future_selector::select_all(Task::Promise* taskp, const Future<T>* first, const Future<T>* last, optional<nanoseconds> maxtime)
+Task::Future_selector::select_all(Task::Promise* taskp, const Future<T>* first, const Future<T>* last, optional<Duration> maxtime)
 {
     using std::literals::chrono_literals::operator""ns;
 
@@ -320,7 +320,7 @@ Task::Future_selector::select_all(Task::Promise* taskp, const Future<T>* first, 
 
 template<class T>
 bool
-Task::Future_selector::select_any(Task::Promise* taskp, const Future<T>* first, const Future<T>* last, optional<nanoseconds> maxtime)
+Task::Future_selector::select_any(Task::Promise* taskp, const Future<T>* first, const Future<T>* last, optional<Duration> maxtime)
 {
     using std::literals::chrono_literals::operator""ns;
 
@@ -402,11 +402,11 @@ Task::Promise::notify_timer_canceled()
 
 
 inline bool
-Task::Promise::notify_timer_expired(Time_point time)
+Task::Promise::notify_timer_expired(Time when)
 {
     const Lock lock{mutex};
 
-    return futures.notify_timer_expired(this, time);
+    return futures.notify_timer_expired(this, when);
 }
 
 
@@ -466,22 +466,22 @@ Task::Promise::try_select(const Channel_operation* first, const Channel_operatio
 
 template<class T>
 void
-Task::Promise::wait_all(const Future<T>* first, const Future<T>* last, optional<nanoseconds> deadline)
+Task::Promise::wait_all(const Future<T>* first, const Future<T>* last, optional<Duration> maxtime)
 {
     Lock lock{mutex};
 
-    if (!futures.select_all(this, first, last, deadline))
+    if (!futures.select_all(this, first, last, maxtime))
         suspend(&lock);
 }
 
 
 template<class T>
 void
-Task::Promise::wait_any(const Future<T>* first, const Future<T>* last, optional<nanoseconds> deadline)
+Task::Promise::wait_any(const Future<T>* first, const Future<T>* last, optional<Duration> maxtime)
 {
     Lock lock{mutex};
 
-    if (!futures.select_any(this, first, last, deadline))
+    if (!futures.select_any(this, first, last, maxtime))
         suspend(&lock);
 }
 
@@ -2162,10 +2162,10 @@ All_futures_awaitable<T>::All_futures_awaitable(const Future<T>* begin, const Fu
 
 template<class T>
 inline
-All_futures_awaitable<T>::All_futures_awaitable(const Future<T>* begin, const Future<T>* end, nanoseconds maxtime)
+All_futures_awaitable<T>::All_futures_awaitable(const Future<T>* begin, const Future<T>* end, Duration maxtime)
     : first{begin}
     , last{end}
-    , time{maxtime}
+    , timeout{maxtime}
 {
 }
 
@@ -2191,7 +2191,7 @@ inline bool
 All_futures_awaitable<T>::await_suspend(Task::Handle taskh)
 {
     task = taskh;
-    task.promise().wait_all(first, last, time);
+    task.promise().wait_all(first, last, timeout);
     return true;
 }
 
@@ -2223,7 +2223,7 @@ wait_all(const vector<Future<T>>& fs)
 
 template<class T>
 inline All_futures_awaitable<T>
-wait_all(const Future<T>* first, const Future<T>* last, nanoseconds maxtime)
+wait_all(const Future<T>* first, const Future<T>* last, Duration maxtime)
 {
     return All_futures_awaitable<T>(first, last, maxtime);
 }
@@ -2231,7 +2231,7 @@ wait_all(const Future<T>* first, const Future<T>* last, nanoseconds maxtime)
 
 template<class T, Channel_size N>
 inline All_futures_awaitable<T>
-wait_all(const Future<T> (&fs)[N], nanoseconds maxtime)
+wait_all(const Future<T> (&fs)[N], Duration maxtime)
 {
     return wait_all(fs, fs + N, maxtime);
 }
@@ -2239,7 +2239,7 @@ wait_all(const Future<T> (&fs)[N], nanoseconds maxtime)
 
 template<class T>
 inline All_futures_awaitable<T>
-wait_all(const vector<Future<T>>& fs, nanoseconds maxtime)
+wait_all(const vector<Future<T>>& fs, Duration maxtime)
 {
     auto first = fs.data();
     return wait_all(first, first + fs.size(), maxtime);
@@ -2260,10 +2260,10 @@ Any_future_awaitable<T>::Any_future_awaitable(const Future<T>* begin, const Futu
 
 template<class T>
 inline
-Any_future_awaitable<T>::Any_future_awaitable(const Future<T>* begin, const Future<T>* end, nanoseconds maxtime)
+Any_future_awaitable<T>::Any_future_awaitable(const Future<T>* begin, const Future<T>* end, Duration maxtime)
     : first{begin}
     , last{end}
-    , time{maxtime}
+    , timeout{maxtime}
 {
 }
 
@@ -2289,7 +2289,7 @@ inline bool
 Any_future_awaitable<T>::await_suspend(Task::Handle taskh)
 {
     task = taskh;
-    task.promise().wait_any(first, last, time);
+    task.promise().wait_any(first, last, timeout);
     return true;
 }
 
@@ -2304,7 +2304,7 @@ wait_any(const Future<T>* first, const Future<T>* last)
 
 template<class T>
 inline Any_future_awaitable<T>
-wait_any(const Future<T>* first, const Future<T>* last, nanoseconds maxtime)
+wait_any(const Future<T>* first, const Future<T>* last, Duration maxtime)
 {
     return Any_future_awaitable<T>(first, last, maxtime);
 }
@@ -2320,7 +2320,7 @@ wait_any(const Future<T> (&fs)[N])
 
 template<class T, Channel_size N>
 inline Any_future_awaitable<T>
-wait_any(const Future<T> (&fs)[N], nanoseconds maxtime)
+wait_any(const Future<T> (&fs)[N], Duration maxtime)
 {
     return wait_any(fs, fs + N, maxtime);
 }
@@ -2337,7 +2337,7 @@ wait_any(const vector<Future<T>>& fs)
 
 template<class T>
 inline Any_future_awaitable<T>
-wait_any(const vector<Future<T>>& fs, nanoseconds maxtime)
+wait_any(const vector<Future<T>>& fs, Duration maxtime)
 {
     auto first = fs.data();
     return wait_any(first, first + fs.size(), maxtime);
@@ -2424,7 +2424,7 @@ Timer::is_ready() const
 
 
 inline Channel_operation
-Timer::make_receive(Time_point* tp)
+Timer::make_receive(Time* tp)
 {
     return chan.make_receive(tp);
 }
@@ -2459,14 +2459,14 @@ Timer::stop()
 }
 
 
-inline optional<Time_point>
+inline optional<Time>
 Timer::try_receive()
 {
     return chan.try_receive();
 }
 
 
-inline Time_point
+inline Time
 blocking_receive(Timer& timer)
 {
     return blocking_receive(timer.chan);

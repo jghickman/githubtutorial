@@ -6,10 +6,10 @@
 //
 
 //
-//  IAPPA CM Revision # : $Revision: 1.3 $
+//  IAPPA CM Revision # : $Revision: 1.9 $
 //  IAPPA CM Tag        : $Name:  $
 //  Last user to change : $Author: hickmjg $
-//  Date of change      : $Date: 2018/12/18 21:55:18 $
+//  Date of change      : $Date: 2019/01/18 23:06:47 $
 //  File Path           : $Source: //ftwgroups/data/iappa/CVSROOT/isptech_cvs/isptech/coroutine/task.hpp,v $
 //  Source of funding   : IAPPA
 //
@@ -51,9 +51,6 @@ namespace Isptech   {
 namespace Coroutine {
 
 
-void print(const char*);
-
-
 /*
     Names/Types
 */
@@ -65,14 +62,12 @@ class Channel_base;
 class Channel_operation;
 using Channel_size = std::ptrdiff_t;
 class Scheduler;
-using Time_point = std::chrono::steady_clock::time_point;
-using Time_channel  = Channel<Time_point>;
-using Time_receiver = Receive_channel<Time_point>;
-using Time_sender   = Send_channel<Time_point>;
+using Time    = std::chrono::steady_clock::time_point;
+using Duration = std::chrono::nanoseconds;
+using Time_channel  = Channel<Time>;
 class Timer;
 using boost::optional;
 using std::exception_ptr;
-using std::chrono::nanoseconds;
 #pragma warning(disable: 4455)
 using std::vector;
 
@@ -252,14 +247,14 @@ private:
         Future_selector& operator=(const Future_selector&) = delete;
 
         // Selection
-        template<class T> bool  select_any(Task::Promise*, const Future<T>*, const Future<T>*, optional<nanoseconds>);
-        template<class T> bool  select_all(Task::Promise*, const Future<T>*, const Future<T>*, optional<nanoseconds>);
+        template<class T> bool  select_any(Task::Promise*, const Future<T>*, const Future<T>*, optional<Duration>);
+        template<class T> bool  select_all(Task::Promise*, const Future<T>*, const Future<T>*, optional<Duration>);
         optional<Channel_size>  selection() const;
         bool                    is_selected() const;
 
         // Event Processing
         bool notify_channel_readable(Task::Promise*, Channel_size chan);
-        bool notify_timer_expired(Task::Promise*, Time_point);
+        bool notify_timer_expired(Task::Promise*, Time);
         bool notify_timer_canceled();
 
     private:
@@ -459,7 +454,7 @@ private:
         class Timer {
         public:
             // Execution
-            void start(Task::Promise*, nanoseconds duration) const;
+            void start(Task::Promise*, Duration) const;
             void cancel(Task::Promise*) const;
 
             // Observers
@@ -468,7 +463,7 @@ private:
             bool is_active() const;     // running or cancelation pending
 
             // Event Handling
-            void notify_expired(Time_point) const;
+            void notify_expired(Time) const;
             void notify_canceled() const;
 
         private:
@@ -511,15 +506,15 @@ public:
         Channel_size                    selected_operation() const;
 
         // Future Selection
-        template<class T> void  wait_all(const Future<T>*, const Future<T>*, optional<nanoseconds> maxtime);
-        template<class T> void  wait_any(const Future<T>*, const Future<T>*, optional<nanoseconds> maxtime);
+        template<class T> void  wait_all(const Future<T>*, const Future<T>*, optional<Duration>);
+        template<class T> void  wait_any(const Future<T>*, const Future<T>*, optional<Duration>);
         optional<Channel_size>  selected_future() const;
         bool                    selected_futures() const;
 
         // Event Processing
         Select_status   notify_operation_complete(Channel_size pos);
         bool            notify_channel_readable(Channel_size pos);
-        bool            notify_timer_expired(Time_point);
+        bool            notify_timer_expired(Time);
         bool            notify_timer_canceled();
 
         // Execution
@@ -1258,7 +1253,7 @@ class All_futures_awaitable {
 public:
     // Construct
     All_futures_awaitable(const Future<T>*, const Future<T>*);
-    All_futures_awaitable(const Future<T>*, const Future<T>*, nanoseconds maxtime);
+    All_futures_awaitable(const Future<T>*, const Future<T>*, Duration);
 
     // Awaitable Operations
     bool await_ready();
@@ -1267,10 +1262,10 @@ public:
 
 private:
     // Data
-    const Future<T>*        first;
-    const Future<T>*        last;
-    optional<nanoseconds>   time;
-    Task::Handle            task;
+    const Future<T>*    first;
+    const Future<T>*    last;
+    optional<Duration>  timeout;
+    Task::Handle        task;
 };
 
 
@@ -1282,7 +1277,7 @@ class Any_future_awaitable {
 public:
     // Construct
     Any_future_awaitable(const Future<T>*, const Future<T>*);
-    Any_future_awaitable(const Future<T>*, const Future<T>*, nanoseconds maxtime);
+    Any_future_awaitable(const Future<T>*, const Future<T>*, Duration);
 
     // Awaitable Operations
     bool                    await_ready();
@@ -1291,10 +1286,10 @@ public:
 
 private:
     // Data
-    const Future<T>*        first;
-    const Future<T>*        last;
-    optional<nanoseconds>   time;
-    Task::Handle            task;
+    const Future<T>*    first;
+    const Future<T>*    last;
+    optional<Duration>  timeout;
+    Task::Handle        task;
 };
 
 
@@ -1304,32 +1299,28 @@ private:
 template<class T> Any_future_awaitable<T>                   wait_any(const vector<Future<T>>&);
 template<class T, Channel_size N> Any_future_awaitable<T>   wait_any(const Future<T> (&fs)[N]);
 template<class T> Any_future_awaitable<T>                   wait_any(const Future<T>*, const Future<T>*);
-template<class T> Any_future_awaitable<T>                   wait_any(const vector<Future<T>>&, nanoseconds maxtime);
-template<class T, Channel_size N> Any_future_awaitable<T>   wait_any(const Future<T> (&fs)[N], nanoseconds maxtime);
-template<class T> Any_future_awaitable<T>                   wait_any(const Future<T>*, const Future<T>*, nanoseconds maxtime);
+template<class T> Any_future_awaitable<T>                   wait_any(const vector<Future<T>>&, Duration);
+template<class T, Channel_size N> Any_future_awaitable<T>   wait_any(const Future<T> (&fs)[N], Duration);
+template<class T> Any_future_awaitable<T>                   wait_any(const Future<T>*, const Future<T>*, Duration);
 template<class T> All_futures_awaitable<T>                  wait_all(const vector<Future<T>>&);
 template<class T, Channel_size N> All_futures_awaitable<T>  wait_all(const Future<T> (&fs)[N]);
 template<class T> All_futures_awaitable<T>                  wait_all(const Future<T>*, const Future<T>*);
-template<class T> All_futures_awaitable<T>                  wait_all(const vector<Future<T>>&, nanoseconds maxtime);
-template<class T, Channel_size N> All_futures_awaitable<T>  wait_all(const Future<T> (&fs)[N], nanoseconds maxtime);
-template<class T> All_futures_awaitable<T>                  wait_all(const Future<T>*, const Future<T>*, nanoseconds maxtime);
+template<class T> All_futures_awaitable<T>                  wait_all(const vector<Future<T>>&, Duration);
+template<class T, Channel_size N> All_futures_awaitable<T>  wait_all(const Future<T> (&fs)[N], Duration);
+template<class T> All_futures_awaitable<T>                  wait_all(const Future<T>*, const Future<T>*, Duration);
 
 
 /*
     Timer
 */
 class Timer : boost::totally_ordered<Timer> {
-private:
-    // Names/Types
-    using Time_channel = Channel<Time_point>;
-
 public:
     // Names/Types
     using Awaitable = Time_channel::Receive_awaitable;
 
     // Construct/Copy/Destroy
     Timer() = default;
-    Timer(nanoseconds duration);
+    explicit Timer(Duration);
     Timer(const Timer&) = delete;
     Timer& operator=(const Timer&) = delete;
     Timer(Timer&&);
@@ -1339,17 +1330,17 @@ public:
 
     // Timer Functions
     bool stop();
-    bool reset(nanoseconds);
+    bool reset(Duration);
     bool is_active() const;
     bool is_ready() const;
 
     // Non-Blocking Receive
-    Awaitable               receive();
-    optional<Time_point>    try_receive();
-    Channel_operation       make_receive(Time_point*);
+    Awaitable           receive();
+    optional<Time>      try_receive();
+    Channel_operation   make_receive(Time*);
 
     // Blocking Receive
-    friend Time_point blocking_receive(Timer&);
+    friend Time blocking_receive(Timer&);
 
     // Conversions
     explicit operator bool() const;
@@ -1360,8 +1351,8 @@ public:
 
 private:
     // Construct
-    static Time_channel make_timer(Scheduler*, nanoseconds duration);
-    static bool         is_valid(nanoseconds duration);
+    static Time_channel make_timer(Scheduler*, Duration);
+    static bool         is_valid(Duration);
 
     // Data
     Time_channel chan;
@@ -1384,23 +1375,23 @@ public:
     Scheduler& operator=(const Scheduler&) = delete;
     ~Scheduler();
 
-    // Execution
+    // Task Execution
     void submit(Task);
     void resume(Task::Promise*);
 
-    /*
+    /* 
         Timers
 
         TODO:  The timer functions don't feel appropriate as a public
-        interface on the , and making them private would might create circular
-        dependencies beween the Task and the Scheduler (although this should
-        probably be evaluated as temporary solution). If it's possible to
-        find a better overall design (e.g., perhaps using task-specific data?)
-        which decouples basic Task  functionality (resume/suspend) from
-        components requiring  synchronization (e.g., channel I/O, future
-        waiting), that could be a big help.
+        interface on the Scheduler, and making them private would might
+        create circular dependencies beween the Task and the Scheduler
+        (although this should probably be evaluated as temporary solution).
+        If it's possible to find a better overall design (e.g., perhaps
+        using task-specific data?) which decouples basic Task functionality
+        (resume/suspend) from components requiring synchronization (e.g.,
+        channel I/O, future waiting), that could be a big help.
     */
-    void start_timer(Task::Promise*, nanoseconds duration);
+    void start_timer(Task::Promise*, Duration);
     void cancel_timer(Task::Promise*);
 
     // Friends
@@ -1457,7 +1448,7 @@ private:
         Condition           ready;
     };
 
-    class Task_queue_array {
+    class Task_queues {
     private:
         // Names/Types
         using Queue_vector = std::vector<Task_queue>;
@@ -1467,9 +1458,9 @@ private:
         using Size = Queue_vector::size_type;
     
         // Construct/Copy
-        explicit Task_queue_array(Size nqueues);
-        Task_queue_array(const Task_queue_array&) = delete;
-        Task_queue_array& operator=(const Task_queue_array&) = delete;
+        explicit Task_queues(Size nqueues);
+        Task_queues(const Task_queues&) = delete;
+        Task_queues& operator=(const Task_queues&) = delete;
     
         // Size
         Size size() const;
@@ -1523,12 +1514,12 @@ private:
         ~Timers();
 
         // Future Wait Timers
-        void start(Task::Promise*, nanoseconds duration);
+        void start(Task::Promise*, Duration);
         void cancel(Task::Promise*);
 
         // User Timers
-        void start(const Time_channel&, nanoseconds duration);
-        bool reset(const Time_channel&, nanoseconds duration);
+        void start(const Time_channel&, Duration);
+        bool reset(const Time_channel&, Duration);
         bool stop(const Time_channel&);
 
     private:
@@ -1548,29 +1539,27 @@ private:
         struct Alarm : boost::totally_ordered<Alarm> {
             // Construct
             Alarm() = default;
-            Alarm(Task::Promise* tskp, Time_point t) : taskp{tskp}, expiry{t} {}
-            Alarm(Time_channel c, Time_point t, nanoseconds p = nanoseconds::zero())
-                : taskp{nullptr}, channel{std::move(c)}, expiry{t}, period{p} {}
+            Alarm(Task::Promise* tskp, Time t) : taskp{tskp}, time{t} {}
+            Alarm(Time_channel c, Time t)
+                : taskp{nullptr}, channel{std::move(c)}, time{t} {}
 
             // Comparisons
             inline friend bool operator==(const Alarm& x, const Alarm& y) {
                 if (x.taskp != y.taskp) return false;
                 if (x.channel != y.channel) return false;
-                if (x.expiry != y.expiry) return false;
-                if (x.period != y.period) return false;
+                if (x.time != y.time) return false;
                 return true;
             }
 
             inline friend bool operator< (const Alarm& x, const Alarm& y) {
-                return x.expiry < y.expiry;
+                return x.time < y.time;
             }
 
             // Data
             Task::Promise*  taskp;
             Time_channel    channel;
-            Time_point      expiry;
-            nanoseconds     period;
-        };
+            Time            time;
+         };
 
         class Alarm_queue {
         private:
@@ -1615,7 +1604,7 @@ private:
 
             // Queue Functions
             Iterator    push(const Alarm&);
-            void        reschedule(Iterator, Time_point expiry);
+            void        reschedule(Iterator, Time expiry);
             Alarm       pop();
             void        erase(Iterator);
 
@@ -1624,7 +1613,7 @@ private:
             template<class T> Iterator  find(const T& alarmid);
 
             // Observers
-            Time_point next_expiry() const;
+            Time next_expiry() const;
         };
 
         using Windows_handle = HANDLE;
@@ -1660,27 +1649,26 @@ private:
         // Execution
         void run_thread();
 
-        // Alarm Activation/Cancelation/Reset
-        template<class T> void          sync_start(const T& id, nanoseconds duration);
-        template<class T> static void   start(const T& alarmid, nanoseconds duration, Alarm_queue* queuep, Windows_handle timer);
-        template<class T> bool          sync_cancel(const T& alarmid);
+        // Alarm Management
+        template<class T> void          sync_start(const T& id, Duration);
+        template<class T> static void   start_alarm(const T& id, Duration, Alarm_queue*, Windows_handle timer);
+        template<class T> bool          sync_cancel(const T& id);
         static bool                     cancel(Task::Promise*, Alarm_queue::Iterator, Alarm_queue*, Windows_handle timer);
         static bool                     cancel(Time_channel, Alarm_queue::Iterator, Alarm_queue*, Windows_handle timer);
         static void                     remove_canceled(Alarm_queue::Iterator, Alarm_queue*, Windows_handle timer);
-        static bool                     reset(Alarm_queue::Iterator, nanoseconds duration, Alarm_queue*, Windows_handle timer);
-        static void                     reschedule(Alarm_queue::Iterator, nanoseconds duration, Alarm_queue*, Windows_handle timer);
+        static void                     reschedule(Alarm_queue::Iterator, Duration, Alarm_queue*, Windows_handle timer);
 
-         // Alarm Processing
-        static void process_timer(Alarm_queue*, Windows_handle timer, Lock*);
-        static void process_expired(Alarm_queue*, Time_point now, Lock*);
-        static void process_expired(const Alarm&, Time_point now, Lock*);
-        static void process_expired(Task::Promise*, Time_point now, Lock*);
-        static void process_expired(const Time_channel&, Time_point now);
-        static bool notify_expired(Task::Promise*, Time_point now, Lock*);
-        static bool is_expired(const Alarm&, Time_point now);
+         // Ready Alarm Processing
+        static void process_ready(Alarm_queue*, Windows_handle timer, Lock*);
+        static void signal_ready(Alarm_queue*, Time now, Lock*);
+        static void signal_ready(const Alarm&, Time now, Lock*);
+        static void signal_alarm(Task::Promise*, Time now, Lock*);
+        static void signal_alarm(const Time_channel&, Time now);
+        static bool notify_timer_expired(Task::Promise*, Time now, Lock*);
+        static bool is_ready(const Alarm&, Time now);
 
         // Timer Functions
-        static void set_timer(Windows_handle timer, const Alarm&, Time_point now);
+        static void set_timer(Windows_handle timer, const Alarm&, Time now);
         static void cancel_timer(Windows_handle timer);
 
         // Data
@@ -1690,16 +1678,16 @@ private:
         Thread          thread;
     };
     
-    // Execution
+    // Task Execution
     void run_tasks(unsigned q);
 
     // User Timers
-    void start_timer(const Time_channel&, nanoseconds duration);
+    void start_timer(const Time_channel&, Duration);
     bool stop_timer(const Time_channel&);
-    bool reset_timer(const Time_channel&, nanoseconds duration);
+    bool reset_timer(const Time_channel&, Duration);
 
     // Data
-    Task_queue_array    ready;
+    Task_queues         ready;
     Waiting_tasks       waiting;
     Timers              timers;
     std::vector<Thread> processors;
