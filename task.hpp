@@ -628,6 +628,7 @@ public:
     Channel_size    size() const;
     Channel_size    capacity() const;
     bool            is_empty() const;
+    bool            is_full() const;
 
     // Non-Blocking Send/Receive
     Send_awaitable      send(const T&) const;
@@ -635,17 +636,15 @@ public:
     Receive_awaitable   receive() const;
     bool                try_send(const T&) const;
     optional<T>         try_receive() const;
+    Channel_operation   make_send(const T&) const;
+    Channel_operation   make_send(T&&) const;
+    Channel_operation   make_receive(T*) const;
 
-    // Blocking Send/Receive (move definitions outside class body in VS 2017)
+    // Blocking Send/Receive (can move outside class body in VS 2017)
     inline friend void  blocking_send(const Channel& c, const T& x) { c.pimpl->blocking_send(&x); }
     inline friend void  blocking_send(const Channel& c, T&& x)      { c.pimpl->blocking_send(&x); }
     inline friend T     blocking_receive(const Channel& c)          { return c.pimpl->blocking_receive(); }
 
-    // Operation Selection
-    Channel_operation make_send(const T&) const;
-    Channel_operation make_send(T&&) const;
-    Channel_operation make_receive(T*) const;
-    
     // Conversions
     explicit operator bool() const;
 
@@ -860,6 +859,7 @@ private:
         Channel_size    size() const;
         Channel_size    capacity() const;
         bool            is_empty() const;
+        bool            is_full() const;
 
         // Send/Receive
         template<class U> Send_awaitable    awaitable_send(U* valuep);
@@ -990,7 +990,7 @@ public:
     using Awaitable = typename Channel<T>::Send_awaitable;
 
     // Construct/Copy
-    Send_channel();
+    Send_channel() = default;
     Send_channel& operator=(Send_channel);
     inline friend void swap(Send_channel& x, Send_channel& y) { swap(x.pimpl, y.pimpl); }
 
@@ -998,23 +998,22 @@ public:
     Channel_size    size() const;
     Channel_size    capacity() const;
     bool            is_empty() const;
+    bool            is_full() const;
 
     // Non-Blocking Channel Operations
-    Awaitable   send(const T&) const;
-    Awaitable   send(T&&) const;
-    bool        try_send(const T&) const;
+    Awaitable           send(const T&) const;
+    Awaitable           send(T&&) const;
+    bool                try_send(const T&) const;
+    Channel_operation   make_send(const T&) const;
+    Channel_operation   make_send(T&&) const;
 
     // Blocking Channel Operations (can move outside class body in VS 2017)
     inline friend void blocking_send(const Send_channel& c, const T& x) { c.pimpl->blocking_send(&x); }
     inline friend void blocking_send(const Send_channel& c, T&& x)      { c.pimpl->blocking_send(&x); }
 
-    // Selectable Operations
-    Channel_operation make_send(const T&) const;
-    Channel_operation make_send(T&&) const;
-
     // Conversions
-    Send_channel(const Channel<T>&);
-    Send_channel& operator=(const Channel<T>&);
+    Send_channel(Channel<T>);
+    Send_channel& operator=(Channel<T>);
     explicit operator bool() const;
 
     // Comparisons
@@ -1038,7 +1037,7 @@ public:
     using Awaitable = typename Channel<T>::Receive_awaitable;
 
     // Construct/Copy
-    Receive_channel();
+    Receive_channel() = default;
     Receive_channel& operator=(Receive_channel);
     inline friend void swap(Receive_channel& x, Receive_channel& y) { swap(x.pimpl, y.pimpl);  }
 
@@ -1046,20 +1045,19 @@ public:
     Channel_size    size() const;
     Channel_size    capacity() const;
     bool            is_empty() const;
+    bool            is_full() const;
 
     // Non-Blocking Channel Operations
-    Awaitable   receive() const;
-    optional<T> try_receive() const;
+    Awaitable           receive() const;
+    optional<T>         try_receive() const;
+    Channel_operation   make_receive(T*);
 
-    // Blocking Channel Operations
+    // Blocking Channel Operations (can move outside class body in VS 2017)
     inline friend T blocking_receive(const Receive_channel& c) { return c.pimpl->blocking_receive(); }
 
-    // Selection
-    Channel_operation make_receive(T*);
-
     // Conversions
-    Receive_channel(const Channel<T>&);
-    Receive_channel& operator=(const Channel<T>&);
+    Receive_channel(Channel<T>);
+    Receive_channel& operator=(Channel<T>);
     explicit operator bool() const;
 
     // Comparisons
@@ -1321,10 +1319,17 @@ template<class T> All_futures_awaitable<T>                  wait_all(const Futur
     Timer
 */
 class Timer : boost::totally_ordered<Timer> {
+private:
+    // Names/Types
+    using Time_channel = Channel<Time_point>;
+
 public:
+    // Names/Types
+    using Awaitable = Time_channel::Receive_awaitable;
+
     // Construct/Copy/Destroy
     Timer() = default;
-    explicit Timer(nanoseconds);
+    Timer(nanoseconds duration);
     Timer(const Timer&) = delete;
     Timer& operator=(const Timer&) = delete;
     Timer(Timer&&);
@@ -1335,18 +1340,28 @@ public:
     // Timer Functions
     bool stop();
     bool reset(nanoseconds);
+    bool is_active() const;
+    bool is_ready() const;
 
-    // Channel
-    const Time_receiver& channel();
+    // Non-Blocking Receive
+    Awaitable               receive();
+    optional<Time_point>    try_receive();
+    Channel_operation       make_receive(Time_point*);
+
+    // Blocking Receive
+    friend Time_point blocking_receive(Timer&);
+
+    // Conversions
+    explicit operator bool() const;
 
     // Comparisons
     friend bool operator==(const Timer&, const Timer&);
     friend bool operator< (const Timer&, const Timer&);
 
 private:
-    // Channel Construction
-    static Time_channel make_channel();
-    static Time_channel make_channel(nanoseconds duration);
+    // Construct
+    static Time_channel make_timer(Scheduler*, nanoseconds duration);
+    static bool         is_valid(nanoseconds duration);
 
     // Data
     Time_channel chan;
@@ -1514,7 +1529,7 @@ private:
         // User Timers
         void start(const Time_channel&, nanoseconds duration);
         bool reset(const Time_channel&, nanoseconds duration);
-        bool cancel(const Time_channel&);
+        bool stop(const Time_channel&);
 
     private:
         /*
@@ -1535,7 +1550,7 @@ private:
             Alarm() = default;
             Alarm(Task::Promise* tskp, Time_point t) : taskp{tskp}, expiry{t} {}
             Alarm(Time_channel c, Time_point t, nanoseconds p = nanoseconds::zero())
-                : channel{std::move(c)} , expiry{t} , period{p} {}
+                : taskp{nullptr}, channel{std::move(c)}, expiry{t}, period{p} {}
 
             // Comparisons
             inline friend bool operator==(const Alarm& x, const Alarm& y) {
@@ -1679,9 +1694,9 @@ private:
     void run_tasks(unsigned q);
 
     // User Timers
-    void start(const Time_channel&, nanoseconds duration);
-    bool stop(const Time_channel&);
-    bool reset(const Time_channel&, nanoseconds duration);
+    void start_timer(const Time_channel&, nanoseconds duration);
+    bool stop_timer(const Time_channel&);
+    bool reset_timer(const Time_channel&, nanoseconds duration);
 
     // Data
     Task_queue_array    ready;

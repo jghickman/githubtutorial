@@ -624,7 +624,7 @@ Channel<T>::Readable_waiter::notify_channel_readable(Task::Promise* taskp, Chann
     /*
         If the waiting task has already been awakened, it could be in the
         midst of dequeing itself from this channel.  To avoid a deadly
-        embrace, unlock the channel while notifying the task that it has
+        embrace, unlock the channel before notifying the task that it has
         become readable.
     */
     const Unlock_sentry unlock{mutexp};
@@ -1121,7 +1121,7 @@ Channel<T>::notify_operation_complete(Task::Promise* taskp, Channel_size pos, Mu
     /*
         If the waiting task already been awakened, it could be in the
         midst of dequeing itself from this channel.  To avoid a deadly
-        embrace, unlock the channel while notifying the task that the
+        embrace, unlock the channel before notifying the task that the
         operation can be completed.
     */
     const Unlock_sentry unlock{mutexp};
@@ -1150,7 +1150,7 @@ template<class T>
 inline typename Channel<T>::Receive_awaitable
 Channel<T>::receive() const
 {
-    return pimpl->receive();
+    return pimpl->awaitable_receive();
 }
 
 
@@ -1413,6 +1413,15 @@ Channel<T>::Impl::is_empty() const
 
 template<class T>
 bool
+Channel<T>::Impl::is_full() const
+{
+    const Lock lock{mutex};
+    return buffer.is_full();
+}
+
+
+template<class T>
+bool
 Channel<T>::Impl::is_readable() const
 {
     return !(buffer.is_empty() && senders.is_empty());
@@ -1644,15 +1653,8 @@ Channel<T>::Send_awaitable::await_suspend(Task::Handle task)
 */
 template<class T>
 inline
-Receive_channel<T>::Receive_channel()
-{
-}
-
-
-template<class T>
-inline
-Receive_channel<T>::Receive_channel(const Channel<T>& chan)
-    : pimpl(chan.pimpl)
+Receive_channel<T>::Receive_channel(Channel<T> chan)
+    : pimpl{std::move(chan.pimpl)}
 {
 }
 
@@ -1662,6 +1664,22 @@ inline Channel_size
 Receive_channel<T>::capacity() const
 {
     return pimpl->capacity();
+}
+
+
+template<class T>
+inline bool
+Receive_channel<T>::is_empty() const
+{
+    return pimpl->is_empty();
+}
+
+
+template<class T>
+inline bool
+Receive_channel<T>::is_full() const
+{
+    return pimpl->is_full();
 }
 
 
@@ -1684,9 +1702,9 @@ Receive_channel<T>::operator=(Receive_channel other)
 
 template<class T>
 inline Receive_channel<T>&
-Receive_channel<T>::operator=(const Channel<T>& other)
+Receive_channel<T>::operator=(Channel<T> other)
 {
-    pimpl = other.pimpl;
+    pimpl = std::move(other.pimpl);
     return *this;
 }
 
@@ -1753,15 +1771,8 @@ swap(Receive_channel<T>& x, Receive_channel<T>& y)
 */
 template<class T>
 inline
-Send_channel<T>::Send_channel()
-{
-}
-
-
-template<class T>
-inline
-Send_channel<T>::Send_channel(const Channel<T>& other)
-    : pimpl{other.pimpl}
+Send_channel<T>::Send_channel(Channel<T> other)
+    : pimpl{std::move(other.pimpl)}
 {
 }
 
@@ -1771,6 +1782,22 @@ inline Channel_size
 Send_channel<T>::capacity() const
 {
     return pimpl->capacity();
+}
+
+
+template<class T>
+inline bool
+Send_channel<T>::is_empty() const
+{
+    return pimpl->is_empty();
+}
+
+
+template<class T>
+inline bool
+Send_channel<T>::is_full() const
+{
+    return pimpl->is_full();
 }
 
 
@@ -1801,9 +1828,9 @@ Send_channel<T>::operator=(Send_channel other)
 
 template<class T>
 inline Send_channel<T>&
-Send_channel<T>::operator=(const Channel<T>& other)
+Send_channel<T>::operator=(Channel<T> other)
 {
-    pimpl = other.pimpl;
+    pimpl = std::move(other.pimpl);
     return *this;
 }
 
@@ -2382,10 +2409,24 @@ Timer::~Timer()
 }
 
 
-inline const Time_receiver&
-Timer::channel()
+inline bool
+Timer::is_active() const
 {
-    return chan;
+    return chan && chan.is_empty();
+}
+
+
+inline bool
+Timer::is_ready() const
+{
+    return chan && !chan.is_empty();
+}
+
+
+inline Channel_operation
+Timer::make_receive(Time_point* tp)
+{
+    return chan.make_receive(tp);
 }
 
 
@@ -2397,10 +2438,38 @@ Timer::operator=(Timer&& other)
 }
 
 
+inline
+Timer::operator bool() const
+{
+    return chan ? true : false;
+}
+
+
+inline Timer::Awaitable
+Timer::receive()
+{
+    return chan.receive();
+}
+
+
 inline bool
 Timer::stop()
 {
-    return chan ? scheduler.stop(chan) : false;
+    return chan ? scheduler.stop_timer(chan) : false;
+}
+
+
+inline optional<Time_point>
+Timer::try_receive()
+{
+    return chan.try_receive();
+}
+
+
+inline Time_point
+blocking_receive(Timer& timer)
+{
+    return blocking_receive(timer.chan);
 }
 
 

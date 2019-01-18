@@ -39,9 +39,9 @@ using std::accumulate;
 using std::count_if;
 using std::find_if;
 using std::iota;
-using std::literals::chrono_literals::operator""ns;
 using std::move;
 using std::next;
+using std::literals::chrono_literals::operator""ns;
 using std::sort;
 using std::try_to_lock;
 using std::unique;
@@ -174,6 +174,11 @@ Task::Operation_selector::Channel_locks::unlock(Channel_base* chanp)
 */
 Task::Operation_selector::Transform_unique::Transform_unique(const Channel_operation* first, const Channel_operation* last, Operation_vector* outp)
 {
+    /*
+        TODO: Could writing loops to skip duplicate operations (rather than
+        adding a step to remove them) result in significantly better
+        performance due to improved algorithmic efficiency?
+    */
     transform(first, last, outp);
     sort(outp->begin(), outp->end());
     remove_duplicates(outp);
@@ -1348,13 +1353,6 @@ Scheduler::Timers::cancel(Task::Promise* taskp)
 
 
 bool
-Scheduler::Timers::cancel(const Time_channel& chan)
-{
-    return sync_cancel(chan);
-}
-
-
-bool
 Scheduler::Timers::cancel(Task::Promise* taskp, Alarm_queue::Iterator alarmp, Alarm_queue* queuep, Windows_handle timer)
 {
     remove_canceled(alarmp, queuep, timer);
@@ -1391,9 +1389,8 @@ inline bool
 Scheduler::Timers::notify_expired(Task::Promise* taskp, Time_point now, Lock* lockp)
 {
     /*
-        Timer cancellation can race with timer expiration.  To avoid a
-        deadly embrace, unlock the timers while notifying the task that its
-        timer has expired.
+        Timer cancellation can race with timer expiration, so unlock the
+        timers before notifying the task that its timer has expired.
     */
     const Unlock_sentry unlock{lockp};
     return taskp->notify_timer_expired(now);
@@ -1472,7 +1469,7 @@ Scheduler::Timers::reschedule(Alarm_queue::Iterator alarmp, nanoseconds duration
 }
 
 
-bool
+inline bool
 Scheduler::Timers::reset(const Time_channel& chan, nanoseconds duration)
 {
     bool        is_reset{false};
@@ -1553,6 +1550,13 @@ Scheduler::Timers::start(const T& alarmid, nanoseconds duration, Alarm_queue* qu
 }
 
 
+inline bool
+Scheduler::Timers::stop(const Time_channel& chan)
+{
+    return sync_cancel(chan);
+}
+
+
 template<class T>
 inline bool
 Scheduler::Timers::sync_cancel(const T& alarmid)
@@ -1572,10 +1576,9 @@ template<class T>
 inline void
 Scheduler::Timers::sync_start(const T& alarmid, nanoseconds duration)
 {
-    if (duration >= 0ns) {
-        const Lock lock{mutex};
-        start(alarmid, duration, &alarmq, handles.timer());
-    }
+    const Lock lock{mutex};
+
+    start(alarmid, duration, &alarmq, handles.timer());
 }
 
 
@@ -1611,6 +1614,13 @@ void
 Scheduler::cancel_timer(Task::Promise* taskp)
 {
     timers.cancel(taskp);
+}
+
+
+bool
+Scheduler::reset_timer(const Time_channel& chan, nanoseconds duration)
+{
+    return timers.reset(chan, duration);
 }
 
 
@@ -1651,6 +1661,20 @@ Scheduler::start_timer(Task::Promise* taskp, nanoseconds duration)
 
 
 void
+Scheduler::start_timer(const Time_channel& chan, nanoseconds duration)
+{
+    timers.start(chan, duration);
+}
+
+
+bool
+Scheduler::stop_timer(const Time_channel& chan)
+{
+    return timers.stop(chan);
+}
+
+
+void
 Scheduler::submit(Task task)
 {
     ready.push(move(task));
@@ -1661,39 +1685,38 @@ Scheduler::submit(Task task)
     Timer
 */
 Timer::Timer(nanoseconds duration)
-    : chan{make_channel(duration)}
+    : chan{is_valid(duration) ? make_timer(&scheduler, duration) : Time_channel()}
 {
-    if (chan)
-        scheduler.start(chan, duration);
+}
+
+
+inline bool
+Timer::is_valid(nanoseconds duration)
+{
+    return duration >= 0ns;
 }
 
 
 inline Time_channel
-Timer::make_channel()
+Timer::make_timer(Scheduler* schedp, nanoseconds duration)
 {
-    return Coroutine::make_channel<Time_point>(1);
-}
+    Time_channel chan = make_channel<Time_point>(1);
 
-
-inline Time_channel
-Timer::make_channel(nanoseconds duration)
-{
-    return duration >= 0ns ? make_channel() : Time_channel();
+    scheduler.start_timer(chan, duration);
+    return chan;
 }
 
 
 bool
 Timer::reset(nanoseconds duration)
 {
-    bool is_reset{false};
+    bool is_reset = false;
 
-    if (duration >= 0ns) {
-        if (chan) 
-            is_reset = scheduler.reset(chan, duration);
-        else {
-            chan = make_channel();
-            scheduler.start(chan, duration);
-        } 
+    if (is_valid(duration)) {
+        if (!chan)
+            chan = make_timer(&scheduler, duration);
+        else if (scheduler.reset_timer(chan, duration))
+            is_reset = true;
     }
 
     return is_reset;

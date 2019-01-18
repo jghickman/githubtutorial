@@ -229,10 +229,28 @@ wait_any_task(int n, Send_channel<int> results)
 }
 
 
+Task
+print_seconds(int n)
+{
+    using namespace std::literals::chrono_literals;
+
+    Timer timer;
+
+    cout << "start" << endl;
+
+    for (int i = 0; i < n; ++i) {
+        timer.reset(1s);
+        co_await timer.receive();
+        cout << ' ' << i + 1;
+    }
+
+    cout << '\n' << "done" << endl;
+}
+
 void
 main(int argc, char* argv[])
 {
-    
+#if 0
     Channel<int> results = make_channel<int>(1);
 
     start(wait_all_task, 0, results);
@@ -247,6 +265,10 @@ main(int argc, char* argv[])
     }
 
     cout << '}' << endl;
+#endif
+
+
+    start(print_seconds, 5);
 
     char c;
     cin >> c;
