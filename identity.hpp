@@ -23,7 +23,7 @@
 
 
 /*
-    Information and Sensor Processing Technology Coroutine Library
+    Information and Sensor Processing Technology Object Request Broker
 */
 namespace Isptech   {
 namespace Orb       {

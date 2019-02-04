@@ -22,42 +22,60 @@
 #include "isptech/orb/buffer.hpp"
 #include "isptech/orb/function.hpp"
 #include "isptech/orb/identity.hpp"
+#include <memory>
 
 
 /*
-    Information and Sensor Processing Technology Coroutine Library
+    Information and Sensor Processing Technology Object Request Broker
 */
 namespace Isptech   {
 namespace Orb       {
 
 
 /*
-    Proxy
+    Twoway Proxy
 */
-class Proxy : boost::totally_ordered<Proxy> {
+class Twoway_proxy : boost::totally_ordered<Twoway_proxy> {
 public:
-    // Construct
-    Proxy();
+    // Names/Tytpes
+    class Interface;
+    using Interface_ptr = std::shared_ptr<Interface>;
+
+    // Construct/Copy/Move
+    Twoway_proxy() = default;
+    Twoway_proxy(Identity, Interface_ptr);
+    Twoway_proxy(const Twoway_proxy&) = default;
+    Twoway_proxy& operator=(const Twoway_proxy&) = default;
+    Twoway_proxy(Twoway_proxy&&);
+    Twoway_proxy& operator=(Twoway_proxy&&);
+    friend void swap(Twoway_proxy&, Twoway_proxy&);
 
     // Function Invocation
-    void invoke(const Function&, Const_buffer in) const;
+    bool invoke(const Function&, Const_buffers in, Io_buffer* outp) const;
+    bool invoke(const Function&, Const_buffers in, Mutable_buffers* outp) const;
 
-    // Observers
-    Identity identity() const;
+    // Object Identity
+    void        object(Identity);
+    Identity    object() const;
 
     // Comparisons
-    friend bool operator==(const Proxy&, const Proxy&);
-    friend bool operator< (const Proxy&, const Proxy&);
+    friend bool operator==(const Twoway_proxy&, const Twoway_proxy&);
+    friend bool operator< (const Twoway_proxy&, const Twoway_proxy&);
 
 private:
+    // Data
+    Identity        oid;
+    Interface_ptr   ifacep;
 };
 
 
-class A;
-
-class Foo {
+/*
+    Twoway_proxy Interface
+*/
+class Twoway_proxy::Interface {
 public:
-    A* make_a();
+    // Function Invocation
+    virtual bool invoke(Identity, const Function&, Const_buffer in, Io_buffer* outp) const = 0;
 };
 
 

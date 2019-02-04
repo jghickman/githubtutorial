@@ -21,7 +21,7 @@
 
 
 /*
-    Information and Sensor Processing Technology Coroutine Library
+    Information and Sensor Processing Technology Obejct Request Broker
 */
 namespace Isptech   {
 namespace Orb       {
@@ -29,6 +29,8 @@ namespace Orb       {
 
 /*
     Message Header
+
+    NOTE:  This class must be a standard-layout type.
 */
 class Message_header {
 };

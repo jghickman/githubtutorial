@@ -23,7 +23,7 @@
 
 
 /*
-    Information and Sensor Processing Technology Coroutine Library
+    Information and Sensor Processing Technology Object Request Broker
 */
 namespace Isptech   {
 namespace Orb       {
@@ -36,7 +36,7 @@ namespace Orb       {
 /*
     Function
 */
-class Function : boost::totally_ordered<Function>{
+class Function : boost::totally_ordered<Function> {
 };
 
 
