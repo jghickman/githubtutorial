@@ -30,14 +30,49 @@ namespace Orb       {
 
 
 /*
+    Names/Types
 */
+using Function_id = int;
+
+
+/*
+    Function Type
+*/
+enum class Function_type : int {
+    normal,
+    idempotent
+};
 
 
 /*
     Function
 */
 class Function : boost::totally_ordered<Function> {
+public:
+    // Construct
+    constexpr Function();
+    constexpr Function(Function_id, Function_type);
+
+    // Modifiers
+    constexpr void id(Function_id);
+    constexpr void type(Function_type);
+
+    // Observers
+    constexpr Function_id   id() const;
+    constexpr Function_type type() const;
+
+    // Comparisons
+    friend constexpr bool operator==(Function, Function);
+    friend constexpr bool operator< (Function, Function);
+
+private:
+    // Data
+    Function_id     which;
+    Function_type   kind;
 };
+
+
+using Member_function = Function;
 
 
 }   // Orb
