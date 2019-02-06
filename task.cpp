@@ -755,8 +755,8 @@ bool
 Task::Future_selector::notify_timer_expired(Task::Promise* taskp, Time when)
 {
     /*
-        Timer cancellation can race with timer expiration, so treat
-        expiration as a cancellation event if cancellation was requested.
+        Timer expiration can race with cancellation, so treat expiration
+        as a cancellation notification if cancellation was requested.
     */
     if (timer.is_canceled())
         timer.notify_canceled();

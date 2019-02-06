@@ -511,7 +511,13 @@ public:
         optional<Channel_size>  selected_future() const;
         bool                    selected_futures() const;
 
-        // Event Processing
+        /*
+            Event Processing
+
+            TODO: Seems like it would be better to let the task resume itself
+            rather than make the caller do it (e.g., better encapsulation,
+            more consistent with OS threads).
+        */
         Select_status   notify_operation_complete(Channel_size pos);
         bool            notify_channel_readable(Channel_size pos);
         bool            notify_timer_expired(Time);
@@ -629,11 +635,11 @@ public:
     Send_awaitable      send(const T&) const;
     Send_awaitable      send(T&&) const;
     Receive_awaitable   receive() const;
-    bool                try_send(const T&) const;
-    optional<T>         try_receive() const;
     Channel_operation   make_send(const T&) const;
     Channel_operation   make_send(T&&) const;
     Channel_operation   make_receive(T*) const;
+    bool                try_send(const T&) const;
+    optional<T>         try_receive() const;
 
     // Blocking Send/Receive (can move outside class body in VS 2017)
     inline friend void  blocking_send(const Channel& c, const T& x) { c.pimpl->blocking_send(&x); }
@@ -869,14 +875,12 @@ private:
         Channel_operation make_send(T* valuep);
         Channel_operation make_receive(T* valuep);
 
-        // I/O Readiness
-        bool is_readable() const override;
-        bool is_writable() const override;
-
         // Non-Blocking I/O
         void read(void* valuep) override;
         void write(const void* rvaluep) override;
         void write(void* lvaluep) override;
+        bool is_readable() const override;
+        bool is_writable() const override;
 
         // Blocking I/O
         void enqueue_read(Task::Promise*, Channel_size pos, void* valuep) override;
@@ -885,7 +889,7 @@ private:
         void enqueue_write(Task::Promise*, Channel_size pos, void* lvaluep) override;
         bool dequeue_write(Task::Promise*, Channel_size pos) override;
 
-        // Waiting
+        // Event Waiting
         void enqueue_readable_wait(Task::Promise*, Channel_size pos) override;
         bool dequeue_readable_wait(Task::Promise*, Channel_size pos) override;
 
@@ -1072,16 +1076,16 @@ private:
     Channel Operation
 
     Users can call select() or try_select() to choose an operation for
-    execution from a set of alternatives.  If more than one alternative
-    is ready, a random choice is made.  Selecting from a set of channels
+    execution from a set of alternatives.  If multiple alternatives are
+    ready, a selection is made at random.  Selecting from a set of channels
     with disparate element types requires an operation interface that is
     independent of element types, so perhaps the ideal design would involve
     channels which construct type-safe operation implementations using
     inheritance to hide the element type.  But that would imply dynamic
     memory allocation, so we temporarily avoid that approach in favor of
-    type-unsafe interfaces with which users needn't directly interact.
-    Perhaps the small object optimization could be employed in the future
-    to realize a better design.
+    type-unsafe interfaces (with which users needn't directly interact).
+    Perhaps the small object optimization could be employed to realize a
+    better design in the future.
 */
 class Channel_operation : boost::totally_ordered<Channel_operation> {
 public:
