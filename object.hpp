@@ -19,8 +19,12 @@
 #ifndef ISPTECH_ORB_OBJECT_HPP
 #define ISPTECH_ORB_OBJECT_HPP
 
+#include "isptech/orb/buffer.hpp"
+#include "isptech/orb/function.hpp"
+#include "isptech/orb/object_id.hpp"
+#include "isptech/orb/future.hpp"
 #include "boost/operators.hpp"
-#include <cstddef>
+#include <memory>
 
 
 /*
@@ -31,75 +35,87 @@ namespace Orb       {
 
 
 /*
-    Names/Types
+    Object Implementation
 */
-using Object_type           = std::ptrdiff_t;
-using Object_instance       = std::ptrdiff_t;
-using Member_function_id    = int;
-
-
-/*
-    Object Identity
-*/
-class Object_id : boost::totally_ordered<Object_id> {
+class Object_impl : boost::totally_ordered<Object_impl> {
 public:
-    // Construct
-    constexpr Object_id();
-    constexpr Object_id(Object_type, Object_instance);
+    // Names/Types
+    class Interface;
+    using Interface_ptr = std::shared_ptr<Interface>;
 
-    // Modifiers
-    constexpr void type(Object_type);
-    constexpr void instance(Object_instance);
+    // Construct/Copy/Move
+    Object_impl() = default;
+    Object_impl(Object_id, Interface_ptr);
+    Object_impl(const Object_impl&) = default;
+    Object_impl& operator=(const Object_impl&) = default;
+    Object_impl(Object_impl&&);
+    Object_impl& operator=(Object_impl&&);
+    friend void swap(Object_impl&, Object_impl&);
 
-    // Observers
-    constexpr Object_type       type() const;
-    constexpr Object_instance   instance() const;
+    // Function Invocation
+    Future<bool>::Awaitable invoke(Object_id, Function, Const_buffers in, Io_buffer* outp) const;
+    Future<bool>::Awaitable invoke(Object_id, Function, Const_buffers in, Mutable_buffers* outp) const;
 
     // Comparisons
-    friend constexpr bool operator==(Object_id, Object_id);
-    friend constexpr bool operator< (Object_id, Object_id);
+    friend bool operator==(const Object_impl&, const Object_impl&);
+    friend bool operator< (const Object_impl&, const Object_impl&);
 
 private:
     // Data
-    Object_type        what;
-    Object_instance    which;
+    Interface_ptr ifacep;
 };
 
 
 /*
-    Member Function Type
+    Object Interface
 */
-enum class Member_function_type : int {
-    normal,
-    idempotent
+class Object_impl::Interface {
+public:
+    // Copy/Destroy
+    Interface(const Interface&) = delete;
+    Interface& operator=(const Interface&) = delete;
+    virtual ~Interface() = default;
+
+    // Member Function Invocation
+    virtual Future<bool>::Awaitable invoke(Object_id, Function, Const_buffer in, Io_buffer* outp) const = 0;
+    virtual Future<bool>::Awaitable invoke(Object_id, Function, Const_buffer in, Mutable_buffers* outp) const = 0;
 };
 
 
 /*
-    Member Function
+    Object
 */
-class Member_function : boost::totally_ordered<Member_function> {
+class Object : boost::totally_ordered<Object> {
 public:
-    // Construct
-    constexpr Member_function();
-    constexpr Member_function(Member_function_id, Member_function_type);
+    // Construct/Copy/Move
+    Object() = default;
+    Object(Object_id, Object_impl);
+    Object(const Object&) = default;
+    Object& operator=(const Object&) = default;
+    Object(Object&&);
+    Object& operator=(Object&&);
+    friend void swap(Object&, Object&);
 
-    // Modifiers
-    constexpr void id(Member_function_id);
-    constexpr void type(Member_function_type);
+    // Identity
+    void        identity(Object_id);
+    Object_id   identity() const;
 
-    // Observers
-    constexpr Member_function_id    id() const;
-    constexpr Member_function_type  type() const;
+    // Implementation
+    void                implementation(Object_impl);
+    const Object_impl&  implementation() const;
+
+    // Function Invocation
+    Future<bool>::Awaitable invoke(Function, Const_buffers in, Io_buffer* outp) const;
+    Future<bool>::Awaitable invoke(Function, Const_buffers in, Mutable_buffers* outp) const;
 
     // Comparisons
-    friend constexpr bool operator==(Member_function, Member_function);
-    friend constexpr bool operator< (Member_function, Member_function);
+    friend bool operator==(const Object&, const Object&);
+    friend bool operator< (const Object&, const Object&);
 
 private:
     // Data
-    Member_function_id     which;
-    Member_function_type   kind;
+    Object_id   object;
+    Object_impl impl;
 };
 
 

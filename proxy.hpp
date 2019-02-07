@@ -21,7 +21,9 @@
 
 #include "isptech/orb/buffer.hpp"
 #include "isptech/orb/function.hpp"
-#include "isptech/orb/identity.hpp"
+#include "isptech/orb/object_id.hpp"
+#include "isptech/orb/future.hpp"
+#include "boost/operators.hpp"
 #include <memory>
 
 
@@ -33,30 +35,29 @@ namespace Orb       {
 
 
 /*
-    Twoway Proxy
+    Two-Way Proxy
 */
 class Twoway_proxy : boost::totally_ordered<Twoway_proxy> {
 public:
-    // Names/Tytpes
+    // Names/Types
     class Interface;
     using Interface_ptr = std::shared_ptr<Interface>;
 
     // Construct/Copy/Move
     Twoway_proxy() = default;
-    Twoway_proxy(Identity, Interface_ptr);
+    Twoway_proxy(Object_id, Interface_ptr);
     Twoway_proxy(const Twoway_proxy&) = default;
     Twoway_proxy& operator=(const Twoway_proxy&) = default;
     Twoway_proxy(Twoway_proxy&&);
     Twoway_proxy& operator=(Twoway_proxy&&);
     friend void swap(Twoway_proxy&, Twoway_proxy&);
 
-    // Function Invocation
-    bool invoke(const Function&, Const_buffers in, Io_buffer* outp) const;
-    bool invoke(const Function&, Const_buffers in, Mutable_buffers* outp) const;
-
     // Object Identity
-    void        object(Identity);
-    Identity    object() const;
+    Object_id object() const;
+
+    // Member Function Invocation
+    Future<bool>::Awaitable invoke(Function, Const_buffers in, Io_buffer* outp) const;
+    Future<bool>::Awaitable invoke(Function, Const_buffers in, Mutable_buffers* outp) const;
 
     // Comparisons
     friend bool operator==(const Twoway_proxy&, const Twoway_proxy&);
@@ -64,18 +65,24 @@ public:
 
 private:
     // Data
-    Identity        oid;
+    Object_id       oid;
     Interface_ptr   ifacep;
 };
 
 
 /*
-    Twoway_proxy Interface
+    Two-Way Proxy Interface
 */
 class Twoway_proxy::Interface {
 public:
-    // Function Invocation
-    virtual bool invoke(Identity, const Function&, Const_buffer in, Io_buffer* outp) const = 0;
+    // Copy/Destroy
+    Interface(const Interface&) = delete;
+    Interface& operator=(const Interface&) = delete;
+    virtual ~Interface() = default;
+
+    // Member Function Invocation
+    virtual Future<bool>::Awaitable invoke(Object_id, Function, Const_buffer in, Io_buffer* outp) const = 0;
+    virtual Future<bool>::Awaitable invoke(Object_id, Function, Const_buffer in, Mutable_buffers* outp) const = 0;
 };
 
 

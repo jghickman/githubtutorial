@@ -72,9 +72,6 @@ private:
 };
 
 
-using Member_function = Function;
-
-
 }   // Orb
 }   // Isptech
 
