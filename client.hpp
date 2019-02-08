@@ -53,8 +53,7 @@ public:
     const string& name() const;
 
     // Proxy Construction
-    Twoway_proxy make_twoway_proxy(Object_id) const;
-    Twoway_proxy make_twoway_proxy(Object_id, const string& network, const string& address) const;
+    Twoway_proxy make_twoway_proxy(Object_id, const string& endpoint) const;
 
     // Conversions
     operator bool() const;
@@ -83,7 +82,7 @@ public:
     virtual const string& name() const = 0;
 
     // Proxy Construction
-    virtual Twoway_proxy make_twoway(Object_id, const string& network, const string& address);
+    virtual Twoway_proxy make_twoway_proxy(Object_id, const string& endpoint) = 0;
 };
 
 

@@ -35,56 +35,6 @@ namespace Orb       {
 
 
 /*
-    One-Way Proxy
-*/
-class Oneway_proxy : boost::totally_ordered<Oneway_proxy> {
-public:
-    // Names/Types
-    class Interface;
-    using Interface_ptr = std::shared_ptr<Interface>;
-
-    // Construct/Copy/Move
-    Oneway_proxy() = default;
-    Oneway_proxy(Object_id, Interface_ptr);
-    Oneway_proxy(const Oneway_proxy&) = default;
-    Oneway_proxy& operator=(const Oneway_proxy&) = default;
-    Oneway_proxy(Oneway_proxy&&);
-    Oneway_proxy& operator=(Oneway_proxy&&);
-    friend void swap(Oneway_proxy&, Oneway_proxy&);
-
-    // Object Identity
-    Object_id object() const;
-
-    // Member Function Invocation
-    void invoke(Function, Const_buffers in) const;
-
-    // Comparisons
-    friend bool operator==(const Oneway_proxy&, const Oneway_proxy&);
-    friend bool operator< (const Oneway_proxy&, const Oneway_proxy&);
-
-private:
-    // Data
-    Object_id       objectid;
-    Interface_ptr   ifacep;
-};
-
-
-/*
-    One-Way Proxy Interface
-*/
-class Oneway_proxy::Interface {
-public:
-    // Copy/Destroy
-    Interface(const Interface&) = delete;
-    Interface& operator=(const Interface&) = delete;
-    virtual ~Interface() = default;
-
-    // Member Function Invocation
-    virtual void invoke(Object_id, Function, Const_buffer in) = 0;
-};
-
-
-/*
     Two-Way Proxy
 */
 class Twoway_proxy : boost::totally_ordered<Twoway_proxy> {
@@ -105,17 +55,21 @@ public:
     // Object Identity
     Object_id object() const;
 
-    // Member Function Invocation
+    // Function Invocation
     Future<bool>::Awaitable invoke(Function, Const_buffers in, Io_buffer* outp) const;
     Future<bool>::Awaitable invoke(Function, Const_buffers in, Mutable_buffers* outp) const;
     void                    invoke_oneway(Function, Const_buffers in) const;
+
+    // Blocking Function Invocation
+    friend bool blocking_invoke(const Twoway_proxy&, Function, Const_buffers in, Io_buffer* outp);
+    friend bool blocking_invoke(const Twoway_proxy&, Function, Const_buffers in, Mutable_buffers* outp);
 
     // Comparisons
     friend bool operator==(const Twoway_proxy&, const Twoway_proxy&);
     friend bool operator< (const Twoway_proxy&, const Twoway_proxy&);
 
 private:
-    // Data
+    // Daat
     Object_id       objectid;
     Interface_ptr   ifacep;
 };
@@ -131,16 +85,19 @@ public:
     Interface& operator=(const Interface&) = delete;
     virtual ~Interface() = default;
 
-    // Member Function Invocation
+    // Function Invocation
     virtual Future<bool>::Awaitable invoke(Object_id, Function, Const_buffer in, Io_buffer* outp) = 0;
     virtual Future<bool>::Awaitable invoke(Object_id, Function, Const_buffer in, Mutable_buffers* outp) = 0;
     virtual void                    invoke_oneway(Object_id, Function, Const_buffer in) = 0;
+
+    // Blocking Function Invocation
+    virtual bool blocking_invoke(Function, Const_buffers in, Io_buffer* outp) = 0;
+    virtual bool blocking_invoke(Function, Const_buffers in, Mutable_buffers* outp) = 0;
 };
 
 
 }   // Orb
 }   // Isptech
-
 
 #endif  // ISPTECH_ORB_PROXY_HPP
 

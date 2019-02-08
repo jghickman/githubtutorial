@@ -50,8 +50,8 @@ public:
     friend void swap(Broker&, Broker&);
 
     // Client/Server Access
-    Client make_client() const;
-    Server make_server(const Server_name&) const;
+    Client make_client(const string& name) const;
+    Server make_server(const string& name) const;
 
     // Conversions
     operator bool() const;
@@ -77,11 +77,8 @@ public:
     virtual ~Interface() = default;
 
     // Client/Server Construction
-    virtual Server make_server(const Server_name&) = 0;
-
-    // Execution
-    virtual void start() const = 0;
-    virtual void stop() const = 0;
+    virtual Client make_client(const string& name) = 0;
+    virtual Server make_server(const string& name) = 0;
 };
 
 

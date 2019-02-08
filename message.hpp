@@ -19,6 +19,8 @@
 #ifndef ISPTECH_ORB_MESSAGE_HPP
 #define ISPTECH_ORB_MESSAGE_HPP
 
+#include "isptech/orb/buffer.hpp"
+
 
 /*
     Information and Sensor Processing Technology Obejct Request Broker
@@ -28,11 +30,35 @@ namespace Orb       {
 
 
 /*
-    Message Header
+    NOTE:  All types comprising messages must be standard-layout or POD types.
+*/
 
-    NOTE:  This class must be a standard-layout type.
+
+/*
+    Message Type
+*/
+enum class Message_type : char {
+    request,
+    reply
+};
+
+
+/*
+    Message Header
 */
 class Message_header {
+public:
+    Message_type    type() const;
+    Buffer_size     size() const;
+};
+
+
+/*
+    Request Header
+*/
+class Request_header {
+public:
+    Buffer_size size() const;
 };
 
 
