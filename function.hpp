@@ -38,9 +38,18 @@ using Function_id = int;
 /*
     Function Type
 */
-enum class Function_type : int {
-    normal,
-    idempotent
+enum class Function_type : char {
+    observer,
+    modifier
+};
+
+
+/*
+    Function Effect
+*/
+enum class Function_effect : char {
+    readonly,
+    write
 };
 
 

@@ -77,13 +77,17 @@ public:
     virtual ~Interface() = default;
 
     // Member Function Invocation
-    virtual Future<bool>::Awaitable invoke(Object_id, Function, Const_buffer in, Io_buffer* outp) const = 0;
-    virtual Future<bool>::Awaitable invoke(Object_id, Function, Const_buffer in, Mutable_buffers* outp) const = 0;
+    virtual Future<bool>::Awaitable invoke(Object_id, Function, Const_buffer in, Io_buffer* outp) = 0;
+    virtual Future<bool>::Awaitable invoke(Object_id, Function, Const_buffer in, Mutable_buffers* outp) = 0;
 };
 
 
 /*
     Object
+
+    TODO:  Would there be merit in including an indication of const-ness in
+    an object's invocation interface to reflect the const-ness of the
+    underlying member function?
 */
 class Object : boost::totally_ordered<Object> {
 public:

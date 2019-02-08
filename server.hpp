@@ -32,6 +32,21 @@ namespace Isptech   {
 namespace Orb       {
 
 
+class Object_ref {
+public:
+    // Observers
+    Object_id identity() const;
+};
+
+
+class Object_set {
+public:
+    Object_ref  add(Object) const;
+    Object      remove(Object_id) const;
+    Object_ref  find(Object_id) const;
+};
+
+
 /*
     Server
 */
