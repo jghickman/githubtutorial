@@ -1413,7 +1413,7 @@ Scheduler::Timers::process_ready(Alarm_queue* queuep, Windows_handle timer, Lock
 void
 Scheduler::Timers::remove_canceled(Alarm_queue::Iterator alarmp, Alarm_queue* queuep, Windows_handle timer)
 {
-    // If this is the next alarm to fire, update the timer.
+    // If the alarm will be the next to fire, update the timer.
     if (alarmp == queuep->begin()) {
         const auto nextp = next(alarmp);
         if (nextp == queuep->end())
@@ -1592,9 +1592,9 @@ Scheduler::Scheduler(int nthreads)
 {
     const auto nqs = ready.size();
 
-    processors.reserve(nqs);
+    threads.reserve(nqs);
     for (unsigned q = 0; q != nqs; ++q)
-        processors.emplace_back([&,q]{ run_tasks(q); });
+        threads.emplace_back([&,q]{ run_tasks(q); });
 }
 
 
@@ -1607,8 +1607,8 @@ Scheduler::Scheduler(int nthreads)
 Scheduler::~Scheduler()
 {
     ready.interrupt();
-    for (auto& proc : processors)
-        proc.join();
+    for (auto& thread : threads)
+        thread.join();
 }
 
 

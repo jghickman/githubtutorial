@@ -54,10 +54,13 @@ namespace Coroutine {
 /*
     Names/Types
 */
-template<class T> class Channel;
-template<class T> class Send_channel;
-template<class T> class Receive_channel;
-template<class T> class Future;
+template<class T>   class Channel;
+template<class T>   class Send_channel;
+template<class T>   class Receive_channel;
+template<>          class Channel<void>;
+template<>          class Send_channel<void>;
+template<>          class Receive_channel<void>;
+template<class T>   class Future;
 class Channel_base;
 class Channel_operation;
 using Channel_size = std::ptrdiff_t;
@@ -69,7 +72,6 @@ class Timer;
 using boost::optional;
 using std::exception_ptr;
 #pragma warning(disable: 4455)
-using std::vector;
 
 
 /*
@@ -78,8 +80,13 @@ using std::vector;
     A Task is a lightweight cooperative thread implemented by a stackless
     coroutine.  Tasks are multiplexed onto operating system threads by a
     Scheduler.  A Task can suspend its execution without blocking the thread
-    on which it was invoked, thus freeing the Scheduler to re-allocate the
+    on which it was invoked, thus freeing the Scheduler to re-assign the
     thread to another ready Task.
+
+    TODO:  Creating a "task local" storage capability (a la
+    std::thread_local) would make it possible to decouple the implementation
+    of disparate synchronization constructs (e.g., channels, futures, etc.)
+    from the Task itself (see boost::thread_specific_ptr for ideas).
 */
 class Task : boost::equality_comparable<Task> {
 public:
@@ -600,7 +607,93 @@ public:
 
 
 /*
-    Channel Operations
+    Channel Operation
+
+    Users can select a channel operation from set of alternatives.  If
+    multiple operations are ready, a random selection is made.  The need to
+    select an operation from a set of channels with disparate element types
+    suggests an operation interface that is independent of element types, so
+    perhaps the ideal design would employ virtual functions.  But since that
+    would imply dynamic memory allocation, we temporarily avoid that approach
+    in favor of type-unsafe interfaces (with which users needn't directly
+    interact).
+    
+    TODO:  Employ the small object optimization to make inheritance affordable?
+*/
+class Channel_operation : boost::totally_ordered<Channel_operation> {
+public:
+    // Names/Types
+    enum class Type : int { none, send, receive };
+
+    // Construct/Copy
+    Channel_operation();
+    Channel_operation(Channel_base*, const void* rvaluep); // send copy
+    Channel_operation(Channel_base*, void* lvaluep, Type); // send movable/receive
+
+    // Execution
+    bool is_ready() const;
+    void enqueue(Task::Promise*, Channel_size pos) const;
+    bool dequeue(Task::Promise*, Channel_size pos) const;
+    void execute() const;
+
+    // Observers
+    Channel_base* channel() const;
+
+    // Comparisons
+    friend inline bool operator==(const Channel_operation& x, const Channel_operation& y) {
+        if (x.chanp != y.chanp) return false;
+        if (x.kind != y.kind) return false;
+        return true;
+    }
+
+    inline friend bool operator< (const Channel_operation& x, const Channel_operation& y) {
+        if (x.chanp < y.chanp) return true;
+        if (y.chanp < x.chanp) return false;
+        if (x.kind < y.kind) return true;
+        return false;
+    }
+
+private:
+    // Data
+    Channel_base*   chanp;
+    Type            kind;
+    const void*     rvalp;
+    void*           lvalp;
+};
+
+
+/*
+    Channel Operation Selection Awaitable
+*/
+class Channel_select_awaitable {
+public:
+    // Construct
+    Channel_select_awaitable(const Channel_operation*, const Channel_operation*);
+
+    // Awaitable Operations
+    bool            await_ready();
+    bool            await_suspend(Task::Handle);
+    Channel_size    await_resume();
+
+private:
+    // Data
+    Task::Handle                task;
+    const Channel_operation*    first;
+    const Channel_operation*    last;
+};
+
+
+/*
+    Channel Operation Selection
+*/
+template<Channel_size N> Channel_select_awaitable   select(const Channel_operation (&ops)[N]);
+Channel_select_awaitable                            select(const Channel_operation*, const Channel_operation*);
+template<Channel_size N> optional<Channel_size>     try_select(const Channel_operation (&ops)[N]);
+optional<Channel_size>                              try_select(const Channel_operation*, const Channel_operation*);
+
+
+/*
+    Channel Construction
 */
 template<class T> Channel<T> make_channel(Channel_size capacity=0);
 
@@ -622,7 +715,7 @@ public:
     Channel& operator=(const Channel&) = default;
     Channel(Channel&&);
     Channel& operator=(Channel&&);
-    friend Channel make_channel<T>(Channel_size capacity);
+    template <class T> friend Channel<T> make_channel<T>(Channel_size capacity);
     inline friend void swap(Channel& x, Channel& y) { swap(x.pimpl, y.pimpl); }
 
     // Size and Capacity
@@ -641,7 +734,7 @@ public:
     bool                try_send(const T&) const;
     optional<T>         try_receive() const;
 
-    // Blocking Send/Receive (can move outside class body in VS 2017)
+    // Blocking Send/Receive (move out of body if >= VS '17)
     inline friend void  blocking_send(const Channel& c, const T& x) { c.pimpl->blocking_send(&x); }
     inline friend void  blocking_send(const Channel& c, T&& x)      { c.pimpl->blocking_send(&x); }
     inline friend T     blocking_receive(const Channel& c)          { return c.pimpl->blocking_receive(); }
@@ -656,6 +749,9 @@ public:
     // Friends
     friend class Send_channel<T>;
     friend class Receive_channel<T>;
+    friend class Channel<void>;
+    friend class Send_channel<void>;
+    friend class Receive_channel<void>;
 
 private:
     // Names/Types
@@ -699,7 +795,7 @@ private:
 
         // Size and Capacity
         Channel_size    size() const;
-        Channel_size    max_size() const;
+        Channel_size    capacity() const;
         bool            is_empty() const;
         bool            is_full() const;
 
@@ -736,7 +832,7 @@ private:
 
         // Comparisons
         inline friend bool operator==(const Sender& x, const Sender& y) {
-            if (x.condp != y.condp) return false;
+            if (x.readyp != y.readyp) return false;
             if (x.rvalp != y.rvalp) return false;
             if (x.lvalp != y.lvalp) return false;
             if (x.taskp != y.taskp) return false;
@@ -851,7 +947,7 @@ private:
     using Sender_queue      = Io_queue<Sender>;
     using Receiver_queue    = Io_queue<Receiver>;
 
-    class Impl final : public Channel_base {
+    class Impl : public Channel_base {
     public:
         // Construct
         explicit Impl(Channel_size bufsize);
@@ -1006,7 +1102,7 @@ public:
     Channel_operation   make_send(const T&) const;
     Channel_operation   make_send(T&&) const;
 
-    // Blocking Channel Operations (can move outside class body in VS 2017)
+    // Blocking Channel Operations (move out of body if >= VS '17)
     inline friend void blocking_send(const Send_channel& c, const T& x) { c.pimpl->blocking_send(&x); }
     inline friend void blocking_send(const Send_channel& c, T&& x)      { c.pimpl->blocking_send(&x); }
 
@@ -1051,7 +1147,7 @@ public:
     optional<T>         try_receive() const;
     Channel_operation   make_receive(T*);
 
-    // Blocking Channel Operations (can move outside class body in VS 2017)
+    // Blocking Channel Operations (move out of body if >= VS '17)
     inline friend T blocking_receive(const Receive_channel& c) { return c.pimpl->blocking_receive(); }
 
     // Conversions
@@ -1073,90 +1169,219 @@ private:
 
 
 /*
-    Channel Operation
-
-    Users can call select() or try_select() to choose an operation for
-    execution from a set of alternatives.  If multiple alternatives are
-    ready, a selection is made at random.  Selecting from a set of channels
-    with disparate element types requires an operation interface that is
-    independent of element types, so perhaps the ideal design would involve
-    channels which construct type-safe operation implementations using
-    inheritance to hide the element type.  But that would imply dynamic
-    memory allocation, so we temporarily avoid that approach in favor of
-    type-unsafe interfaces (with which users needn't directly interact).
-    Perhaps the small object optimization could be employed to realize a
-    better design in the future.
+    Channel of "void"
 */
-class Channel_operation : boost::totally_ordered<Channel_operation> {
+template<>
+class Channel<void> : boost::totally_ordered<Channel<void>> {
 public:
     // Names/Types
-    enum class Type : int { none, send, receive };
+    class Send_awaitable;
+    class Receive_awaitable;
+    using Value = void;
 
     // Construct/Copy
-    Channel_operation();
-    Channel_operation(Channel_base*, const void* rvaluep); // send copy
-    Channel_operation(Channel_base*, void* lvaluep, Type); // send movable/receive
+    Channel() = default;
+    Channel(const Channel&) = default;
+    Channel& operator=(const Channel&) = default;
+    Channel(Channel&&);
+    Channel& operator=(Channel&&);
+    template <class T> friend Channel<T> make_channel<T>(Channel_size capacity);
+    inline friend void swap(Channel& x, Channel& y) { swap(x.pimpl, y.pimpl); }
 
-    // Execution
-    bool is_ready() const;
-    void enqueue(Task::Promise*, Channel_size pos) const;
-    bool dequeue(Task::Promise*, Channel_size pos) const;
-    void execute() const;
+    // Size and Capacity
+    Channel_size    size() const;
+    Channel_size    capacity() const;
+    bool            is_empty() const;
+    bool            is_full() const;
 
-    // Observers
-    Channel_base* channel() const;
+    // Non-Blocking Send/Receive
+    Send_awaitable      send() const;
+    Receive_awaitable   receive() const;
+    Channel_operation   make_send() const;
+    Channel_operation   make_receive() const;
+    bool                try_send() const;
+    bool                try_receive() const;
+
+    // Blocking Send/Receive (move out of body if >= VS '17)
+    inline friend void blocking_send(const Channel& c)      { c.pimpl->blocking_send(); }
+    inline friend void blocking_receive(const Channel& c)   { c.pimpl->blocking_receive(); }
+
+    // Conversions
+    explicit operator bool() const;
 
     // Comparisons
-    friend inline bool operator==(const Channel_operation& x, const Channel_operation& y) {
-        if (x.chanp != y.chanp) return false;
-        if (x.kind != y.kind) return false;
-        return true;
-    }
+    inline friend bool operator==(const Channel& x, const Channel& y) { return x.pimpl == y.pimpl; }
+    inline friend bool operator< (const Channel& x, const Channel& y) { return x.pimpl < y.pimpl; }
 
-    inline friend bool operator< (const Channel_operation& x, const Channel_operation& y) {
-        if (x.chanp < y.chanp) return true;
-        if (y.chanp < x.chanp) return false;
-        if (x.kind < y.kind) return true;
-        return false;
-    }
+    // Friends
+    friend class Send_channel<void>;
+    friend class Receive_channel<void>;
 
 private:
-    // Data
-    Channel_base*   chanp;
-    Type            kind;
-    const void*     rvalp;
-    void*           lvalp;
-};
+    // Names/Types
+    class Impl : public Channel<char>::Impl {
+    public:
+        // Construct
+        explicit Impl(Channel_size bufsize);
 
+        // Non-Blocking Send/Receive
+        Channel_operation   make_send();
+        Channel_operation   make_receive();
+        bool                try_send();
+        bool                try_receive();
 
-/*
-    Channel Select Awaitable
-*/
-class Channel_select_awaitable {
-public:
+        // Blocking Send/Receive
+        void blocking_send();
+        void blocking_receive();
+
+    private:
+        // Data
+        char scratch;
+    };
+
+    using Impl_ptr = std::shared_ptr<Impl>;
+
     // Construct
-    Channel_select_awaitable(const Channel_operation*, const Channel_operation*);
+    Channel(Impl_ptr);
 
-    // Awaitable Operations
-    bool            await_ready();
-    bool            await_suspend(Task::Handle);
-    Channel_size    await_resume();
-
-private:
     // Data
-    Task::Handle                task;
-    const Channel_operation*    first;
-    const Channel_operation*    last;
+    Impl_ptr pimpl;
 };
 
 
 /*
-    Channel Selection
+    Channel of "void" Receive Awaitable
 */
-template<Channel_size N> Channel_select_awaitable   select(const Channel_operation (&ops)[N]);
-Channel_select_awaitable                            select(const Channel_operation*, const Channel_operation*);
-template<Channel_size N> optional<Channel_size>     try_select(const Channel_operation (&ops)[N]);
-optional<Channel_size>                              try_select(const Channel_operation*, const Channel_operation*);
+class Channel<void>::Send_awaitable {
+public:
+    // Awaitable Operations
+    bool await_ready();
+    bool await_suspend(Task::Handle);
+    void await_resume();
+
+    // Friends
+    friend class Channel<void>;
+
+private:
+    // Construct
+    Send_awaitable(const Channel_operation&);
+
+    // Data
+    Channel_operation receive[1];
+};
+
+
+/*
+    Channel of "void" Receive Awaitable
+*/
+class Channel<void>::Receive_awaitable {
+public:
+    // Awaitable Operations
+    bool await_ready();
+    bool await_suspend(Task::Handle);
+    void await_resume();
+
+    // Friends
+    friend class Channel<void>;
+
+private:
+    // Construct
+    Receive_awaitable(const Channel_operation&);
+
+    // Data
+    Channel_operation receive[1];
+};
+
+
+/*
+    Send Channel of "void"
+*/
+template<>
+class Send_channel<void> : boost::totally_ordered<Send_channel<void>> {
+public:
+    // Names/Types
+    using Value     = Channel<void>::Value;
+    using Awaitable = Channel<void>::Send_awaitable;
+
+    // Construct/Copy
+    Send_channel() = default;
+    Send_channel& operator=(Send_channel);
+    inline friend void swap(Send_channel& x, Send_channel& y) { swap(x.pimpl, y.pimpl); }
+
+    // Size and Capacity
+    Channel_size    size() const;
+    Channel_size    capacity() const;
+    bool            is_empty() const;
+    bool            is_full() const;
+
+    // Non-Blocking Channel Operations
+    Awaitable           send() const;
+    bool                try_send() const;
+    Channel_operation   make_send() const;
+
+    // Blocking Channel Operations (move out of body if >= VS '17)
+    inline friend void blocking_send(const Send_channel& c) { c.pimpl->blocking_send(); }
+
+    // Conversions
+    Send_channel(Channel<void>);
+    Send_channel& operator=(Channel<void>);
+    explicit operator bool() const;
+
+    // Comparisons
+    inline friend bool operator==(const Send_channel& x, const Send_channel& y) { return x.pimpl == y.pimpl; }
+    inline friend bool operator< (const Send_channel& x, const Send_channel& y) { return x.pimpl < y.pimpl; }
+
+private:
+    // Data
+    Channel<void>::Impl_ptr pimpl;
+};
+
+
+/*
+    Receive Channel of "void"
+*/
+template<>
+class Receive_channel<void> : boost::totally_ordered<Receive_channel<void>> {
+public:
+    // Names/Types
+    using Value     = Channel<void>::Value;
+    using Awaitable = Channel<void>::Receive_awaitable;
+
+    // Construct/Copy
+    Receive_channel() = default;
+    Receive_channel& operator=(Receive_channel);
+    inline friend void swap(Receive_channel& x, Receive_channel& y) { swap(x.pimpl, y.pimpl);  }
+
+    // Size and Capacity
+    Channel_size    size() const;
+    Channel_size    capacity() const;
+    bool            is_empty() const;
+    bool            is_full() const;
+
+    // Non-Blocking Channel Operations
+    Awaitable           receive() const;
+    bool                try_receive() const;
+    Channel_operation   make_receive();
+
+    // Blocking Channel Operations (move out of body if >= VS '17)
+    inline friend void blocking_receive(const Receive_channel& c) { c.pimpl->blocking_receive(); }
+
+    // Conversions
+    Receive_channel(Channel<void>);
+    Receive_channel& operator=(Channel<void>);
+    explicit operator bool() const;
+
+    // Comparisons
+    inline friend bool operator==(const Receive_channel& x, const Receive_channel& y) { return x.pimpl == y.pimpl; }
+    inline friend bool operator< (const Receive_channel& x, const Receive_channel& y) { return x.pimpl < y.pimpl; }
+
+    // Friends
+    friend class Future<void>;
+
+private:
+    // Data
+    Channel<void>::Impl_ptr pimpl;
+};
 
 
 /*
@@ -1300,16 +1525,16 @@ private:
 /*
     Future Waiting
 */
-template<class T> Any_future_awaitable<T>                   wait_any(const vector<Future<T>>&);
+template<class T> Any_future_awaitable<T>                   wait_any(const std::vector<Future<T>>&);
 template<class T, Channel_size N> Any_future_awaitable<T>   wait_any(const Future<T> (&fs)[N]);
 template<class T> Any_future_awaitable<T>                   wait_any(const Future<T>*, const Future<T>*);
-template<class T> Any_future_awaitable<T>                   wait_any(const vector<Future<T>>&, Duration);
+template<class T> Any_future_awaitable<T>                   wait_any(const std::vector<Future<T>>&, Duration);
 template<class T, Channel_size N> Any_future_awaitable<T>   wait_any(const Future<T> (&fs)[N], Duration);
 template<class T> Any_future_awaitable<T>                   wait_any(const Future<T>*, const Future<T>*, Duration);
-template<class T> All_futures_awaitable<T>                  wait_all(const vector<Future<T>>&);
+template<class T> All_futures_awaitable<T>                  wait_all(const std::vector<Future<T>>&);
 template<class T, Channel_size N> All_futures_awaitable<T>  wait_all(const Future<T> (&fs)[N]);
 template<class T> All_futures_awaitable<T>                  wait_all(const Future<T>*, const Future<T>*);
-template<class T> All_futures_awaitable<T>                  wait_all(const vector<Future<T>>&, Duration);
+template<class T> All_futures_awaitable<T>                  wait_all(const std::vector<Future<T>>&, Duration);
 template<class T, Channel_size N> All_futures_awaitable<T>  wait_all(const Future<T> (&fs)[N], Duration);
 template<class T> All_futures_awaitable<T>                  wait_all(const Future<T>*, const Future<T>*, Duration);
 
@@ -1694,7 +1919,7 @@ private:
     Task_queues         ready;
     Waiting_tasks       waiting;
     Timers              timers;
-    std::vector<Thread> processors;
+    std::vector<Thread> threads;
 };
 
 
