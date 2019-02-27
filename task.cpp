@@ -944,6 +944,87 @@ Channel_operation::is_ready() const
 
 
 /*
+    Future "void" Awaitable
+*/
+void
+Future<void>::Awaitable::await_resume()
+{
+    /*
+        If a future is ready, the result can be obtained from one of its
+        channels without waiting.  Otherwise, the task waiting on this
+        future has just awakened from a call to select() having received
+        either a value or an error.
+    */
+    if (selfp->is_ready())
+        selfp->get_ready();
+    else if (ep)
+        rethrow_exception(ep);
+}
+
+
+bool
+Future<void>::Awaitable::await_suspend(Task::Handle task)
+{
+    ops[0] = selfp->vchan.make_receive();
+    ops[1] = selfp->echan.make_receive(&ep);
+    task.promise().select(ops);
+    return true;
+}
+
+
+/*
+    Future of "void"
+*/
+void
+Future<void>::get_ready()
+{
+    if (vchan.try_receive())
+        isready = false;
+    else if (optional<exception_ptr> epp = echan.try_receive()) {
+        isready = false;
+        rethrow_exception(*epp);
+    }
+}
+
+
+bool
+Future<void>::try_get()
+{
+    const bool is_value = vchan.try_receive();
+
+    if (is_value)
+        isready = false;
+    else if (optional<exception_ptr> epp = echan.try_receive()) {
+        isready = false;
+        rethrow_exception(*epp);
+    }
+
+    return is_value;
+}
+
+
+bool
+operator==(const Future<void>& x, const Future<void>& y)
+{
+    if (x.vchan != y.vchan) return false;
+    if (x.echan != y.echan) return false;
+    if (x.isready != y.isready) return false;
+    return true;
+}
+
+
+void
+swap(Future<void>& x, Future<void>& y)
+{
+    using std::swap;
+
+    swap(x.vchan, y.vchan);
+    swap(x.echan, y.echan);
+    swap(x.isready, y.isready);
+}
+
+
+/*
     Scheduler Suspended Tasks
 */
 inline
@@ -1413,7 +1494,7 @@ Scheduler::Timers::process_ready(Alarm_queue* queuep, Windows_handle timer, Lock
 void
 Scheduler::Timers::remove_canceled(Alarm_queue::Iterator alarmp, Alarm_queue* queuep, Windows_handle timer)
 {
-    // If the alarm will be the next to fire, update the timer.
+    // If the alarm is next to fire, update the timer.
     if (alarmp == queuep->begin()) {
         const auto nextp = next(alarmp);
         if (nextp == queuep->end())
