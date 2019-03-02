@@ -238,6 +238,7 @@ private:
         static optional<Channel_size>   select_ready(const Operation_vector&);
         static Channel_size             count_ready(const Operation_vector&);
         static Channel_size             pick_ready(const Operation_vector&, Channel_size nready);
+        static Channel_size             get_ready(const Operation_vector& ops, Channel_size n);
         static Channel_size             enqueue(Task::Promise*, const Operation_vector&);
         static Channel_size             dequeue(Task::Promise*, const Operation_vector&, Channel_size selected);
 
@@ -437,6 +438,7 @@ private:
             // Completion
             static Channel_size             count_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&);
             static optional<Channel_size>   pick_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
+            static Channel_size             get_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&, Channel_size n);
 
             // Data
             Channel_wait_vector channels;

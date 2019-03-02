@@ -244,6 +244,22 @@ Task::Operation_selector::enqueue(Task::Promise* taskp, const Operation_vector& 
 }
 
 
+Channel_size
+Task::Operation_selector::get_ready(const Operation_vector& ops, Channel_size n)
+{
+    assert(n > 0);
+
+    Channel_size ready = n;
+
+    for (Channel_size i = 0, remaining = n; ready == n; ++i) {
+        if (ops[i].is_ready() && --remaining == 0)
+            ready = i;
+    }
+
+    return ready;
+}
+
+
 Task::Select_status
 Task::Operation_selector::notify_complete(Task::Promise* taskp, Channel_size pos)
 {
@@ -262,17 +278,8 @@ Task::Operation_selector::pick_ready(const Operation_vector& ops, Channel_size n
 {
     assert(ops.size() > 0 && nready > 0);
 
-    Channel_size pos;
-    Channel_size pick = random(1, nready);
-
-    for (Channel_size i = 0, n = ops.size(); i < n; ++i) {
-        if (ops[i].is_ready() && --pick == 0) {
-            pos = i;
-            break;
-        }
-    }
-
-    return pos;
+    const Channel_size choice = random(1, nready);
+    return get_ready(ops, choice);
 }
 
 
@@ -586,6 +593,22 @@ Task::Future_selector::Future_set::enqueue(Task::Promise* taskp)
 }
 
 
+Channel_size
+Task::Future_selector::Future_set::get_ready(const Future_wait_index& index, const Future_wait_vector& futures, const Channel_wait_vector& chans, Channel_size n)
+{
+    assert(n > 0);
+
+    Channel_size ready = n;
+
+    for (Channel_size i = 0, remaining = n; ready == n; ++i) {
+        if (futures[index[i]].is_ready(chans) && --remaining == 0)
+            ready = i;
+    }
+
+    return ready;
+}
+
+
 void
 Task::Future_selector::Future_set::index_unique(const Future_wait_vector& waits, Future_wait_index* indexp)
 {
@@ -631,13 +654,8 @@ Task::Future_selector::Future_set::pick_ready(const Future_wait_index& index, co
     optional<Channel_size> ready;
 
     if (nready > 0) {
-        Channel_size choice = random(1, nready);
-        for (auto i : index) {
-            if (futures[i].is_ready(chans) && --choice == 0) {
-                ready = i;
-                break;
-            }
-        }
+        const Channel_size choice = random(1, nready);
+        ready = get_ready(index, futures, chans, choice);
     }
 
     return ready;
