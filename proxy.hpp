@@ -56,9 +56,9 @@ public:
     Object_id object() const;
 
     // Function Invocation
-    Future<bool>::Awaitable invoke(Function, Const_buffers in, Io_buffer* outp) const;
-    Future<bool>::Awaitable invoke(Function, Const_buffers in, Mutable_buffers* outp) const;
-    void                    invoke_oneway(Function, Const_buffers in) const;
+    Future<bool>    invoke(Function, Const_buffers in, Io_buffer* outp) const;
+    Future<bool>    invoke(Function, Const_buffers in, Mutable_buffers* outp) const;
+    void            invoke_oneway(Function, Const_buffers in) const;
 
     // Blocking Function Invocation
     friend bool blocking_invoke(const Twoway_proxy&, Function, Const_buffers in, Io_buffer* outp);
@@ -86,9 +86,9 @@ public:
     virtual ~Interface() = default;
 
     // Function Invocation
-    virtual Future<bool>::Awaitable invoke(Object_id, Function, Const_buffer in, Io_buffer* outp) = 0;
-    virtual Future<bool>::Awaitable invoke(Object_id, Function, Const_buffer in, Mutable_buffers* outp) = 0;
-    virtual void                    invoke_oneway(Object_id, Function, Const_buffer in) = 0;
+    virtual Future<bool>    invoke(Object_id, Function, Const_buffer in, Io_buffer* outp) = 0;
+    virtual Future<bool>    invoke(Object_id, Function, Const_buffer in, Mutable_buffers* outp) = 0;
+    virtual void            invoke_oneway(Object_id, Function, Const_buffer in) = 0;
 
     // Blocking Function Invocation
     virtual bool blocking_invoke(Function, Const_buffers in, Io_buffer* outp) = 0;
