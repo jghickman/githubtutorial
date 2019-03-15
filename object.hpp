@@ -19,12 +19,8 @@
 #ifndef ISPTECH_ORB_OBJECT_HPP
 #define ISPTECH_ORB_OBJECT_HPP
 
-#include "isptech/orb/buffer.hpp"
-#include "isptech/orb/function.hpp"
-#include "isptech/orb/object_id.hpp"
-#include "isptech/orb/future.hpp"
+#include "isptech/orb/object_impl.hpp"
 #include "boost/operators.hpp"
-#include <memory>
 
 
 /*
@@ -32,54 +28,6 @@
 */
 namespace Isptech   {
 namespace Orb       {
-
-
-/*
-    Object Implementation
-*/
-class Object_impl : boost::totally_ordered<Object_impl> {
-public:
-    // Names/Types
-    class Interface;
-    using Interface_ptr = std::shared_ptr<Interface>;
-
-    // Construct/Copy/Move
-    Object_impl() = default;
-    Object_impl(Object_id, Interface_ptr);
-    Object_impl(const Object_impl&) = default;
-    Object_impl& operator=(const Object_impl&) = default;
-    Object_impl(Object_impl&&);
-    Object_impl& operator=(Object_impl&&);
-    friend void swap(Object_impl&, Object_impl&);
-
-    // Function Invocation
-    Future<bool>::Awaitable invoke(Object_id, Function, Const_buffers in, Io_buffer* outp) const;
-    Future<bool>::Awaitable invoke(Object_id, Function, Const_buffers in, Mutable_buffers* outp) const;
-
-    // Comparisons
-    friend bool operator==(const Object_impl&, const Object_impl&);
-    friend bool operator< (const Object_impl&, const Object_impl&);
-
-private:
-    // Data
-    Interface_ptr ifacep;
-};
-
-
-/*
-    Object Interface
-*/
-class Object_impl::Interface {
-public:
-    // Copy/Destroy
-    Interface(const Interface&) = delete;
-    Interface& operator=(const Interface&) = delete;
-    virtual ~Interface() = default;
-
-    // Member Function Invocation
-    virtual Future<bool>::Awaitable invoke(Object_id, Function, Const_buffer in, Io_buffer* outp) = 0;
-    virtual Future<bool>::Awaitable invoke(Object_id, Function, Const_buffer in, Mutable_buffers* outp) = 0;
-};
 
 
 /*
@@ -93,11 +41,9 @@ class Object : boost::totally_ordered<Object> {
 public:
     // Construct/Copy/Move
     Object() = default;
-    Object(Object_id, Object_impl);
-    Object(const Object&) = default;
-    Object& operator=(const Object&) = default;
+    explicit Object(Object_impl, Object_id = Object_id());
+    Object& operator=(Object);
     Object(Object&&);
-    Object& operator=(Object&&);
     friend void swap(Object&, Object&);
 
     // Identity
@@ -105,12 +51,12 @@ public:
     Object_id   identity() const;
 
     // Implementation
-    void                implementation(Object_impl);
-    const Object_impl&  implementation() const;
+    void                base(Object_impl);
+    const Object_impl&  base() const;
 
     // Function Invocation
-    Future<bool>::Awaitable invoke(Function, Const_buffers in, Io_buffer* outp) const;
-    Future<bool>::Awaitable invoke(Function, Const_buffers in, Mutable_buffers* outp) const;
+    Future<bool> invoke(Function, Const_buffers in, Io_buffer* outp) const;
+    Future<bool> invoke(Function, Const_buffers in, Mutable_buffers* outp) const;
 
     // Comparisons
     friend bool operator==(const Object&, const Object&);
@@ -118,7 +64,7 @@ public:
 
 private:
     // Data
-    Object_id   object;
+    Object_id   id;
     Object_impl impl;
 };
 
@@ -126,6 +72,9 @@ private:
 }   // Orb
 }   // Isptech
 
+
+// External Definitions
+#include "isptech/orb/object.inl"
 
 #endif  // ISPTECH_ORB_OBJECT_HPP
 

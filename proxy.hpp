@@ -26,12 +26,29 @@
 #include "boost/operators.hpp"
 #include <memory>
 
+#include <vector> // for sketching
+
 
 /*
     Information and Sensor Processing Technology Object Request Broker
 */
 namespace Isptech   {
 namespace Orb       {
+
+
+class Dynamic_buffer {
+public:
+    void* resize(int) const;
+};
+    
+
+template<class T> Dynamic_buffer dynamic_buffer(T&);
+
+void
+copy(void* in, int n, Dynamic_buffer_view out)
+{
+    if (!out.resize(n)) throw Buffer_overflow();
+}
 
 
 /*
@@ -45,33 +62,49 @@ public:
 
     // Construct/Copy/Move
     Twoway_proxy() = default;
-    Twoway_proxy(Object_id, Interface_ptr);
-    Twoway_proxy(const Twoway_proxy&) = default;
-    Twoway_proxy& operator=(const Twoway_proxy&) = default;
+    Twoway_proxy(Interface_ptr);
+    Twoway_proxy& operator=(Twoway_proxy);
     Twoway_proxy(Twoway_proxy&&);
-    Twoway_proxy& operator=(Twoway_proxy&&);
     friend void swap(Twoway_proxy&, Twoway_proxy&);
 
-    // Object Identity
-    Object_id object() const;
-
     // Function Invocation
-    Future<bool>    invoke(Function, Const_buffers in, Io_buffer* outp) const;
-    Future<bool>    invoke(Function, Const_buffers in, Mutable_buffers* outp) const;
-    void            invoke_oneway(Function, Const_buffers in) const;
+    Future<bool> invoke(Object_id, Function) const;                                         // input=n, output=n
+    Future<bool> invoke(Object_id, Function, const Dynamic_buffer& out) const;              // input=n, output=y
+    Future<bool> invoke(Object_id, Function, Const_buffers in) const;                       // input=y, output=n
+    Future<bool> invoke(Object_id, Function, Const_buffers in, Dynamic_buffer out) const;   // input=y, output=y
 
-    // Blocking Function Invocation
-    friend bool blocking_invoke(const Twoway_proxy&, Function, Const_buffers in, Io_buffer* outp);
-    friend bool blocking_invoke(const Twoway_proxy&, Function, Const_buffers in, Mutable_buffers* outp);
+
+    Future<bool> invoke(Object_id, Function, Mutable_buffers out) const; // input=n, output=y
 
     // Comparisons
     friend bool operator==(const Twoway_proxy&, const Twoway_proxy&);
     friend bool operator< (const Twoway_proxy&, const Twoway_proxy&);
 
 private:
-    // Daat
-    Object_id       objectid;
-    Interface_ptr   ifacep;
+    // Data
+    Interface_ptr ifacep;
+};
+
+
+class File {
+public:
+    int read(char* bufferp);        // read max of fixed-size buffer
+    int read(Mutable_buffers);      // read max of fixed-size buffers
+    int read(std::vector<char>*);   // read until end-of-input
+
+    void    set_id(int);
+    int     get_id() const;
+
+    Future<void> read(std::vector<int>* vp) {
+        proxy.invoke(object, read_int_vector, dynamic_buffer(*vp));
+
+        Channel<void> 
+    }
+
+private:
+    Twoway_proxy    proxy;
+    Object_id       object;
+    Function        read_int_vector;
 };
 
 
@@ -86,13 +119,48 @@ public:
     virtual ~Interface() = default;
 
     // Function Invocation
-    virtual Future<bool>    invoke(Object_id, Function, Const_buffer in, Io_buffer* outp) = 0;
-    virtual Future<bool>    invoke(Object_id, Function, Const_buffer in, Mutable_buffers* outp) = 0;
-    virtual void            invoke_oneway(Object_id, Function, Const_buffer in) = 0;
+    virtual Future<bool> invoke(Object_id, Function, Const_buffer in, Io_buffer* outp) = 0;
+    virtual Future<bool> invoke(Object_id, Function, Const_buffer in, Mutable_buffers* outp) = 0;
+};
+
+
+/*
+    Two-Way Object Proxy
+*/
+class Twoway_object_proxy : boost::totally_ordered<Twoway_object_proxy> {
+public:
+    // Construct/Copy/Move
+    Twoway_object_proxy() = default;
+    explicit Twoway_object_proxy(Twoway_proxy, Object_id = Object_id());
+    Twoway_object_proxy& operator=(const Twoway_object_proxy&) = default;
+    Twoway_object_proxy(Twoway_object_proxy&&);
+    Twoway_object_proxy& operator=(Twoway_object_proxy&&);
+    friend void swap(Twoway_object_proxy&, Twoway_object_proxy&);
+
+    // Object Identity
+    void        identity(Object_id) const;
+    Object_id   identity() const;
+
+    // Implementation
+    void                base(Twoway_proxy)
+    const Twoway_proxy& base() const;
+
+    // Function Invocation
+    Future<bool> invoke(Function, Const_buffers in, Io_buffer* outp) const;
+    Future<bool> invoke(Function, Const_buffers in, Mutable_buffers* outp) const;
 
     // Blocking Function Invocation
-    virtual bool blocking_invoke(Function, Const_buffers in, Io_buffer* outp) = 0;
-    virtual bool blocking_invoke(Function, Const_buffers in, Mutable_buffers* outp) = 0;
+    friend bool blocking_invoke(const Twoway_object_proxy&, Function, Const_buffers in, Io_buffer* outp);
+    friend bool blocking_invoke(const Twoway_object_proxy&, Function, Const_buffers in, Mutable_buffers* outp);
+
+    // Comparisons
+    friend bool operator==(const Twoway_object_proxy&, const Twoway_object_proxy&);
+    friend bool operator< (const Twoway_object_proxy&, const Twoway_object_proxy&);
+
+private:
+    // Data
+    Object_id       id;
+    Twoway_proxy    proxy;
 };
 
 
