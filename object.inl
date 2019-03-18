@@ -25,28 +25,106 @@ namespace Orb       {
 
 
 /*
+    Object Dispatcher
+*/
+template<class T>
+inline
+Object_dispatcher::Object_dispatcher(Interface_ptr p)
+    : ifacep{std::move(p)}
+{
+}
+
+
+inline
+Object_dispatcher::Object_dispatcher(Object_dispatcher&& other)
+    : ifacep{std::move(other.ifacep)}
+{
+}
+
+
+template<class T>
+inline Future<bool>
+Object_dispatcher::invoke(Object_id obj, Function_id fun, Io_buffer* iop, const Object_map& map)
+{
+    return ifacep->invoke(obj, fun, iop, map);
+}
+
+
+inline Object_dispatcher&
+Object_dispatcher::operator=(Object_dispatcher other)
+{
+    swap(*this, other);
+    return *this;
+}
+
+
+inline
+Object_dispatcher::operator bool() const
+{
+    return ifacep ? true : false;
+}
+
+
+inline bool
+operator==(const Object_dispatcher& x, const Object_dispatcher& y)
+{
+    return x.ifacep == y.ifacep;
+}
+
+
+inline bool
+operator< (const Object_dispatcher& x, const Object_dispatcher& y)
+{
+    return x.ifacep < y.ifacep;
+}
+
+
+inline void
+swap(Object_dispatcher& x, Object_dispatcher& y)
+{
+    using std::swap;
+
+    swap(x.ifacep, y.ifacep);
+}
+
+
+/*
     Object
 */
 inline
-Object::Object(Object_impl imp, Object_id oid)
-    : id{std::move(oid)}
-    , impl{std::move(imp)}
+Object::Object(Object_dispatcher disp, Object_id id)
+    : impl{std::move(imp)}
+    , obj{std::move(id)}
 {
 }
 
 
 inline
 Object::Object(Object&& other)
-    : id{std::move(other.id)}
-    , impl{std::move(other.impl)}
+    : impl{std::move(other.impl)}
+    , obj{std::move(other.obj)}
 {
 }
 
 
 inline void
-Object::identity(Object_id oid)
+Object::dispatcher(Object_dispatcher disp)
 {
-    id = oid;
+    impl = std::move(disp);
+}
+
+
+inline const Object_dispatcher&
+Object::dispatcher() const
+{
+    return impl;
+}
+
+
+inline void
+Object::identity(Object_id id)
+{
+    obj = id;
 }
 
 
@@ -58,27 +136,20 @@ Object::identity() const
 
 
 inline Future<bool>
-Object::invoke(Function fun, Const_buffers in, Io_buffer* outp) const
+Object::invoke(Function fun, Io_buffer* iop, const Object_map& objs) const
 {
-    return impl.invoke(id, fun, in, outp);
-}
-
-
-inline Future<bool>
-Object::invoke(Function fun, Const_buffers in, Mutable_buffers* outp) const
-{
-    return impl.invoke(id, fun, in, outp);
+    return impl.invoke(obj, fun, iop, objects);
 }
 
 
 inline void
-Object::implementation(Object_impl imp)
+Object::implementation(Object_dispatcher imp)
 {
     impl = std::move(imp);
 }
 
 
-inline const Object_impl&
+inline const Object_dispatcher&
 Object::implementation() const
 {
     return impl;
@@ -120,6 +191,65 @@ swap(Object& x, Object& y)
 
     swap(x.id, y.id);
     swap(x.impl, y.impl);
+}
+
+
+/*
+    Object Map
+*/
+inline
+Object_map::Object_map(Interface_ptr p)
+    : ifacep{std::move(p)}
+{
+}
+
+
+inline Object
+Object_map::find(Object_id id) const
+{ 
+    return ifacep->find(id);
+}
+
+
+inline void
+Object_map::insert(Object obj)
+{
+    ifacep->insert(std::move(obj));
+}
+
+
+inline
+Object_map::operator bool() const
+{
+    return ifacep ? true : false;
+}
+
+
+inline Object
+Object_map::remove(Object_id id)
+{
+    return ifacep->remove(id);
+}
+
+
+inline bool
+operator==(const Object_map& x, const Object_map& y)
+{
+    return x.ifacep == y.ifacep;
+}
+
+
+inline bool
+operator< (const Object_map& x, const Object_map& y)
+{
+    return x.ifacep < y.ifacep;
+}
+
+
+inline void
+swap(Object_map& x, Object_map& y)
+{
+    swap(x.ifacep, y.ifacep);
 }
 
 
