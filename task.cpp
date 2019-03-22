@@ -289,12 +289,9 @@ Task::Operation_selector::select(Task::Promise* taskp, const Channel_operation* 
     const Transform_unique  transform{first, last, &operations};
     const Channel_locks     lock{operations};
 
-    nenqueued = 0;
     winner = select_ready(operations);
-    if (!winner)
-        nenqueued = enqueue(taskp, operations);
-
-    return nenqueued == 0;
+    nenqueued = winner ? 0 : enqueue(taskp, operations);
+    return !nenqueued;
 }
 
 
