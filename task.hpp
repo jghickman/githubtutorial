@@ -680,7 +680,7 @@ public:
 
 private:
     // Data
-    Task::Handle                task;
+    Task::Promise*              promisep;
     const Channel_operation*    first;
     const Channel_operation*    last;
 };

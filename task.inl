@@ -378,7 +378,6 @@ inline bool
 Task::Promise::notify_channel_readable(Channel_size pos)
 {
     const Lock lock{mutex};
-
     return futures.notify_channel_readable(this, pos);
 }
 
@@ -387,7 +386,6 @@ inline Task::Select_status
 Task::Promise::notify_operation_complete(Channel_size pos)
 {
     const Lock lock{mutex};
-
     return operations.notify_complete(this, pos);
 }
 
@@ -396,7 +394,6 @@ inline bool
 Task::Promise::notify_timer_canceled()
 {
     const Lock lock{mutex};
-
     return futures.notify_timer_canceled();
 }
 
@@ -405,7 +402,6 @@ inline bool
 Task::Promise::notify_timer_expired(Time when)
 {
     const Lock lock{mutex};
-
     return futures.notify_timer_expired(this, when);
 }
 
@@ -1857,15 +1853,15 @@ Channel_select_awaitable::await_ready()
 inline Channel_size
 Channel_select_awaitable::await_resume()
 {
-    return task.promise().selected_operation();
+    return promisep->selected_operation();
 }
 
 
 inline bool
-Channel_select_awaitable::await_suspend(Task::Handle h)
+Channel_select_awaitable::await_suspend(Task::Handle task)
 {
-    task = h;
-    task.promise().select(first, last);
+    promisep = &task.promise();
+    promisep->select(first, last);
     return true;
 }
 
@@ -1873,6 +1869,13 @@ Channel_select_awaitable::await_suspend(Task::Handle h)
 /*
     Channel Select
 */
+inline Channel_select_awaitable
+select(const Channel_operation* first, const Channel_operation* last)
+{
+    return Channel_select_awaitable(first, last);
+}
+
+
 template<Channel_size N>
 inline Channel_select_awaitable
 select(const Channel_operation (&ops)[N])
@@ -1880,7 +1883,7 @@ select(const Channel_operation (&ops)[N])
     using std::begin;
     using std::end;
 
-    return Channel_select_awaitable(begin(ops), end(ops));
+    return select(begin(ops), end(ops));
 }
 
 
