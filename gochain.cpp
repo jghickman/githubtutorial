@@ -8,11 +8,11 @@
 #include <windows.h>
 
 
-
 using namespace Isptech::Coroutine;
-using namespace std;
-
-
+using std::cerr;
+using std::cin;
+using std::cout;
+using std::endl;
 
 
 #if 0
@@ -156,6 +156,7 @@ two()
     return 2;
 }
 
+
 int
 four()
 {
@@ -174,6 +175,8 @@ wait_all_task(int n, Send_channel<int> results)
     using Future_vector = std::vector<Future<int>>;
     Future_vector fs;
 
+
+
     fs.push_back(async(two));
     fs.push_back(async(four));
 
@@ -184,7 +187,7 @@ wait_all_task(int n, Send_channel<int> results)
 
         for (unsigned i = 0; i < fs.size() && r != error; ++i) {
             try {
-                r = co_await fs[i].get();
+                r = co_await fs[i];
             }
             catch (...) {
                 r = error;
@@ -197,10 +200,6 @@ wait_all_task(int n, Send_channel<int> results)
     }
 
 }
-
-
-using namespace std::literals::chrono_literals;
-
 
 
 Task
@@ -218,7 +217,7 @@ wait_any_task(int n, Send_channel<int> results)
 
     if (i) {
         try {
-            r = co_await fs[*i].get();
+            r = co_await fs[*i];
         } catch (...) {
             r = error;
         }
@@ -226,6 +225,31 @@ wait_any_task(int n, Send_channel<int> results)
 
     co_await results.send(r);
     co_await results.send(done);
+
+#if 0
+    Channel<void> cv1 = make_channel<void>(5);
+    Channel<void> cv2 = make_channel<void>(5);
+
+    swap(cv1, cv2);
+
+    bool check = cv1 == cv2;
+
+    co_await cv1.receive();
+    co_await cv1.send();
+
+    Receive_channel<void> rv1 = cv1;
+    co_await rv1.receive();
+
+    Send_channel<void> sv1 = cv1;
+    co_await sv1.send();
+
+    Future<void> fv1, fv2;
+
+    bool checkf = fv1 == fv2;
+
+    co_await fv1.get();
+    co_await fv1;
+#endif
 }
 
 
@@ -247,6 +271,7 @@ print_seconds(int n)
     cout << '\n' << "done" << endl;
 }
 
+
 void
 main(int argc, char* argv[])
 {
@@ -267,11 +292,9 @@ main(int argc, char* argv[])
     cout << '}' << endl;
 #endif
 
-
     start(print_seconds, 5);
 
     char c;
     cin >> c;
 }
-
 #endif
