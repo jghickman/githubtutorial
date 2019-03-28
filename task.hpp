@@ -104,15 +104,15 @@ public:
     public:
         // Construct
         Select_status() = default;
-        Select_status(Channel_size pos, bool comp);
+        Select_status(Channel_size oper, bool comp);
 
         // Observers
-        Channel_size    position() const;
+        Channel_size    operation() const;
         bool            is_complete() const;
 
     private:
         // Data
-        Channel_size    selpos;
+        Channel_size    op;
         bool            iscomp;
     };
 
@@ -198,7 +198,7 @@ private:
 
         private:
             // Data
-            const Channel_operation*    pop;
+            const Channel_operation*    opp;
             Channel_size                index;
         };
 
@@ -211,8 +211,8 @@ private:
 
         private:
             // Transformation
-            static void transform(const Channel_operation*, const Channel_operation*, Operation_vector* outp);
             static void remove_duplicates(Operation_vector*);
+            static void transform_valid(const Channel_operation*, const Channel_operation*, Operation_vector* outp);
         };
 
         class Channel_locks {
@@ -237,7 +237,7 @@ private:
         // Selection
         static optional<Channel_size>   select_ready(const Operation_vector&);
         static Channel_size             count_ready(const Operation_vector&);
-        static Channel_size             pick_ready(const Operation_vector&, Channel_size nready);
+        static Operation_view           pick_ready(const Operation_vector&, Channel_size nready);
         static Channel_size             get_ready(const Operation_vector& ops, Channel_size n);
         static Channel_size             enqueue(Task::Promise*, const Operation_vector&);
         static Channel_size             dequeue(Task::Promise*, const Operation_vector&, Channel_size selected);
@@ -344,7 +344,7 @@ private:
             Channel_locks& operator=(const Channel_locks&) = delete;
 
             // Lock/Unlock
-            void acquire(const Future_wait_vector&, const Channel_wait_vector&, const Future_wait_index&);
+            void acquire(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&);
             void release();
 
             // Conversions
@@ -356,7 +356,7 @@ private:
 
             // Channel Processing
             template<class F> static void   for_each_unique(const Channel_vector&, F func);
-            static void                     transform(const Future_wait_vector&, const Channel_wait_vector&, const Future_wait_index&, Channel_vector*);
+            static void                     transform(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&, Channel_vector*);
             static void                     sort(Channel_vector*);
             static void                     lock(const Channel_vector&);
             static void                     unlock(const Channel_vector&);
@@ -374,8 +374,8 @@ private:
 
             // Data
             Task::Promise*              taskp;
-            const Future_wait_vector&   futures;
-            const Channel_wait_vector&  channels;
+            const Future_wait_vector&   fwaits;
+            const Channel_wait_vector&  cwaits;
         };
 
         struct dequeue_unlocked {
@@ -385,8 +385,8 @@ private:
 
             // Data
             Task::Promise*              taskp;
-            const Future_wait_vector&   futures;
-            const Channel_wait_vector&  channels;
+            const Future_wait_vector&   fwaits;
+            const Channel_wait_vector&  cwaits;
         };
 
         struct enqueue_not_ready {
@@ -396,8 +396,8 @@ private:
 
             // Data
             Task::Promise*              taskp;
-            const Future_wait_vector&   futures;
-            const Channel_wait_vector&  channels;
+            const Future_wait_vector&   fwaits;
+            const Channel_wait_vector&  cwaits;
         };
 
         class Future_set {
@@ -407,8 +407,9 @@ private:
             Future_set(const Future_set&) = delete;
             Future_set& operator=(const Future_set&) = delete;
 
-            // Assignment
-            template<class T> void assign(const Future<T>*, const Future<T>*);
+            // Modifiers
+            template<class T> void  assign(const Future<T>*, const Future<T>*);
+            void                    clear();
 
             // Size and Capacity
             Channel_size    size() const;
@@ -429,11 +430,11 @@ private:
 
         private:
             // Assignment
-            template<class T> static void   transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
             static void                     init(Future_wait_index*, const Future_wait_vector&);
             static void                     index_unique(const Future_wait_vector&, Future_wait_index*);
-            static void                     sort(Future_wait_index*, const Future_wait_vector&);
             static void                     remove_duplicates(Future_wait_index*, const Future_wait_vector&);
+            static void                     sort(Future_wait_index*, const Future_wait_vector&);
+            template<class T> static void   transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
 
             // Completion
             static Channel_size             count_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&);
@@ -441,8 +442,8 @@ private:
             static Channel_size             get_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&, Channel_size n);
 
             // Data
-            Channel_wait_vector channels;
-            Future_wait_vector  futures;
+            Future_wait_vector  fwaits;
+            Channel_wait_vector cwaits;
             Future_wait_index   index;
             Channel_size        nenqueued; // futures
             Channel_locks       locks;
@@ -489,7 +490,7 @@ private:
 
         // Data
         Future_set              futures;
-        Channel_size            quota; // # currently being waiting for
+        Channel_size            npending;
         Timer                   timer;
         optional<Channel_size>  result;
     };
@@ -581,11 +582,11 @@ public:
     virtual ~Channel_base() = default;
 
     // Non-Blocking Send/Receive
-    virtual bool is_writable() const = 0;
-    virtual void write(void* valuep) = 0;
-    virtual void write(const void* valuep) = 0;
+    virtual void send(const void* lvaluep) = 0;
+    virtual void send(void* rvaluep) = 0;
+    virtual void receive(void* valuep) = 0;
     virtual bool is_readable() const = 0;
-    virtual void read(void* valuep) = 0;
+    virtual bool is_writable() const = 0;
 
     /*
         TODO:  Is there better name than "pos" for the enqueue/dequeue
@@ -593,15 +594,15 @@ public:
     */
 
     // Blocking Send/Receive
-    virtual void enqueue_write(Task::Promise*, Channel_size pos, void* valuep) = 0;
-    virtual void enqueue_write(Task::Promise*, Channel_size pos, const void* valuep) = 0;
-    virtual bool dequeue_write(Task::Promise*, Channel_size pos) = 0;
-    virtual void enqueue_read(Task::Promise*, Channel_size pos, void* valuep) = 0;
-    virtual bool dequeue_read(Task::Promise*, Channel_size pos) = 0;
+    virtual void enqueue_send(Task::Promise*, Channel_size oper, const void* lvaluep) = 0;
+    virtual void enqueue_send(Task::Promise*, Channel_size oper, void* rvaluep) = 0;
+    virtual bool dequeue_send(Task::Promise*, Channel_size oper) = 0;
+    virtual void enqueue_receive(Task::Promise*, Channel_size oper, void* valuep) = 0;
+    virtual bool dequeue_receive(Task::Promise*, Channel_size oper) = 0;
 
     // Waiting
-    virtual void enqueue_readable_wait(Task::Promise*, Channel_size pos) = 0;
-    virtual bool dequeue_readable_wait(Task::Promise*, Channel_size pos) = 0;
+    virtual void enqueue_readable_wait(Task::Promise*, Channel_size wait) = 0;
+    virtual bool dequeue_readable_wait(Task::Promise*, Channel_size wait) = 0;
 
     // Synchronization
     virtual void lock() = 0;
@@ -621,7 +622,12 @@ public:
     in favor of type-unsafe interfaces (with which users needn't directly
     interact).
     
-    TODO:  Employ the small object optimization to make inheritance affordable?
+    TODO:   Employ the small object optimization to make inheritance
+            affordable?
+
+    TODO:   With the possible exception of default construction, copy, and
+            comparison, can this class' interface be made private/accessible
+            only to the components that need it (e.g., Operation_selector)?
 */
 class Channel_operation : boost::totally_ordered<Channel_operation> {
 public:
@@ -630,38 +636,31 @@ public:
 
     // Construct/Copy
     Channel_operation();
-    Channel_operation(Channel_base*, const void* rvaluep); // send copy
-    Channel_operation(Channel_base*, void* lvaluep, Type); // send movable/receive
+    Channel_operation(Channel_base*, void* valuep, Type);   // send movable or receive
+    Channel_operation(Channel_base*, const void* cvaluep);  // send copy
 
     // Execution
     bool is_ready() const;
+    void execute() const;
     void enqueue(Task::Promise*, Channel_size pos) const;
     bool dequeue(Task::Promise*, Channel_size pos) const;
-    void execute() const;
 
     // Observers
     Channel_base* channel() const;
 
-    // Comparisons
-    friend inline bool operator==(const Channel_operation& x, const Channel_operation& y) {
-        if (x.chanp != y.chanp) return false;
-        if (x.kind != y.kind) return false;
-        return true;
-    }
+    // Validity
+    bool is_valid() const;
 
-    inline friend bool operator< (const Channel_operation& x, const Channel_operation& y) {
-        if (x.chanp < y.chanp) return true;
-        if (y.chanp < x.chanp) return false;
-        if (x.kind < y.kind) return true;
-        return false;
-    }
+    // Comparisons
+    friend bool operator==(const Channel_operation&, const Channel_operation&);
+    friend bool operator< (const Channel_operation&, const Channel_operation&);
 
 private:
     // Data
     Channel_base*   chanp;
-    Type            kind;
-    const void*     rvalp;
-    void*           lvalp;
+    Type            type;
+    void*           valp;
+    const void*     constvalp;
 };
 
 
@@ -818,52 +817,52 @@ private:
         std::deque<Readable_waiter> readers;
     };
 
-    class Sender : boost::equality_comparable<Sender> {
+    class Send : boost::equality_comparable<Send> {
     public:
         // Construct
-        Sender(Task::Promise*, Channel_size pos, const T* rvaluep);
-        Sender(Task::Promise*, Channel_size pos, T* lvaluep);
-        Sender(Condition* waitp, const T* rvaluep);
-        Sender(Condition* waitp, T* lvaluep);
+        Send(Task::Promise*, Channel_size oper, const T* lvbufferp);
+        Send(Task::Promise*, Channel_size oper, T* rvbufferp);
+        Send(Condition*, const T* lvbufferp);
+        Send(Condition*, T* rvbufferp);
     
         // Observers
-        Task::Promise* task() const;
-        Channel_size operation() const;
+        Task::Promise*  task() const;
+        Channel_size    operation() const;
 
         // Completion
         template<class U> bool dequeue(U* recvbufp, Mutex*) const;
 
         // Comparisons
-        inline friend bool operator==(const Sender& x, const Sender& y) {
-            if (x.readyp != y.readyp) return false;
-            if (x.rvalp != y.rvalp) return false;
-            if (x.lvalp != y.lvalp) return false;
+        inline friend bool operator==(const Send& x, const Send& y) {
+            if (x.lvbufp != y.lvbufp) return false;
+            if (x.rvbufp != y.rvbufp) return false;
             if (x.taskp != y.taskp) return false;
-            if (x.oper != y.oper) return false;
+            if (x.taskoper != y.taskoper) return false;
+            if (x.threadcondp != y.threadcondp) return false;
             return true;
         }
     
     private:
         // Selection
-        template<class U> static bool select(Task::Promise*, Channel_size pos, T* lvalp, const T* rvalp, U* recvbufp, Mutex*);
+        template<class U> static bool select(Task::Promise*, Channel_size oper, const T* lvsendbufp, T* rvsendbufp, U* recvbufp, Mutex*);
 
         // Data Transefer
-        template<class U> static void   move(T* lvalp, const T* rvalp, U* destp);
-        static void                     move(T* lvalp, const T* rvalp, Buffer* destp);
+        template<class U> static void   move(const T* lvsendbufp, T* rvsendbufp, U* recvbufp);
+        static void                     move(const T* lvsendbufp, T* rvsendbufp, Buffer* recvbufp);
     
         // Data
         Task::Promise*  taskp;
-        Channel_size    oper;
-        const T*        rvalp;
-        T*              lvalp;
-        Condition*      readyp;
+        Channel_size    taskoper;
+        Condition*      threadcondp;
+        const T*        lvbufp; // l-value
+        T*              rvbufp; // r-value
     };
     
-    class Receiver : boost::equality_comparable<Receiver> {
+    class Receive : boost::equality_comparable<Receive> {
     public:
         // Construct
-        Receiver(Task::Promise*, Channel_size pos, T* valuep);
-        Receiver(Condition* waitp, T* valuep);
+        Receive(Task::Promise*, Channel_size pos, T* bufferp);
+        Receive(Condition*, T* bufferp);
 
         // Observers
         Task::Promise*  task() const;
@@ -873,23 +872,23 @@ private:
         template<class U> bool dequeue(U* sendbufp, Mutex*) const;
     
         // Comparisons
-        inline friend bool operator==(const Receiver& x, const Receiver& y) {
-            if (x.readyp != y.readyp) return false;
-            if (x.valp != y.valp) return false;
+        inline friend bool operator==(const Receive& x, const Receive& y) {
+            if (x.bufp != y.bufp) return false;
             if (x.taskp != y.taskp) return false;
-            if (x.oper != y.oper) return false;
+            if (x.taskoper != y.taskoper) return false;
+            if (x.threadcondp != y.threadcondp) return false;
             return true;
         }
     
     private:
         // Selection
-        template<class U> static bool select(Task::Promise*, Channel_size pos, T* valp, U* sendbufp, Mutex*);
+        template<class U> static bool select(Task::Promise*, Channel_size oper, T* recvbufp, U* sendbufp, Mutex*);
 
         // Data
         Task::Promise*  taskp;
-        Channel_size    oper;
-        T*              valp;
-        Condition*      readyp;
+        Channel_size    taskoper;
+        Condition*      threadcondp;
+        T*              bufp;
     };
 
     template<class U> 
@@ -947,8 +946,8 @@ private:
     };
 
     // Names/Types
-    using Sender_queue      = Io_queue<Sender>;
-    using Receiver_queue    = Io_queue<Receiver>;
+    using Send_queue    = Io_queue<Send>;
+    using Receive_queue = Io_queue<Receive>;
 
     class Impl : public Channel_base {
     public:
@@ -975,22 +974,22 @@ private:
         Channel_operation make_receive(T* valuep);
 
         // Non-Blocking I/O
-        void read(void* valuep) override;
-        void write(const void* rvaluep) override;
-        void write(void* lvaluep) override;
+        void send(const void* lvaluep) override;
+        void send(void* rvaluep) override;
+        void receive(void* valuep) override;
         bool is_readable() const override;
         bool is_writable() const override;
 
         // Blocking I/O
-        void enqueue_read(Task::Promise*, Channel_size pos, void* valuep) override;
-        bool dequeue_read(Task::Promise*, Channel_size pos) override;
-        void enqueue_write(Task::Promise*, Channel_size pos, const void* rvaluep) override;
-        void enqueue_write(Task::Promise*, Channel_size pos, void* lvaluep) override;
-        bool dequeue_write(Task::Promise*, Channel_size pos) override;
+        void enqueue_receive(Task::Promise*, Channel_size oper, void* valuep) override;
+        bool dequeue_receive(Task::Promise*, Channel_size oper) override;
+        void enqueue_send(Task::Promise*, Channel_size oper, const void* rvaluep) override;
+        void enqueue_send(Task::Promise*, Channel_size oper, void* lvaluep) override;
+        bool dequeue_send(Task::Promise*, Channel_size oper) override;
 
         // Event Waiting
-        void enqueue_readable_wait(Task::Promise*, Channel_size pos) override;
-        bool dequeue_readable_wait(Task::Promise*, Channel_size pos) override;
+        void enqueue_readable_wait(Task::Promise*, Channel_size wait) override;
+        bool dequeue_readable_wait(Task::Promise*, Channel_size wait) override;
 
         // Synchronization
         void lock() override;
@@ -998,22 +997,22 @@ private:
 
     private:
         // Non-Blocking I/O
-        template<class U> bool read(U* valuep, Buffer*, Sender_queue*, Mutex*);
-        template<class U> bool write(U* valuep, Buffer*, Receiver_queue*, Mutex*);
+        template<class U> bool send(U* valuep, Buffer*, Receive_queue*, Mutex*);
+        template<class U> bool receive(U* valuep, Buffer*, Send_queue*, Mutex*);
 
         // Blocking I/O
-        void                            enqueue_read(Task::Promise*, Channel_size pos, T* valuep);
-        template<class U> void          enqueue_write(Task::Promise*, Channel_size pos, U* valuep);
-        template<class U> static bool   dequeue(Receiver_queue*, U* sendbufp, Mutex*);
-        template<class U> static bool   dequeue(Sender_queue*, U* recvbufp, Mutex*);
+        void                            enqueue_receive(Task::Promise*, Channel_size oper, T* valuep);
+        template<class U> void          enqueue_send(Task::Promise*, Channel_size oper, U* valuep);
+        template<class U> static bool   dequeue(Receive_queue*, U* sendbufp, Mutex*);
+        template<class U> static bool   dequeue(Send_queue*, U* recvbufp, Mutex*);
         template<class U> static bool   dequeue(U* waitqp, Task::Promise*, Channel_size pos);
-        static void                     wait_for_sender(Receiver_queue*, T* recvbufp, Lock*);
-        template<class U> static void   wait_for_receiver(Sender_queue*, U* sendbufp, Lock*);
+        static void                     wait_for_sender(Receive_queue*, T* recvbufp, Lock*);
+        template<class U> static void   wait_for_receiver(Send_queue*, U* sendbufp, Lock*);
 
         // Data
         Buffer          buffer;
-        Sender_queue    senders;
-        Receiver_queue  receivers;
+        Send_queue      sendq;
+        Receive_queue   receiveq;
         mutable Mutex   mutex;
     };
 
@@ -1023,7 +1022,7 @@ private:
     Channel(Impl_ptr);
 
     // Operation Completion
-    static Task::Select_status notify_operation_complete(Task::Promise* taskp, Channel_size pos, Mutex*);
+    static Task::Select_status notify_complete(Task::Promise* taskp, Channel_size oper, Mutex*);
 
     // Data
     Impl_ptr pimpl;
@@ -1398,13 +1397,11 @@ public:
 
     // Result Access
     Awaitable   get();
+    Awaitable   operator co_await();
     optional<T> try_get();
 
     // Observers
     bool is_valid() const;
-
-    // Operators
-    Awaitable operator co_await();
 
     // Comparisons
     inline friend bool operator==(const Future& x, const Future& y) {
