@@ -204,34 +204,29 @@ private:
 
         using Operation_vector = std::vector<Operation_view>;
 
-        class Transform_unique {
+        class Select_guard {
         public:
-            // Construct
-            Transform_unique(const Channel_operation*, const Channel_operation*, Operation_vector*);
+            // Construct/Copy/Destroy
+            Select_guard(const Channel_operation*, const Channel_operation*, Operation_vector*);
+            Select_guard(const Select_guard&) = delete;
+            Select_guard& operator=(const Select_guard&) = delete;
+            ~Select_guard();
 
         private:
-            // Transformation
-            static void remove_duplicates(Operation_vector*);
+            // Operation Transformation
             static void transform_valid(const Channel_operation*, const Channel_operation*, Operation_vector* outp);
-        };
+            static void transform(const Channel_operation*, const Channel_operation*, Operation_vector* outp);
+            static void remove_duplicates(Operation_vector*);
 
-        class Channel_locks {
-        public:
-            explicit Channel_locks(const Operation_vector&);
-            Channel_locks(const Channel_locks&) = delete;
-            Channel_locks& operator=(const Channel_locks&) = delete;
-            ~Channel_locks();
-
-        private:
-            // Iteration
-            template<class T> static void for_each_channel(const Operation_vector&, T f);
-
-            // Synchronization
-            static void lock(Channel_base*);
-            static void unlock(Channel_base*);
+            // Channel Synchronization
+            static void                     lock_channels(const Operation_vector&);
+            static void                     unlock_channels(const Operation_vector&);
+            template<class T> static void   for_each_channel(const Operation_vector&, T f);
+            static void                     lock(Channel_base*);
+            static void                     unlock(Channel_base*);
 
             // Data
-            const Operation_vector& ops;
+            Operation_vector* pops;
         };
 
         // Selection
@@ -408,8 +403,7 @@ private:
             Future_set& operator=(const Future_set&) = delete;
 
             // Modifiers
-            template<class T> void  assign(const Future<T>*, const Future<T>*);
-            void                    clear();
+            template<class T> void assign(const Future<T>*, const Future<T>*);
 
             // Size and Capacity
             Channel_size    size() const;
@@ -820,10 +814,10 @@ private:
     class Send : boost::equality_comparable<Send> {
     public:
         // Construct
-        Send(Task::Promise*, Channel_size oper, const T* lvbufferp);
-        Send(Task::Promise*, Channel_size oper, T* rvbufferp);
-        Send(Condition*, const T* lvbufferp);
-        Send(Condition*, T* rvbufferp);
+        Send(Task::Promise*, Channel_size oper, const T* lvaluep);
+        Send(Task::Promise*, Channel_size oper, T* rvaluep);
+        Send(Condition*, const T* lvaluep);
+        Send(Condition*, T* rvaluep);
     
         // Observers
         Task::Promise*  task() const;
@@ -843,9 +837,6 @@ private:
         }
     
     private:
-        // Selection
-        template<class U> static bool select(Task::Promise*, Channel_size oper, const T* lvsendbufp, T* rvsendbufp, U* recvbufp, Mutex*);
-
         // Data Transefer
         template<class U> static void   move(const T* lvsendbufp, T* rvsendbufp, U* recvbufp);
         static void                     move(const T* lvsendbufp, T* rvsendbufp, Buffer* recvbufp);
@@ -854,15 +845,15 @@ private:
         Task::Promise*  taskp;
         Channel_size    taskoper;
         Condition*      threadcondp;
-        const T*        lvbufp; // l-value
-        T*              rvbufp; // r-value
+        const T*        lvbufp; // lvalue
+        T*              rvbufp; // rvalue
     };
     
     class Receive : boost::equality_comparable<Receive> {
     public:
         // Construct
-        Receive(Task::Promise*, Channel_size pos, T* bufferp);
-        Receive(Condition*, T* bufferp);
+        Receive(Task::Promise*, Channel_size pos, T* valuep);
+        Receive(Condition*, T* valuep);
 
         // Observers
         Task::Promise*  task() const;
@@ -881,9 +872,6 @@ private:
         }
     
     private:
-        // Selection
-        template<class U> static bool select(Task::Promise*, Channel_size oper, T* recvbufp, U* sendbufp, Mutex*);
-
         // Data
         Task::Promise*  taskp;
         Channel_size    taskoper;

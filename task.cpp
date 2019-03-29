@@ -123,26 +123,26 @@ Task::Operation_selector::Operation_view::operator< (Operation_view other) const
 
 
 /*
-    Task Operation Selector Channel Locks
+    Task Operation Selector Select Guard
 */
-inline
-Task::Operation_selector::Channel_locks::Channel_locks(const Operation_vector& opers)
-    : ops{opers}
+Task::Operation_selector::Select_guard::Select_guard(const Channel_operation* first, const Channel_operation* last, Operation_vector* outp)
+    : pops(outp)
 {
-    for_each_channel(ops, lock);
+    transform(first, last, pops);
+    lock_channels(*pops);
 }
 
 
 inline
-Task::Operation_selector::Channel_locks::~Channel_locks()
+Task::Operation_selector::Select_guard::~Select_guard()
 {
-    for_each_channel(ops, unlock);
+    unlock_channels(*pops);
 }
 
 
 template<class T>
 void
-Task::Operation_selector::Channel_locks::for_each_channel(const Operation_vector& ops, T f)
+Task::Operation_selector::Select_guard::for_each_channel(const Operation_vector& ops, T f)
 {
     Channel_base* prevchanp{nullptr};
 
@@ -157,23 +157,29 @@ Task::Operation_selector::Channel_locks::for_each_channel(const Operation_vector
 
 
 inline void
-Task::Operation_selector::Channel_locks::lock(Channel_base* chanp)
+Task::Operation_selector::Select_guard::lock(Channel_base* chanp)
 {
     chanp->lock();
 }
 
 
 inline void
-Task::Operation_selector::Channel_locks::unlock(Channel_base* chanp)
+Task::Operation_selector::Select_guard::lock_channels(const Operation_vector& ops)
 {
-    chanp->unlock();
+    for_each_channel(ops, lock);
 }
 
 
-/*
-    Task Operation Selector Unique Operations
-*/
-Task::Operation_selector::Transform_unique::Transform_unique(const Channel_operation* first, const Channel_operation* last, Operation_vector* outp)
+void
+Task::Operation_selector::Select_guard::remove_duplicates(Operation_vector* vp)
+{
+    const auto dup = unique(vp->begin(), vp->end());
+    vp->erase(dup, vp->end());
+}
+
+
+void
+Task::Operation_selector::Select_guard::transform(const Channel_operation* first, const Channel_operation* last, Operation_vector* outp)
 {
     /*
         TODO: Could writing loops to skip duplicate operations (rather than
@@ -187,25 +193,33 @@ Task::Operation_selector::Transform_unique::Transform_unique(const Channel_opera
 
 
 void
-Task::Operation_selector::Transform_unique::remove_duplicates(Operation_vector* vp)
-{
-    const auto dup = unique(vp->begin(), vp->end());
-    vp->erase(dup, vp->end());
-}
-
-
-void
-Task::Operation_selector::Transform_unique::transform_valid(const Channel_operation* first, const Channel_operation* last, Operation_vector* outp)
+Task::Operation_selector::Select_guard::transform_valid(const Channel_operation* first, const Channel_operation* last, Operation_vector* outp)
 {
     Operation_vector& out = *outp;
 
+    out.clear();
     out.reserve(last - first);
+
     for (const Channel_operation* op = first; op != last; ++op) {
         if (op->is_valid()) {
-            const auto opos = op - first;
-            out.push_back({op, opos});
+            const auto pos = op - first;
+            out.push_back({op, pos});
         }
     }
+}
+
+
+inline void
+Task::Operation_selector::Select_guard::unlock(Channel_base* chanp)
+{
+    chanp->unlock();
+}
+
+
+inline void
+Task::Operation_selector::Select_guard::unlock_channels(const Operation_vector& ops)
+{
+    for_each_channel(ops, unlock);
 }
 
 
@@ -270,11 +284,6 @@ Task::Operation_selector::notify_complete(Task::Promise* taskp, Channel_size pos
         nenqueued -= dequeue(taskp, operations, pos);
     }
 
-    if (!nenqueued) {
-        operations.clear();
-//        scheduler.resume(taskp);
-    }
-
     return Select_status(*winner, nenqueued == 0);
 }
 
@@ -294,14 +303,10 @@ Task::Operation_selector::pick_ready(const Operation_vector& ops, Channel_size n
 bool
 Task::Operation_selector::select(Task::Promise* taskp, const Channel_operation* first, const Channel_operation* last)
 {
-    const Transform_unique  transform{first, last, &operations};
-    const Channel_locks     lock{operations};
+    const Select_guard guard{first, last, &operations};
 
     winner = select_ready(operations);
     nenqueued = winner ? 0 : enqueue(taskp, operations);
-    if (!nenqueued)
-        operations.clear();
-
     return !nenqueued;
 }
 
@@ -332,9 +337,7 @@ Task::Operation_selector::selected() const
 optional<Channel_size>
 Task::Operation_selector::try_select(const Channel_operation* first, const Channel_operation* last)
 {
-    const Transform_unique  transform{first, last, &operations};
-    const Channel_locks     lock{operations};
-
+    const Select_guard guard{first, last, &operations};
     return select_ready(operations);
 }
 
@@ -471,14 +474,13 @@ Task::Future_selector::Future_wait::dequeue_unlocked(Task::Promise* taskp, const
 bool
 Task::Future_selector::Future_wait::dequeue_unlocked(Task::Promise* taskp, const Channel_wait_vector& waits) const
 {
-    const auto& v           = waits[vpos];
-    const auto& e           = waits[epos];
-    const bool was_enqueued = is_enqueued(v, e);
+    const auto& vwait       = waits[vpos];
+    const auto& ewait       = waits[epos];
+    const bool was_enqueued = is_enqueued(vwait, ewait);
 
-    dequeue_unlocked(taskp, v, vpos);
-    dequeue_unlocked(taskp, e, epos);
-
-    return was_enqueued && !is_enqueued(v, e);
+    dequeue_unlocked(taskp, vwait, vpos);
+    dequeue_unlocked(taskp, ewait, epos);
+    return was_enqueued && !is_enqueued(vwait, ewait);
 }
 
 
@@ -548,10 +550,10 @@ Task::Future_selector::enqueue_not_ready::enqueue_not_ready(Task::Promise* tskp,
 Channel_size
 Task::Future_selector::enqueue_not_ready::operator()(Channel_size n, Channel_size i) const
 {
-    const auto& f = fwaits[i];
+    const auto& fwait = fwaits[i];
 
-    if (!f.is_ready(cwaits)) {
-        f.enqueue(taskp, cwaits);
+    if (!fwait.is_ready(cwaits)) {
+        fwait.enqueue(taskp, cwaits);
         ++n;
     }
 
@@ -562,22 +564,11 @@ Task::Future_selector::enqueue_not_ready::operator()(Channel_size n, Channel_siz
 /*
     Task Future Selector Future Set
 */
-void
-Task::Future_selector::Future_set::clear()
-{
-    assert(nenqueued == 0);
-
-    index.clear();
-    cwaits.clear();
-    fwaits.clear();
-}
-
-
 Channel_size
-Task::Future_selector::Future_set::count_ready(const Future_wait_index& index, const Future_wait_vector& fs, const Channel_wait_vector& cs)
+Task::Future_selector::Future_set::count_ready(const Future_wait_index& index, const Future_wait_vector& fwaits, const Channel_wait_vector& cwaits)
 {
     return count_if(index.begin(), index.end(), [&](auto i) {
-        return fs[i].is_ready(cs);
+        return fwaits[i].is_ready(cwaits);
     });
 }
 

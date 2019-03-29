@@ -247,7 +247,10 @@ Task::Future_selector::Future_set::transform(const Future<T>* first, const Futur
 {
     const auto nfs = last - first;
 
+    fwaitsp->clear();
     fwaitsp->reserve(nfs);
+
+    cwaitsp->clear();
     cwaitsp->reserve(nfs * 2);
 
     for (const Future<T>* fp = first; fp != last; ++fp) {
@@ -262,31 +265,6 @@ Task::Future_selector::Future_set::transform(const Future<T>* first, const Futur
         }
     }
 }
-
-
-#if 0
-template<class T>
-void
-Task::Future_selector::Future_set::transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwsp, Channel_wait_vector* cwsp)
-{
-    const auto  nfs     = last - first;
-    auto&       fwaits  = *fwsp;
-    auto&       cwaits  = *cwsp;
-
-    fwaits.resize(nfs);
-    cwaits.resize(nfs * 2);
-
-    for (const Future<T>* fp = first; fp != last; ++fp) {
-        const auto fpos = fp - first;
-        const auto vpos = fpos * 2;
-        const auto epos = vpos + 1;
-
-        cwaits[vpos] = {fp->value_channel(), fpos};
-        cwaits[epos] = {fp->error_channel(), fpos};
-        fwaits[fpos] = {fp->ready_flag(), vpos, epos};
-    }
-}
-#endif
 
 
 inline Channel_size
@@ -328,16 +306,13 @@ Task::Future_selector::select_all(Task::Promise* taskp, const Future<T>* first, 
     result.reset();
     npending = futures.enqueue(taskp);
     if (npending == 0) {
-        if (!futures.is_empty()) {
+        if (!futures.is_empty())
             result = futures.size(); // all futures are ready
-            futures.clear();
-        }
     } else if (maxtime) {
         if (*maxtime > 0ns)
             timer.start(taskp, *maxtime);
         else {
             futures.dequeue(taskp);
-            futures.clear();
             npending = 0;
         }
     }
@@ -365,9 +340,6 @@ Task::Future_selector::select_any(Task::Promise* taskp, const Future<T>* first, 
         if (futures.enqueued())
             npending = 1;
     }
-
-    if (npending == 0)
-        futures.clear();
 
     return npending == 0;
 }
@@ -950,27 +922,27 @@ Channel<T>::Io_queue<U>::push(const Waiter& w)
 */
 template<class T>
 inline
-Channel<T>::Receive::Receive(Task::Promise* tskp, Channel_size oper, T* bufferp)
+Channel<T>::Receive::Receive(Task::Promise* tskp, Channel_size oper, T* valuep)
     : taskp{tskp}
     , taskoper{oper}
     , threadcondp{nullptr}
-    , bufp{bufferp}
+    , bufp{valuep}
 {
     assert(tskp != nullptr);
-    assert(bufferp != nullptr);
+    assert(valuep != nullptr);
 }
 
 
 template<class T>
 inline
-Channel<T>::Receive::Receive(Condition* condp, T* bufferp)
+Channel<T>::Receive::Receive(Condition* condp, T* valuep)
     : taskp{nullptr}
     , taskoper{-1}
     , threadcondp{condp}
-    , bufp{bufferp}
+    , bufp{valuep}
 {
     assert(condp != nullptr);
-    assert(bufferp != nullptr);
+    assert(valuep != nullptr);
 }
 
 
@@ -981,14 +953,22 @@ Channel<T>::Receive::dequeue(U* sendbufp, Mutex* mutexp) const
 {
     using std::move;
 
-    bool is_dequeued = true;
+    bool is_dequeued = false;
 
-    if (taskp) {    // receiver is a task
-        if (!select(taskp, taskoper, bufp, sendbufp, mutexp))
-            is_dequeued = false;
-    } else {        // receiver is a thread
+    if (taskp) {
+        const Task::Select_status selection = notify_complete(taskp, taskoper, mutexp);
+
+        if (selection.operation() == taskoper) {
+            *bufp = move(*sendbufp);
+            is_dequeued = true;
+        }
+
+        if (selection.is_complete())
+            scheduler.resume(taskp);
+    } else {
         *bufp = move(*sendbufp);
         threadcondp->notify_one();
+        is_dequeued = true;
     }
 
     return is_dequeued;
@@ -1000,28 +980,6 @@ inline Channel_size
 Channel<T>::Receive::operation() const
 {
     return taskoper;
-}
-
-
-template<class T>
-template<class U>
-bool
-Channel<T>::Receive::select(Task::Promise* taskp, Channel_size oper, T* recvbufp, U* sendbufp, Mutex* mutexp)
-{
-    using std::move;
-
-    const Task::Select_status   selection   = notify_complete(taskp, oper, mutexp);
-    bool                        is_selected = false;
-
-    if (selection.operation() == oper) {
-        *recvbufp = move(*sendbufp);
-        is_selected = true;
-    }
-
-    if (selection.is_complete())
-        scheduler.resume(taskp);
-
-    return is_selected;
 }
 
 
@@ -1038,57 +996,57 @@ Channel<T>::Receive::task() const
 */
 template<class T>
 inline
-Channel<T>::Send::Send(Task::Promise* tskp, Channel_size oper, const T* lvbufferp)
+Channel<T>::Send::Send(Task::Promise* tskp, Channel_size oper, const T* lvaluep)
     : taskp{tskp}
     , taskoper{oper}
     , threadcondp{nullptr}
-    , lvbufp{lvbufferp}
+    , lvbufp{lvaluep}
     , rvbufp{nullptr}
 {
     assert(tskp != nullptr);
-    assert(lvbufferp != nullptr);
+    assert(lvaluep != nullptr);
 }
 
 
 template<class T>
 inline
-Channel<T>::Send::Send(Task::Promise* tskp, Channel_size oper, T* rvbufferp)
+Channel<T>::Send::Send(Task::Promise* tskp, Channel_size oper, T* rvaluep)
     : taskp{tskp}
     , taskoper{oper}
     , threadcondp{nullptr}
     , lvbufp{nullptr}
-    , rvbufp{rvbufferp}
+    , rvbufp{rvaluep}
 {
     assert(tskp != nullptr);
-    assert(rvbufferp != nullptr);
+    assert(rvaluep != nullptr);
 }
 
 
 template<class T>
 inline
-Channel<T>::Send::Send(Condition* condp, const T* lvbufferp)
+Channel<T>::Send::Send(Condition* condp, const T* lvaluep)
     : taskp{nullptr}
     , taskoper{-1}
     , threadcondp{condp}
-    , lvbufp{lvbufferp}
+    , lvbufp{lvaluep}
     , rvbufp{nullptr}
 {
     assert(condp != nullptr);
-    assert(lvbufferp != nullptr);
+    assert(lvaluep != nullptr);
 }
 
 
 template<class T>
 inline
-Channel<T>::Send::Send(Condition* condp, T* rvbufferp)
+Channel<T>::Send::Send(Condition* condp, T* rvaluep)
     : taskp{nullptr}
     , taskoper{-1}
     , threadcondp{condp}
     , lvbufp{nullptr}
-    , rvbufp{rvbufferp}
+    , rvbufp{rvaluep}
 {
     assert(condp != nullptr);
-    assert(rvbufferp != nullptr);
+    assert(rvaluep != nullptr);
 }
 
 
@@ -1097,14 +1055,22 @@ template<class U>
 bool
 Channel<T>::Send::dequeue(U* recvbufp, Mutex* mutexp) const
 {
-    bool is_dequeued = true;
+    bool is_dequeued = false;
 
     if (taskp) {
-        if (!select(taskp, taskoper, lvbufp, rvbufp, recvbufp, mutexp))
-            is_dequeued = false;
+        const Task::Select_status selection = notify_complete(taskp, taskoper, mutexp);
+
+        if (selection.operation() == taskoper) {
+            move(lvbufp, rvbufp, recvbufp);
+            is_dequeued = true;
+        }
+
+        if (selection.is_complete())
+            scheduler.resume(taskp);
     } else {
         move(lvbufp, rvbufp, recvbufp);
         threadcondp->notify_one();
+        is_dequeued = true;
     }
 
     return is_dequeued;
@@ -1124,14 +1090,14 @@ Channel<T>::Send::move(const T* lvsendbufp, T* rvsendbufp, U* recvbufp)
 
 template<class T>
 inline void
-Channel<T>::Send::move(const T* lvsendbufp, T* rvsendbufp, Buffer* bufp)
+Channel<T>::Send::move(const T* lvsendbufp, T* rvsendbufp, Buffer* recvbufp)
 {
     using std::move;
 
     if (rvsendbufp)
-        bufp->push_silent(move(*rvsendbufp));
+        recvbufp->push_silent(move(*rvsendbufp));
     else
-        bufp->push_silent(*lvsendbufp);
+        recvbufp->push_silent(*lvsendbufp);
 }
 
 
@@ -1140,26 +1106,6 @@ inline Channel_size
 Channel<T>::Send::operation() const
 {
     return taskoper;
-}
-
-
-template<class T>
-template<class U>
-bool
-Channel<T>::Send::select(Task::Promise* taskp, Channel_size oper, const T* lvsendbufp, T* rvsendbufp, U* recvbufp, Mutex* mutexp)
-{
-    const Task::Select_status   selection   = notify_complete(taskp, oper, mutexp);
-    bool                        is_selected = false;
-
-    if (selection.operation() == oper) {
-        move(lvsendbufp, rvsendbufp, recvbufp);
-        is_selected = true;
-    }
-
-    if (selection.is_complete())
-        scheduler.resume(taskp);
-
-    return is_selected;
 }
 
 
@@ -2944,11 +2890,11 @@ wait_any(const std::vector<Future<T>>& fs, Duration maxtime)
 */
 template<class TaskFun, class... Args>
 inline void
-start(TaskFun taskfun, Args&&... args)
+start(TaskFun task, Args&&... args)
 {
     using std::forward;
 
-    scheduler.submit(taskfun(forward<Args>(args)...));
+    scheduler.submit(task(forward<Args>(args)...));
 }
 
 
@@ -2957,7 +2903,7 @@ start(TaskFun taskfun, Args&&... args)
 */
 template<class Fun, class... Args>
 Future<std::result_of_t<Fun(Args&&...)>>
-async(Fun f, Args&&... args)
+async(Fun fun, Args&&... args)
 {
     using std::current_exception;
     using std::forward;
@@ -2966,15 +2912,14 @@ async(Fun f, Args&&... args)
     using Result_sender     = Send_channel<Result>;
     using Error_sender      = Send_channel<exception_ptr>;
 
-    auto r          = make_channel<Result>(1);
-    auto e          = make_channel<exception_ptr>(1);
-    auto taskfun    = [](Result_sender r, Error_sender e, Fun f, Args&&... args) -> Task
+    auto rchan  = make_channel<Result>(1);
+    auto echan  = make_channel<exception_ptr>(1);
+    auto task   = [](Result_sender r, Error_sender e, Fun f, Args... fargs) -> Task
     {
         exception_ptr ep;
 
         try {
-            Result x = f(forward<Args>(args)...);
-            co_await r.send(move(x));
+            co_await r.send(f(fargs...));
         } catch (...) {
             ep = current_exception();
         }
@@ -2983,8 +2928,8 @@ async(Fun f, Args&&... args)
             co_await e.send(ep);
     };
 
-    start(move(taskfun), move(r), move(e), move(f), forward<Args>(args)...);
-    return Future<Result>{r, e};
+    start(move(task), rchan, echan, move(fun), forward<Args>(args)...);
+    return Future<Result>{rchan, echan};
 }
 
 
