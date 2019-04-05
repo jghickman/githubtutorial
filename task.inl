@@ -2914,12 +2914,12 @@ async(Fun fun, Args&&... args)
 
     auto rchan  = make_channel<Result>(1);
     auto echan  = make_channel<exception_ptr>(1);
-    auto task   = [](Result_sender r, Error_sender e, Fun f, Args... fargs) -> Task
+    auto task   = [](Result_sender r, Error_sender e, Fun f, Args&&... fargs) -> Task
     {
         exception_ptr ep;
 
         try {
-            co_await r.send(f(fargs...));
+            co_await r.send(f(foward<Args>(fargs)...));
         } catch (...) {
             ep = current_exception();
         }

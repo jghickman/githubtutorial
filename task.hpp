@@ -32,6 +32,7 @@
 #include <deque>
 #include <exception>
 #include <experimental/coroutine>
+#include <function>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -72,6 +73,36 @@ class Timer;
 using boost::optional;
 using std::exception_ptr;
 #pragma warning(disable: 4455)
+
+
+/*
+    Task Local Object Pointer
+*/
+template<class T>
+class Task_local_ptr {
+public:
+    // Names/Types
+    typedef void (*Cleanup_function)(T*);
+
+    // Construct/Copy/Destroy
+    Task_local_ptr()(Cleanup_function = nullptr);
+    Task_local_ptr(const Task_local_ptr&) = delete;
+    Task_local_ptr& operator=(const Task_local_ptr&) = delete;
+    ~Task_local_ptr();
+
+    // Object Ownership
+    void    reset(T* p=nullptr);
+    T*      release();
+
+    // Object Access
+    T* get() const;
+    T* operator->() const;
+    T& operator*() const;
+
+private:
+    // Data
+    Cleanup_function cleanup;
+};
 
 
 /*
@@ -535,6 +566,13 @@ public:
         // Synchronization
         void unlock();
 
+        class Local_object {};
+
+        // Local Object Storage
+        void                attach_local(void* key, Local_object);
+        Local_object        detach_local(void* key);
+        const Local_object* find_local(void* key);
+
         // Coroutine Functions
         Task            get_return_object();
         Initial_suspend initial_suspend() const;
@@ -545,10 +583,10 @@ public:
         void suspend(Lock*);
 
         // Data
-        mutable Mutex       mutex;
         Operation_selector  operations;
         Future_selector     futures;
         State               taskstate;
+        mutable Mutex       mutex;
     };
 
 private:
