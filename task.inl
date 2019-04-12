@@ -307,7 +307,7 @@ Task::Future_selector::select_all(Task::Promise* taskp, const Future<T>* first, 
     npending = futures.enqueue(taskp);
     if (npending == 0) {
         if (!futures.is_empty())
-            result = futures.size(); // all futures are ready
+            result = futures.size(); // report all futures are ready
     } else if (maxtime) {
         if (*maxtime > 0ns)
             timer.start(taskp, *maxtime);
@@ -355,11 +355,25 @@ Task::Future_selector::selection() const
 /*
     Task Promise
 */
+inline void
+Task::Promise::erase_local(Local_key key)
+{
+    locals.erase(key);
+}
+
+
 inline Task::Final_suspend
 Task::Promise::final_suspend()
 {
     taskstate = State::done;
     return Final_suspend{};
+}
+
+
+inline void*
+Task::Promise::find_local(Local_key key)
+{
+    return locals.find(key);
 }
 
 
@@ -470,6 +484,13 @@ Task::Promise::try_select(const Channel_operation* first, const Channel_operatio
 }
 
 
+inline void
+Task::Promise::update_local(Local_key key, Local_impl&& obj)
+{
+    locals.update(key, std::move(obj));
+}
+
+
 template<class T>
 void
 Task::Promise::wait_all(const Future<T>* first, const Future<T>* last, optional<Duration> maxtime)
@@ -489,6 +510,174 @@ Task::Promise::wait_any(const Future<T>* first, const Future<T>* last, optional<
 
     if (!futures.select_any(this, first, last, maxtime))
         suspend(&lock);
+}
+
+
+/*
+    Task Local Default Deleter
+*/
+template<typename T>
+inline void
+Task_local<T>::Default_deleter::operator()(void* p) const
+{
+    delete static_cast<T*>(p);
+}
+
+
+/*
+    Task Local User Deleter
+*/
+template<typename T>
+template<typename D>
+inline
+Task_local<T>::User_deleter<D>::User_deleter(D&& impl)
+    : destroy{std::forward<D>(impl)}
+{
+}
+
+
+template<typename T>
+template<typename D>
+inline void
+Task_local<T>::User_deleter<D>::operator()(void* p) const
+{
+    destroy(p);
+}
+
+
+/*
+    Task Local
+*/
+template<typename T>
+inline
+Task_local<T>::Task_local()
+    : deleter{make_deleter()}
+{
+}
+
+
+template<typename T>
+template<typename D>
+inline
+Task_local<T>::Task_local(D dimpl)
+    : deleter{make_deleter(std::move(dimpl))}
+{
+}
+
+
+template<typename T>
+inline T*
+Task_local<T>::get(Task::Promise* taskp)
+{
+    return static_cast<T*>(taskp->find_local(this));
+}
+
+
+template<typename T>
+inline Task::Local_deleter
+Task_local<T>::make_deleter()
+{
+    return Default_deleter();
+}
+
+
+template<typename T>
+template<typename D>
+inline Task::Local_deleter
+Task_local<T>::make_deleter(D&& impl)
+{
+    return User_deleter<D>(std::forward<D>(impl));
+}
+
+
+template<typename T>
+inline T*
+Task_local<T>::release(Task::Promise* taskp)
+{
+    return static_cast<T*>(taskp->release_local(this));
+}
+
+
+template<typename T>
+inline void
+Task_local<T>::reset(Task::Promise* taskp, T* p)
+{
+    if (p)
+        taskp->update_local(this, Local_object{p, deleter});
+    else
+        taskp->erase_local(this);
+}
+
+
+/*
+    Task Local Implementation
+*/
+inline
+Task::Local_impl::Local_impl(void* objectp, Local_deleter d)
+    : p{objectp}
+    , destroy{d}
+{
+}
+
+
+inline
+Task::Local_impl::Local_impl(Local_impl&& other)
+    : p{other.p}
+    , destroy{std::move(other.destroy)}
+{
+    other.p = nullptr;
+}
+
+
+inline
+Task::Local_impl::~Local_impl()
+{
+    if (p) destroy(p);
+}
+
+
+inline void*
+Task::Local_impl::get() const
+{
+    return p;
+}
+
+
+inline Task::Local_impl&
+Task::Local_impl::operator=(Local_impl&& other)
+{
+    Local_impl temp{std::move(other)};
+    
+    swap(*this, other);
+    return *this;
+}
+
+
+inline void*
+Task::Local_impl::release()
+{
+    void* objectp = p;
+
+    p = nullptr;
+    return objectp;
+}
+
+
+inline void
+Task::Local_impl::reset(void* objectp)
+{
+    if (p) destroy(p);
+    p = objectp;
+}
+
+
+inline void
+swap(Task::Local_impl& x, Task::Local_impl& y)
+{
+    using std::swap;
+
+    swap(x.p, y.p);
+    swap(x.destroy, y.destroy);
 }
 
 

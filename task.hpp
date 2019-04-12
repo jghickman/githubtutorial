@@ -32,7 +32,7 @@
 #include <deque>
 #include <exception>
 #include <experimental/coroutine>
-#include <function>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -55,13 +55,14 @@ namespace Coroutine {
 /*
     Names/Types
 */
-template<class T>   class Channel;
-template<class T>   class Send_channel;
-template<class T>   class Receive_channel;
-template<>          class Channel<void>;
-template<>          class Send_channel<void>;
-template<>          class Receive_channel<void>;
-template<class T>   class Future;
+template<typename T>    class Task_local;
+template<typename T>    class Channel;
+template<typename T>    class Send_channel;
+template<typename T>    class Receive_channel;
+template<>              class Channel<void>;
+template<>              class Send_channel<void>;
+template<>              class Receive_channel<void>;
+template<typename T>    class Future;
 class Channel_base;
 class Channel_operation;
 using Channel_size = std::ptrdiff_t;
@@ -73,36 +74,6 @@ class Timer;
 using boost::optional;
 using std::exception_ptr;
 #pragma warning(disable: 4455)
-
-
-/*
-    Task Local Object Pointer
-*/
-template<class T>
-class Task_local_ptr {
-public:
-    // Names/Types
-    typedef void (*Cleanup_function)(T*);
-
-    // Construct/Copy/Destroy
-    Task_local_ptr()(Cleanup_function = nullptr);
-    Task_local_ptr(const Task_local_ptr&) = delete;
-    Task_local_ptr& operator=(const Task_local_ptr&) = delete;
-    ~Task_local_ptr();
-
-    // Object Ownership
-    void    reset(T* p=nullptr);
-    T*      release();
-
-    // Object Access
-    T* get() const;
-    T* operator->() const;
-    T& operator*() const;
-
-private:
-    // Data
-    Cleanup_function cleanup;
-};
 
 
 /*
@@ -171,6 +142,7 @@ public:
     // Friends
     friend class Scheduler;
     friend class Channel_operation;
+    template<typename T> friend class Task_local;
 
 private:
     // Names/Types
@@ -520,6 +492,67 @@ private:
         optional<Channel_size>  result;
     };
 
+    // Names/Types
+    using Local_key     = void*;
+    using Local_deleter = std::function<void (void*)>;
+
+    class Local_impl {
+    public:
+        // Construct/Copy/Move/Destroy
+        Local_impl(void* objectp, Local_deleter);
+        Local_impl(const Local_impl&) = default;
+        Local_impl& operator=(const Local_impl&) = default;
+        Local_impl(Local_impl&&);
+        Local_impl& operator=(Local_impl&&);
+        friend void swap(Local_impl&, Local_impl&);
+        ~Local_impl();
+
+        // Modifiers
+        void    reset(void* objectp);
+        void*   release();
+
+        // Observers
+        void* get() const;
+
+    private:
+        // Data
+        void*           p;
+        Local_deleter   destroy;
+    };
+
+    // Friends
+    friend void swap(Local_impl&, Local_impl&);
+
+    class Local_impl_map {
+    public:
+        // Construct/Copy/Move
+        Local_impl_map() = default;
+        Local_impl_map(const Local_impl_map&) = delete;
+        Local_impl_map& operator=(const Local_impl_map&) = delete;
+
+        // Modifiers
+        void  update(Local_key, Local_impl&&);
+        void  erase(Local_key);
+        void* release(Local_key);
+
+        // Observers
+        void* find(Local_key);
+
+    private:
+        // Names/Types
+        using Value         = std::pair<Local_key, Local_impl>;
+        using Value_vector  = std::vector<Value>;
+
+        struct key_eq {
+            explicit key_eq(Local_key);
+            bool operator()(const Value&) const;
+            Local_key key;
+        };
+
+        // Data
+        Value_vector values;
+    };
+
     // Random Number Generation
     static Channel_size random(Channel_size min, Channel_size max);
 
@@ -566,25 +599,27 @@ public:
         // Synchronization
         void unlock();
 
-        class Local_object {};
-
-        // Local Object Storage
-        void                attach_local(void* key, Local_object);
-        Local_object        detach_local(void* key);
-        const Local_object* find_local(void* key);
-
         // Coroutine Functions
         Task            get_return_object();
         Initial_suspend initial_suspend() const;
         Final_suspend   final_suspend();
 
+        // Friends
+        template<typename T> friend class Task_local;
+
     private:
         // Execution
         void suspend(Lock*);
 
+        // Local Storage
+        void    update_local(Local_key, Local_impl&&);
+        void    erase_local(Local_key);
+        void*   find_local(Local_key);
+
         // Data
         Operation_selector  operations;
         Future_selector     futures;
+        Local_impl_map      locals;
         State               taskstate;
         mutable Mutex       mutex;
     };
@@ -600,6 +635,50 @@ private:
 */
 template<class TaskFun, class... Args> void                                 start(TaskFun, Args&&...);
 template<class Fun, class... Args> Future<std::result_of_t<Fun(Args&&...)>> async(Fun, Args&&...);
+
+
+/*
+    Task Local
+*/
+template<typename T>
+class Task_local {
+public:
+    // Names/Types
+    using Value = T;
+
+    // Construct/Copy
+    Task_local();
+    template<typename D> explicit Task_local(D deleter);
+    Task_local(const Task_local&) = delete;
+    Task_local& operator=(const Task_local&) = delete;
+
+    // Modifiers
+    void    reset(Task::Promise*, T* objectp);
+    T*      release(Task::Promise*);
+
+    // Observers
+    T* get(Task::Promise*);
+
+private:
+    // Names/Types
+    struct Default_deleter {
+        void operator()(void*) const;
+     };
+
+    template<class D>
+    struct User_deleter {
+        explicit User_deleter(D&& impl);
+        void operator()(void*) const;
+        D destroy;
+    };
+
+    // Deleter Construction
+    static Task::Local_deleter                      make_deleter();
+    template<class D> static Task::Local_deleter    make_deleter(D&& impl);
+
+    // Data
+    Task::Local_deleter deleter;
+};
 
 
 /*

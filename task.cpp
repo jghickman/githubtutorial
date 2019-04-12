@@ -806,6 +806,66 @@ Task::Future_selector::notify_timer_canceled()
 
 
 /*
+    Task Local Implementation Map Key Equality Predicate
+*/
+inline
+Task::Local_impl_map::key_eq::key_eq(Local_key k)
+    : key{k}
+{
+}
+
+
+inline bool
+Task::Local_impl_map::key_eq::operator()(const Value& v) const
+{
+    return v.first == key;
+}
+
+
+/*
+    Task Local Implementation Map
+*/
+void
+Task::Local_impl_map::erase(Local_key key)
+{
+    const auto first    = values.begin();
+    const auto last     = values.end();
+    const auto p        = find_if(first, last, key_eq(key));
+
+    if (p != last)
+        values.erase(p);
+}
+
+
+void*
+Task::Local_impl_map::find(Local_key key)
+{
+    const auto first    = values.begin();
+    const auto last     = values.end();
+    const auto p        = find_if(first, last, key_eq(key));
+
+    return (p != last) ? p->second.get() : nullptr;
+}
+
+
+void*
+Task::Local_impl_map::release(Local_key key)
+{
+    void*       objectp = nullptr;
+    const auto  first   = values.begin();
+    const auto  last    = values.end();
+    const auto  p       = find_if(first, last, key_eq(key));
+
+    if (p != last) {
+        objectp = p->second.release();
+        values.erase(p);
+    }
+
+    return objectp;
+}
+
+
+/*
     Task Promise
 */
 Task::Promise::Promise()
