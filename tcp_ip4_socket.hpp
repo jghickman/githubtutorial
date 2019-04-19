@@ -24,6 +24,7 @@
 #include <array>
 #include <memory>
 #include <winsock2.h>
+#include <ws2tcpip.h>
 
 
 /*
@@ -50,10 +51,14 @@ public:
 
     // Construct
     Ip4_address();
-    explicit Ip4_address(const Network_bytes&)
+    Ip4_address(const char*);
+    explicit Ip4_address(const Network_bytes&);
 
     // 
     static Ip4_address any();
+
+    struct sockaddr_in addr;
+    struct sockaddr_in6 addr6;
 };
 
 
@@ -61,6 +66,10 @@ public:
 */
 class Ip4_endpoint {
 public:
+    // Construct
+    Ip4_endpoint();
+
+
     Ip4_address address() const;
     Socket_port port() const;
 };

@@ -365,9 +365,9 @@ private:
             Channel_vector channels;
         };
 
-        struct dequeue_locked {
+        struct dequeue_from_locked {
             // Construct/Apply
-            dequeue_locked(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
+            dequeue_from_locked(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
             Channel_size operator()(Channel_size n, Channel_size i) const;
 
             // Data
@@ -376,9 +376,9 @@ private:
             const Channel_wait_vector&  cwaits;
         };
 
-        struct dequeue_unlocked {
+        struct dequeue_from_unlocked {
             // Construct/Apply
-            dequeue_unlocked(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
+            dequeue_from_unlocked(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
             Channel_size operator()(Channel_size n, Channel_size i) const;
 
             // Data
@@ -417,7 +417,7 @@ private:
             Channel_size dequeue(Task::Promise*);
             Channel_size enqueued() const;
 
-            // Selection and Event Handling
+            // Selection
             optional<Channel_size>  select_ready();
             Channel_size            notify_readable(Task::Promise*, Channel_size chan);
 
@@ -432,6 +432,10 @@ private:
             static void                     remove_duplicates(Future_wait_index*, const Future_wait_vector&);
             static void                     sort(Future_wait_index*, const Future_wait_vector&);
             template<class T> static void   transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
+
+            // Enqueue/Dequeue
+            static Channel_size dequeue_locked(Task::Promise*, const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&);
+            static Channel_size dequeue_unlocked(Task::Promise*, const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&);
 
             // Completion
             static Channel_size             count_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&);

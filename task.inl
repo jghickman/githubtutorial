@@ -241,6 +241,13 @@ Task::Future_selector::Future_set::is_empty() const
 }
 
 
+inline Channel_size
+Task::Future_selector::Future_set::size() const
+{
+    return fwaits.size();
+}
+
+
 template<class T>
 void
 Task::Future_selector::Future_set::transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
@@ -264,13 +271,6 @@ Task::Future_selector::Future_set::transform(const Future<T>* first, const Futur
             fwaitsp->push_back({fp->ready_flag(), vpos, epos});
         }
     }
-}
-
-
-inline Channel_size
-Task::Future_selector::Future_set::size() const
-{
-    return fwaits.size();
 }
 
 
@@ -307,7 +307,7 @@ Task::Future_selector::select_all(Task::Promise* taskp, const Future<T>* first, 
     npending = futures.enqueue(taskp);
     if (npending == 0) {
         if (!futures.is_empty())
-            result = futures.size(); // report all futures are ready
+            result = futures.size(); // all futures are ready
     } else if (maxtime) {
         if (*maxtime > 0ns)
             timer.start(taskp, *maxtime);

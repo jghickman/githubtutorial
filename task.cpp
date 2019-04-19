@@ -492,10 +492,10 @@ Task::Future_selector::Future_wait::is_enqueued(const Channel_wait& x, const Cha
 
 
 /*
-    Task Future Selector Dequeue Locked
+    Task Future Selector Dequeue From Locked Channel
 */
 inline
-Task::Future_selector::dequeue_locked::dequeue_locked(Task::Promise* tskp, const Future_wait_vector& fws, const Channel_wait_vector& cws)
+Task::Future_selector::dequeue_from_locked::dequeue_from_locked(Task::Promise* tskp, const Future_wait_vector& fws, const Channel_wait_vector& cws)
     : taskp{tskp}
     , fwaits{fws}
     , cwaits{cws}
@@ -504,7 +504,7 @@ Task::Future_selector::dequeue_locked::dequeue_locked(Task::Promise* tskp, const
 
 
 Channel_size
-Task::Future_selector::dequeue_locked::operator()(Channel_size n, Channel_size i) const
+Task::Future_selector::dequeue_from_locked::operator()(Channel_size n, Channel_size i) const
 {
     if (fwaits[i].dequeue(taskp, cwaits))
         ++n;
@@ -514,10 +514,10 @@ Task::Future_selector::dequeue_locked::operator()(Channel_size n, Channel_size i
 
 
 /*
-    Task Future Selector Dequeue Unlocked
+    Task Future Selector Dequeue From Unlocked Channel
 */
 inline
-Task::Future_selector::dequeue_unlocked::dequeue_unlocked(Task::Promise* tskp, const Future_wait_vector& fws, const Channel_wait_vector& cws)
+Task::Future_selector::dequeue_from_unlocked::dequeue_from_unlocked(Task::Promise* tskp, const Future_wait_vector& fws, const Channel_wait_vector& cws)
     : taskp{tskp}
     , fwaits{fws}
     , cwaits{cws}
@@ -526,7 +526,7 @@ Task::Future_selector::dequeue_unlocked::dequeue_unlocked(Task::Promise* tskp, c
 
 
 Channel_size
-Task::Future_selector::dequeue_unlocked::operator()(Channel_size n, Channel_size i) const
+Task::Future_selector::dequeue_from_unlocked::operator()(Channel_size n, Channel_size i) const
 {
     if (fwaits[i].dequeue_unlocked(taskp, cwaits))
         ++n;
@@ -580,15 +580,30 @@ Task::Future_selector::Future_set::dequeue(Task::Promise* taskp)
 
     if (nenqueued > 0) {
         if (locks)
-            n = accumulate(index.begin(), index.end(), n, dequeue_locked(taskp, fwaits, cwaits));
+            n = dequeue_locked(taskp, index, fwaits, cwaits);
         else
-            n = accumulate(index.begin(), index.end(), n, dequeue_unlocked(taskp, fwaits, cwaits));
+            n = dequeue_unlocked(taskp, index, fwaits, cwaits);
 
         nenqueued -= n;
     }
 
     return n;
 }
+
+
+inline Channel_size
+Task::Future_selector::Future_set::dequeue_locked(Task::Promise* taskp, const Future_wait_index& index, const Future_wait_vector& fwaits, const Channel_wait_vector& cwaits)
+{
+    return accumulate(index.begin(), index.end(), 0, dequeue_from_locked(taskp, fwaits, cwaits));
+}
+
+
+inline Channel_size
+Task::Future_selector::Future_set::dequeue_unlocked(Task::Promise* taskp, const Future_wait_index& index, const Future_wait_vector& fwaits, const Channel_wait_vector& cwaits)
+{
+    return accumulate(index.begin(), index.end(), 0, dequeue_from_unlocked(taskp, fwaits, cwaits));
+}
+
 
 
 Channel_size
