@@ -294,7 +294,7 @@ private:
             mutable bool    is_enq{false};
         };
 
-        using Channel_wait_vector = std::vector<Channel_wait>;
+        using Channel_waits = std::vector<Channel_wait>;
 
         class Future_wait {
         public:
@@ -303,13 +303,13 @@ private:
             Future_wait(bool* readyp, Channel_size vchan, Channel_size echan);
 
             // Enqueue/Dequeue
-            void enqueue(Task::Promise*, const Channel_wait_vector&) const;
-            bool dequeue(Task::Promise*, const Channel_wait_vector&) const;
-            bool dequeue_unlocked(Task::Promise*, const Channel_wait_vector&) const;
+            void enqueue(Task::Promise*, const Channel_waits&) const;
+            bool dequeue(Task::Promise*, const Channel_waits&) const;
+            bool dequeue_unlocked(Task::Promise*, const Channel_waits&) const;
 
             // Selection and Event Handling
-            bool complete(Task::Promise*, const Channel_wait_vector&, Channel_size pos) const;
-            bool is_ready(const Channel_wait_vector&) const;
+            bool complete(Task::Promise*, const Channel_waits&, Channel_size pos) const;
+            bool is_ready(const Channel_waits&) const;
 
             // Observers
             Channel_size value() const;
@@ -331,8 +331,8 @@ private:
         };
 
         // Names/Types
-        using Future_wait_vector = std::vector<Future_wait>;
-        using Future_wait_index = std::vector<Future_wait_vector::size_type>;
+        using Future_waits      = std::vector<Future_wait>;
+        using Future_wait_index = std::vector<Future_waits::size_type>;
 
         class Channel_locks {
         public:
@@ -342,7 +342,7 @@ private:
             Channel_locks& operator=(const Channel_locks&) = delete;
 
             // Lock/Unlock
-            void acquire(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&);
+            void acquire(const Future_wait_index&, const Future_waits&, const Channel_waits&);
             void release();
 
             // Conversions
@@ -350,60 +350,60 @@ private:
 
         private:
             // Names/Types
-            using Channel_vector = std::vector<Channel_base*>;
+            using Channels = std::vector<Channel_base*>;
 
             // Channel Processing
-            template<class F> static void   for_each_unique(const Channel_vector&, F func);
-            static void                     transform(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&, Channel_vector*);
-            static void                     sort(Channel_vector*);
-            static void                     lock(const Channel_vector&);
-            static void                     unlock(const Channel_vector&);
+            template<class F> static void   for_each_unique(const Channels&, F func);
+            static void                     transform(const Future_wait_index&, const Future_waits&, const Channel_waits&, Channels*);
+            static void                     sort(Channels*);
+            static void                     lock(const Channels&);
+            static void                     unlock(const Channels&);
             static void                     lock_channel(Channel_base*);
             static void                     unlock_channel(Channel_base*);
 
             // Data
-            Channel_vector channels;
+            Channels chans;
         };
 
         struct dequeue_from_locked {
             // Construct/Apply
-            dequeue_from_locked(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
+            dequeue_from_locked(Task::Promise*, const Future_waits&, const Channel_waits&);
             Channel_size operator()(Channel_size n, Channel_size i) const;
 
             // Data
-            Task::Promise*              taskp;
-            const Future_wait_vector&   fwaits;
-            const Channel_wait_vector&  cwaits;
+            Task::Promise*          taskp;
+            const Future_waits&     fwaits;
+            const Channel_waits&    cwaits;
         };
 
         struct dequeue_from_unlocked {
             // Construct/Apply
-            dequeue_from_unlocked(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
+            dequeue_from_unlocked(Task::Promise*, const Future_waits&, const Channel_waits&);
             Channel_size operator()(Channel_size n, Channel_size i) const;
 
             // Data
-            Task::Promise*              taskp;
-            const Future_wait_vector&   fwaits;
-            const Channel_wait_vector&  cwaits;
+            Task::Promise*          taskp;
+            const Future_waits&     fwaits;
+            const Channel_waits&    cwaits;
         };
 
         struct enqueue_not_ready {
             // Construct/Apply
-            enqueue_not_ready(Task::Promise*, const Future_wait_vector&, const Channel_wait_vector&);
+            enqueue_not_ready(Task::Promise*, const Future_waits&, const Channel_waits&);
             Channel_size operator()(Channel_size n, Channel_size i) const;
 
             // Data
-            Task::Promise*              taskp;
-            const Future_wait_vector&   fwaits;
-            const Channel_wait_vector&  cwaits;
+            Task::Promise*          taskp;
+            const Future_waits&     fwaits;
+            const Channel_waits&    cwaits;
         };
 
-        class Future_set {
+        class Wait_set {
         public:
             // Construct/Copy
-            Future_set() = default;
-            Future_set(const Future_set&) = delete;
-            Future_set& operator=(const Future_set&) = delete;
+            Wait_set() = default;
+            Wait_set(const Wait_set&) = delete;
+            Wait_set& operator=(const Wait_set&) = delete;
 
             // Modifiers
             template<class T> void assign(const Future<T>*, const Future<T>*);
@@ -427,24 +427,24 @@ private:
 
         private:
             // Assignment
-            static void                     init(Future_wait_index*, const Future_wait_vector&);
-            static void                     index_unique(const Future_wait_vector&, Future_wait_index*);
-            static void                     remove_duplicates(Future_wait_index*, const Future_wait_vector&);
-            static void                     sort(Future_wait_index*, const Future_wait_vector&);
-            template<class T> static void   transform(const Future<T>*, const Future<T>*, Future_wait_vector*, Channel_wait_vector*);
+            static void                     init(Future_wait_index*, const Future_waits&);
+            static void                     index_unique(const Future_waits&, Future_wait_index*);
+            static void                     remove_duplicates(Future_wait_index*, const Future_waits&);
+            static void                     sort(Future_wait_index*, const Future_waits&);
+            template<class T> static void   transform(const Future<T>*, const Future<T>*, Future_waits*, Channel_waits*);
 
             // Enqueue/Dequeue
-            static Channel_size dequeue_locked(Task::Promise*, const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&);
-            static Channel_size dequeue_unlocked(Task::Promise*, const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&);
+            static Channel_size dequeue_locked(Task::Promise*, const Future_wait_index&, const Future_waits&, const Channel_waits&);
+            static Channel_size dequeue_unlocked(Task::Promise*, const Future_wait_index&, const Future_waits&, const Channel_waits&);
 
             // Completion
-            static Channel_size             count_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&);
-            static optional<Channel_size>   pick_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&, Channel_size nready);
-            static Channel_size             get_ready(const Future_wait_index&, const Future_wait_vector&, const Channel_wait_vector&, Channel_size n);
+            static Channel_size             count_ready(const Future_wait_index&, const Future_waits&, const Channel_waits&);
+            static optional<Channel_size>   pick_ready(const Future_wait_index&, const Future_waits&, const Channel_waits&, Channel_size nready);
+            static Channel_size             get_ready(const Future_wait_index&, const Future_waits&, const Channel_waits&, Channel_size n);
 
             // Data
-            Future_wait_vector  fwaits;
-            Channel_wait_vector cwaits;
+            Future_waits        futures;
+            Channel_waits       channels;
             Future_wait_index   index;
             Channel_size        nenqueued; // futures
             Channel_locks       locks;
@@ -453,14 +453,14 @@ private:
         class Wait_setup {
         public:
             // Construct/Copy/Destroy
-            template<class T> Wait_setup(const Future<T>*, const Future<T>*, Future_set*);
+            template<class T> Wait_setup(const Future<T>*, const Future<T>*, Wait_set*);
             Wait_setup(const Wait_setup&) = delete;
             Wait_setup& operator=(const Wait_setup&) = delete;
             ~Wait_setup();
 
         private:
             // Data
-            Future_set* futuresp;
+            Wait_set* waitsp;
         };
 
         class Timer {
@@ -487,13 +487,13 @@ private:
         };
 
         // Selection
-        static bool is_ready(const Future_set&, Timer);
+        static bool is_ready(const Wait_set&, Timer);
 
         // Data
-        Future_set              futures;
-        Channel_size            npending;
+        Wait_set                waits;
         Timer                   timer;
-        optional<Channel_size>  result;
+        Channel_size            npending;
+        optional<Channel_size>  ready;
     };
 
     // Names/Types

@@ -143,6 +143,14 @@ Task::Future_selector::Future_wait::Future_wait(bool* readyp, Channel_size vchan
 }
 
 
+inline void
+Task::Future_selector::Future_wait::enqueue(Task::Promise* taskp, const Channel_waits& chans) const
+{
+    chans[vpos].enqueue(taskp, vpos);
+    chans[epos].enqueue(taskp, epos);
+}
+
+
 inline Channel_size
 Task::Future_selector::Future_wait::error() const
 {
@@ -150,16 +158,8 @@ Task::Future_selector::Future_wait::error() const
 }
 
 
-inline void
-Task::Future_selector::Future_wait::enqueue(Task::Promise* taskp, const Channel_wait_vector& chans) const
-{
-    chans[vpos].enqueue(taskp, vpos);
-    chans[epos].enqueue(taskp, epos);
-}
-
-
 inline bool
-Task::Future_selector::Future_wait::is_ready(const Channel_wait_vector& chans) const
+Task::Future_selector::Future_wait::is_ready(const Channel_waits& chans) const
 {
     if (!*signalp && (chans[vpos].is_ready() || chans[epos].is_ready()))
         *signalp = true;
@@ -199,58 +199,58 @@ Task::Future_selector::Future_wait::value() const
 */
 template<class T>
 inline
-Task::Future_selector::Wait_setup::Wait_setup(const Future<T>* first, const Future<T>* last, Future_set* fsp)
-    : futuresp(fsp)
+Task::Future_selector::Wait_setup::Wait_setup(const Future<T>* first, const Future<T>* last, Wait_set* wsp)
+    : waitsp(wsp)
 {
-    futuresp->assign(first, last);
-    futuresp->lock_channels();
+    waitsp->assign(first, last);
+    waitsp->lock_channels();
 }
 
 
 inline
 Task::Future_selector::Wait_setup::~Wait_setup()
 {
-    futuresp->unlock_channels();
+    waitsp->unlock_channels();
 }
 
 
 /*
-    Task Future Selector Future Set
+    Task Future Selector Wait Set
 */
 template<class T>
 void
-Task::Future_selector::Future_set::assign(const Future<T>* first, const Future<T>* last)
+Task::Future_selector::Wait_set::assign(const Future<T>* first, const Future<T>* last)
 {
-    transform(first, last, &fwaits, &cwaits);
-    index_unique(fwaits, &index);
+    transform(first, last, &futures, &channels);
+    index_unique(futures, &index);
     nenqueued = 0;
 }
 
 
 inline Channel_size
-Task::Future_selector::Future_set::enqueued() const
+Task::Future_selector::Wait_set::enqueued() const
 {
     return nenqueued;
 }
 
 
 inline bool
-Task::Future_selector::Future_set::is_empty() const
+Task::Future_selector::Wait_set::is_empty() const
 {
-    return fwaits.empty();
+    return futures.empty();
 }
 
 
 inline Channel_size
-Task::Future_selector::Future_set::size() const
+Task::Future_selector::Wait_set::size() const
 {
-    return fwaits.size();
+    return futures.size();
 }
 
 
 template<class T>
 void
-Task::Future_selector::Future_set::transform(const Future<T>* first, const Future<T>* last, Future_wait_vector* fwaitsp, Channel_wait_vector* cwaitsp)
+Task::Future_selector::Wait_set::transform(const Future<T>* first, const Future<T>* last, Future_waits* fwaitsp, Channel_waits* cwaitsp)
 {
     const auto nfs = last - first;
 
@@ -291,7 +291,7 @@ Task::Future_selector::Timer::start(Task::Promise* taskp, Duration duration) con
 inline bool
 Task::Future_selector::is_selected() const
 {
-    return result ? true : false;
+    return ready ? true : false;
 }
 
 
@@ -301,18 +301,18 @@ Task::Future_selector::select_all(Task::Promise* taskp, const Future<T>* first, 
 {
     using std::literals::chrono_literals::operator""ns;
 
-    const Wait_setup setup{first, last, &futures};
+    const Wait_setup setup{first, last, &waits};
 
-    result.reset();
-    npending = futures.enqueue(taskp);
+    ready.reset();
+    npending = waits.enqueue(taskp);
     if (npending == 0) {
-        if (!futures.is_empty())
-            result = futures.size(); // all futures are ready
+        if (!waits.is_empty())
+            ready = waits.size();  // all futures are ready
     } else if (maxtime) {
         if (*maxtime > 0ns)
             timer.start(taskp, *maxtime);
         else {
-            futures.dequeue(taskp);
+            waits.dequeue(taskp);
             npending = 0;
         }
     }
@@ -327,17 +327,17 @@ Task::Future_selector::select_any(Task::Promise* taskp, const Future<T>* first, 
 {
     using std::literals::chrono_literals::operator""ns;
 
-    const Wait_setup setup{first, last, &futures};
+    const Wait_setup setup{first, last, &waits};
 
     npending = 0;
-    result = futures.select_ready();
-    if (!result) {
+    ready = waits.select_ready();
+    if (!ready) {
         if (!maxtime)
-            futures.enqueue(taskp);
-        else if (*maxtime > 0ns && futures.enqueue(taskp))
+            waits.enqueue(taskp);
+        else if (*maxtime > 0ns && waits.enqueue(taskp))
             timer.start(taskp, *maxtime);
 
-        if (futures.enqueued())
+        if (waits.enqueued())
             npending = 1;
     }
 
@@ -348,7 +348,7 @@ Task::Future_selector::select_any(Task::Promise* taskp, const Future<T>* first, 
 inline optional<Channel_size>
 Task::Future_selector::selection() const
 {
-    return result;
+    return ready;
 }
 
 
